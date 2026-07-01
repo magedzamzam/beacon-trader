@@ -1,0 +1,26 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #0b0e14; --panel: #121722; --panel-2: #0f141d; --edge: #1e2633;
+  --ink: #e6eaf2; --muted: #8a93a6;
+  --beacon: #34e1c4; --long: #21d07a; --short: #ff5c6c; --warn: #f5a524;
+}
+:root:not(.dark) {
+  --bg: #f5f7fa; --panel: #ffffff; --panel-2: #eef2f7; --edge: #e2e7ef;
+  --ink: #10151f; --muted: #5c6675;
+  --beacon: #0bb39a; --long: #12a85e; --short: #e23b4a; --warn: #c77b00;
+}
+html, body, #root { height: 100%; }
+body { background: var(--bg); color: var(--ink); font-family: Inter, system-ui, sans-serif; }
+.num { font-family: "JetBrains Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+
+/* Signature: the beacon pulse — a slow radar sweep that reads "alive". */
+@keyframes beacon-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--beacon) 55%, transparent); }
+  70% { box-shadow: 0 0 0 10px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+.beacon-dot { animation: beacon-pulse 2.4s ease-out infinite; }
+@media (prefers-reduced-motion: reduce) { .beacon-dot { animation: none; } }
