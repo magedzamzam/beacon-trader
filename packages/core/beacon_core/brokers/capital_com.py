@@ -167,6 +167,23 @@ class CapitalComAdapter(BrokerAdapter):
             raw=a,
         )
 
+    async def list_accounts(self) -> List[dict]:
+        """All accounts on the login (for the 'add account' picker)."""
+        data = await self._request("GET", "/api/v1/accounts")
+        out = []
+        for a in data.get("accounts") or []:
+            bal = a.get("balance") or {}
+            out.append({
+                "broker_account_id": str(a.get("accountId") or ""),
+                "name": a.get("accountName") or a.get("accountId") or "",
+                "currency": bal.get("currency") or a.get("currency") or "USD",
+                "balance": str(to_dec(bal.get("balance")) or ""),
+                "available": str(to_dec(bal.get("available")) or ""),
+                "preferred": bool(a.get("preferred")),
+                "status": a.get("status"),
+            })
+        return out
+
     async def list_positions(self) -> List[BrokerPosition]:
         data = await self._request("GET", "/api/v1/positions")
         out: List[BrokerPosition] = []

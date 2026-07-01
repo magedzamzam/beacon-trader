@@ -27,6 +27,10 @@ class BrokerAdapter(abc.ABC):
     @abc.abstractmethod
     async def healthcheck(self) -> dict: ...
 
+    async def list_accounts(self) -> list:
+        """All accounts on the login. Override per broker."""
+        raise NotImplementedError
+
     @abc.abstractmethod
     async def get_account_info(self) -> AccountInfo: ...
 

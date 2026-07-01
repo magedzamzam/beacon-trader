@@ -38,3 +38,11 @@ async def update_source(source_id: int, body: dict, db: AsyncSession = Depends(g
             setattr(s, k, body[k])
     await db.commit()
     return _dump(s)
+
+
+@router.delete("/{source_id}")
+async def delete_source(source_id: int, db: AsyncSession = Depends(get_db)):
+    s = await db.get(Source, source_id)
+    if s:
+        await db.delete(s); await db.commit()
+    return {"ok": True}

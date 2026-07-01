@@ -32,3 +32,11 @@ async def update_account(account_id: int, body: dict, db: AsyncSession = Depends
             setattr(a, k, body[k])
     await db.commit()
     return {"ok": True}
+
+
+@router.delete("/{account_id}")
+async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
+    a = await db.get(Account, account_id)
+    if a:
+        await db.delete(a); await db.commit()
+    return {"ok": True}

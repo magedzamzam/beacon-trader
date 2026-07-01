@@ -7,9 +7,12 @@ import History from "./pages/History";
 import Performance from "./pages/Performance";
 import Sources from "./pages/Sources";
 import Brokers from "./pages/Brokers";
+import Symbols from "./pages/Symbols";
+import Risk from "./pages/Risk";
 
 const PAGES = { dashboard: Dashboard, positions: Positions, signals: Signals,
-  history: History, performance: Performance, sources: Sources, brokers: Brokers };
+  history: History, performance: Performance, sources: Sources, brokers: Brokers,
+  symbols: Symbols, risk: Risk };
 
 export default function App() {
   const [view, setView] = useState("dashboard");

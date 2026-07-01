@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Activity, BarChart3, Radio, Radar, ListChecks, Rss,
-         Building2, Moon, Sun, KeyRound } from "lucide-react";
+         Building2, Moon, Sun, KeyRound, ShieldCheck, Coins } from "lucide-react";
 import { api, getToken, setToken } from "../lib/api";
 import { toggleTheme } from "../lib/theme";
 
@@ -10,8 +10,10 @@ const NAV = [
   { id: "signals", label: "Signals", icon: Radio },
   { id: "history", label: "History", icon: ListChecks },
   { id: "performance", label: "Performance", icon: BarChart3 },
+  { id: "risk", label: "Risk", icon: ShieldCheck },
   { id: "sources", label: "Sources", icon: Rss },
   { id: "brokers", label: "Brokers", icon: Building2 },
+  { id: "symbols", label: "Symbols", icon: Coins },
 ];
 
 function HealthPulse() {

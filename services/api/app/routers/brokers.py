@@ -37,3 +37,39 @@ async def broker_health(broker_id: int, db: AsyncSession = Depends(get_db)):
         return await adapter.healthcheck()
     finally:
         await adapter.aclose()
+
+
+@router.get("/{broker_id}/accounts")
+async def broker_live_accounts(broker_id: int, db: AsyncSession = Depends(get_db)):
+    """Fetch the account list live from the broker (for the add-account picker)."""
+    b = await db.get(Broker, broker_id)
+    if not b:
+        raise HTTPException(404, "broker not found")
+    creds = resolve_credentials(b.credentials_ref); creds.setdefault("is_demo", b.is_demo)
+    adapter = get_adapter(b.type, creds)
+    try:
+        return await adapter.list_accounts()
+    except Exception as exc:
+        raise HTTPException(502, f"broker fetch failed: {exc}")
+    finally:
+        await adapter.aclose()
+
+
+@router.patch("/{broker_id}")
+async def update_broker(broker_id: int, body: dict, db: AsyncSession = Depends(get_db)):
+    b = await db.get(Broker, broker_id)
+    if not b:
+        raise HTTPException(404, "broker not found")
+    for k in ("name", "is_demo", "enabled", "credentials_ref"):
+        if k in body:
+            setattr(b, k, body[k])
+    await db.commit()
+    return {"ok": True}
+
+
+@router.delete("/{broker_id}")
+async def delete_broker(broker_id: int, db: AsyncSession = Depends(get_db)):
+    b = await db.get(Broker, broker_id)
+    if b:
+        await db.delete(b); await db.commit()
+    return {"ok": True}

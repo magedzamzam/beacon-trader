@@ -24,3 +24,21 @@ async def list_symbols(db: AsyncSession = Depends(get_db)):
 async def create_symbol(body: SymbolMapIn, db: AsyncSession = Depends(get_db)):
     s = SymbolMap(**body.model_dump()); db.add(s); await db.commit()
     return {"id": s.id}
+
+
+@router.patch("/{symbol_id}")
+async def update_symbol(symbol_id: int, body: dict, db: AsyncSession = Depends(get_db)):
+    s = await db.get(SymbolMap, symbol_id)
+    for k in ("broker_epic", "value_per_point", "min_lot", "lot_step", "min_stop_distance"):
+        if k in body:
+            setattr(s, k, body[k])
+    await db.commit()
+    return {"ok": True}
+
+
+@router.delete("/{symbol_id}")
+async def delete_symbol(symbol_id: int, db: AsyncSession = Depends(get_db)):
+    s = await db.get(SymbolMap, symbol_id)
+    if s:
+        await db.delete(s); await db.commit()
+    return {"ok": True}
