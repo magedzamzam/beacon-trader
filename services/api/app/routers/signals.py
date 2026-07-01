@@ -14,14 +14,19 @@ router = APIRouter(tags=["signals"])
 
 @router.get("/signals", dependencies=[Depends(require_token)])
 async def list_signals(db: AsyncSession = Depends(get_db), limit: int = 100):
-    rows = (await db.execute(select(Signal).order_by(Signal.id.desc()).limit(limit))).scalars().all()
-    return [{"id": s.id, "source_id": s.source_id, "symbol": s.symbol,
+    q = (select(Signal, Source.name, Source.kind)
+         .outerjoin(Source, Source.id == Signal.source_id)
+         .order_by(Signal.id.desc()).limit(limit))
+    rows = (await db.execute(q)).all()
+    return [{"id": s.id, "source_id": s.source_id,
+             "source_name": sname or "—", "source_kind": skind,
+             "symbol": s.symbol,
              "direction": s.direction, "entry_from": float(s.entry_from),
              "entry_to": float(s.entry_to), "sl": float(s.sl), "tps": s.tps,
              "order_type": s.order_type, "status": s.status,
              "reject_reason": s.reject_reason,
              "created_at": s.created_at.isoformat() if s.created_at else None}
-            for s in rows]
+            for (s, sname, skind) in rows]
 
 
 @router.post("/signals/manual", dependencies=[Depends(require_token)])

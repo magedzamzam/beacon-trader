@@ -51,6 +51,9 @@ export const api = {
   createSymbol: (s) => post("/symbols", s),
   updateSymbol: (id, s) => patch(`/symbols/${id}`, s),
   deleteSymbol: (id) => del(`/symbols/${id}`),
+  // legs
+  cancelLeg: (id) => post(`/legs/${id}/cancel`, {}),
+  closeLeg: (id) => post(`/legs/${id}/close`, {}),
   // sources
   createSource: (s) => post("/sources", s),
   updateSource: (id, s) => patch(`/sources/${id}`, s),

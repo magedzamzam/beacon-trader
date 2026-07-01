@@ -20,6 +20,7 @@ from beacon_core.db.base import Session, init_models
 from beacon_core.db.models import (Account, Broker, Event, Leg, Signal,
                                    SymbolMap, Source, Trade)
 from beacon_core.brokers import get_adapter, resolve_credentials
+from beacon_core.brokers import fx
 from beacon_core.brokers.types import (OrderSide, OrderType, PlaceOrderRequest)
 from beacon_core.parsing.models import ParsedSignal
 from beacon_core.execution.planner import build_plan
@@ -95,11 +96,23 @@ async def _execute_on_account(session, sig, parsed, source, acct,
     try:
         info = await adapter.get_account_info()
         equity = info.balance or Decimal("0")
+        account_ccy = info.currency or acct.currency or "USD"
         quote = await adapter.get_quote(smap.broker_epic)
         side_buy = parsed.direction == "BUY"
         current = (quote.offer if side_buy else quote.bid) or quote.last_price
         if current is None:
             log.warning("no price for %s; skipping account %s", smap.broker_epic, acct.id)
+            return
+
+        # Instrument currency comes from the broker market; convert account->instr.
+        instrument_ccy = quote.currency or "USD"
+        try:
+            fx_factor = await fx.factor(adapter, account_ccy, instrument_ccy)
+        except fx.FxUnavailable as exc:
+            log.warning("signal %s acct %s: %s — skipping (won't mis-size)",
+                        sig.id, acct.id, exc)
+            session.add(Event(kind="fx_unavailable",
+                              payload={"account_id": acct.id, "error": str(exc)}))
             return
 
         plan = build_plan(
@@ -113,7 +126,8 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             min_lot=Decimal(str(smap.min_lot)),
             lot_step=Decimal(str(smap.lot_step)),
         )
-        size_legs(plan.legs, equity=equity, risk=risk, instrument=instrument)
+        size_legs(plan.legs, equity=equity, risk=risk, instrument=instrument,
+                  fx_factor=fx_factor)
         valid = plan.valid_legs
         if not valid:
             log.info("signal %s acct %s: no legs survived sizing", sig.id, acct.id)

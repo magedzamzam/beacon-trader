@@ -11,13 +11,15 @@ export default function Signals() {
       <div className="px-4 py-3 border-b border-edge text-sm font-medium">Signal feed</div>
       <table className="w-full">
         <thead><tr className="border-b border-edge">
-          <Th>#</Th><Th>Symbol</Th><Th>Side</Th><Th right>Entry</Th><Th right>SL</Th>
+          <Th>#</Th><Th>Provider</Th><Th>Symbol</Th><Th>Side</Th><Th right>Entry</Th><Th right>SL</Th>
           <Th>TPs</Th><Th>Type</Th><Th>Status</Th>
         </tr></thead>
         <tbody>
           {data.map(s => (
             <tr key={s.id} className="border-b border-edge/60">
-              <Td mono>{s.id}</Td><Td>{s.symbol}</Td>
+              <Td mono>{s.id}</Td>
+              <Td>{s.source_name}{s.source_kind && <span className="text-[10px] text-muted ml-1">{s.source_kind}</span>}</Td>
+              <Td>{s.symbol}</Td>
               <Td><Badge tone={s.direction === "BUY" ? "long" : "short"}>{s.direction}</Badge></Td>
               <Td right mono>{s.entry_from}{s.entry_to !== s.entry_from ? `–${s.entry_to}` : ""}</Td>
               <Td right mono>{s.sl}</Td>

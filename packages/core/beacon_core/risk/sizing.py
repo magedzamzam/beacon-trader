@@ -58,9 +58,14 @@ def _round_lot(lot: Decimal, step: Decimal) -> Decimal:
 
 
 def size_legs(legs: List[PlannedLeg], *, equity: Decimal, risk: RiskConfig,
-              instrument: InstrumentSpec) -> List[PlannedLeg]:
+              instrument: InstrumentSpec, fx_factor: Decimal = Decimal(1)) -> List[PlannedLeg]:
     """Fill lot / risk_cash on each valid leg. Legs whose lot rounds below
-    min_lot are marked invalid (dropped) rather than silently over-risked."""
+    min_lot are marked invalid (dropped) rather than silently over-risked.
+
+    equity and the risk budget are in ACCOUNT currency; value_per_point is in
+    the INSTRUMENT's currency. fx_factor converts account -> instrument currency
+    (1 when they match), so lots come out correct for USD or non-USD accounts.
+    """
     active = [l for l in legs if l.valid]
     n = len(active) or 1
 
@@ -78,20 +83,24 @@ def size_legs(legs: List[PlannedLeg], *, equity: Decimal, risk: RiskConfig,
         else:
             risk_cash = budget / Decimal(n)
 
+        # Convert the account-currency risk into instrument-currency terms.
+        risk_cash_instr = risk_cash * fx_factor
+
         distance = abs(leg.entry - leg.sl)
         if distance <= 0:
             leg.valid = False
             leg.skip_reason = "zero entry/SL distance"
             continue
 
-        raw_lot = risk_cash / (distance * instrument.value_per_point)
+        raw_lot = risk_cash_instr / (distance * instrument.value_per_point)
         lot = _round_lot(raw_lot, instrument.lot_step)
         if lot < instrument.min_lot:
             leg.valid = False
             leg.skip_reason = f"lot {lot} below min {instrument.min_lot}"
             continue
         leg.lot = lot
-        leg.risk_cash = (lot * distance * instrument.value_per_point)
+        # Store risk back in ACCOUNT currency for reporting consistency.
+        leg.risk_cash = (lot * distance * instrument.value_per_point) / fx_factor
     return legs
 
 

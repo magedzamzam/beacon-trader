@@ -99,15 +99,45 @@ async def _process_trade(session, trade) -> None:
         rules, strat, ttl_min = await _rules_for(session, trade)
         tps_hit = _tps_hit(trade.direction, price, legs)
 
+        # positions already linked to an open leg of this trade (so we don't
+        # re-claim them when deciding whether a vanished order was filled).
+        linked_refs = {l.broker_position_ref for l in legs
+                       if l.status == "open" and l.broker_position_ref}
+
+        def _find_fill():
+            """An open position on this epic+direction not yet linked -> a fill."""
+            for ref, p in positions.items():
+                if ref in linked_refs:
+                    continue
+                if (p.broker_symbol == smap.broker_epic
+                        and str(p.direction).endswith(trade.direction)):
+                    return ref
+            return None
+
+        def _near(target: Decimal) -> bool:
+            tol = Decimal(str(smap.min_stop_distance or "0")) or (abs(target) * Decimal("0.0005"))
+            return abs(price - target) <= tol
+
         for leg in legs:
             # --- reconcile working (limit) legs ---
             if leg.status == "working":
                 if leg.broker_order_ref not in orders:
-                    # order left the book: filled or cancelled. Best-effort:
-                    # if a position now matches, treat as opened.
-                    leg.status = "open"
-                    session.add(Event(trade_id=trade.id, leg_id=leg.id,
-                                      kind="filled_or_gone", payload={}))
+                    # Left the book: either filled (a new position appears) or
+                    # cancelled/deleted at the broker. Distinguish, don't assume.
+                    fill_ref = _find_fill()
+                    if fill_ref:
+                        leg.broker_position_ref = fill_ref
+                        leg.status = "open"
+                        linked_refs.add(fill_ref)
+                        session.add(Event(trade_id=trade.id, leg_id=leg.id,
+                                          kind="filled", payload={"position": fill_ref}))
+                    else:
+                        leg.status = "cancelled"
+                        leg.outcome = "cancelled"
+                        leg.closed_at = _utcnow()
+                        session.add(Event(trade_id=trade.id, leg_id=leg.id,
+                                          kind="cancelled_at_broker", payload={}))
+                    continue
                 else:
                     # TTL: cancel stale unfilled entries.
                     age = (_utcnow() - leg.created_at).total_seconds() / 60.0
@@ -126,11 +156,17 @@ async def _process_trade(session, trade) -> None:
             # --- reconcile open positions: detect close ---
             if leg.status == "open" and leg.broker_position_ref:
                 if leg.broker_position_ref not in positions:
-                    # position gone => closed. Attribute by nearest level (approx).
+                    # Position gone. Attribute: near TP -> tp_hit, near SL ->
+                    # sl_hit, otherwise a manual/broker-side close.
                     tp = Decimal(str(leg.tp)); sl = Decimal(str(leg.sl))
                     tp_reached = (price >= tp) if trade.direction == "BUY" else (price <= tp)
-                    leg.outcome = "tp_hit" if tp_reached else "sl_hit"
-                    leg.close_price = tp if tp_reached else sl
+                    sl_reached = (price <= sl) if trade.direction == "BUY" else (price >= sl)
+                    if tp_reached or _near(tp):
+                        leg.outcome = "tp_hit"; leg.close_price = tp
+                    elif sl_reached or _near(sl):
+                        leg.outcome = "sl_hit"; leg.close_price = sl
+                    else:
+                        leg.outcome = "manual"; leg.close_price = price
                     dist = (leg.close_price - Decimal(str(leg.entry)))
                     if trade.direction == "SELL":
                         dist = -dist

@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from beacon_core.db.base import init_models
 from beacon_core.logging import get_logger
-from .routers import (accounts, brokers, dashboard, health, performance,
+from .routers import (accounts, brokers, dashboard, health, legs, performance,
                       signals, sources, symbols, trades)
 
 log = get_logger("api")
@@ -23,7 +23,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
 
 for r in (health.router, dashboard.router, brokers.router, accounts.router,
           symbols.router, sources.router, signals.router, trades.router,
-          performance.router):
+          legs.router, performance.router):
     app.include_router(r)
 
 
