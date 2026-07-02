@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Activity, BarChart3, Radio, Radar, ListChecks, Rss,
          Building2, Moon, Sun, KeyRound, ShieldCheck, Coins, CandlestickChart,
-         MessageSquare, Sparkles, GitBranch, LogOut } from "lucide-react";
+         MessageSquare, Sparkles, GitBranch, LogOut, Menu, X } from "lucide-react";
 import { api, getToken, setToken, clearToken } from "../lib/api";
 import { toggleTheme } from "../lib/theme";
 
@@ -46,20 +46,44 @@ export default function Layout({ view, setView, children }) {
   const [dark, setDark] = useState(document.documentElement.classList.contains("dark"));
   const [tokenOpen, setTokenOpen] = useState(!getToken());
   const [tok, setTok] = useState(getToken());
+  const [navOpen, setNavOpen] = useState(false);
+
+  // Close the mobile drawer on Escape for keyboard/accessibility parity.
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") setNavOpen(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const go = (id) => { setView(id); setNavOpen(false); };
 
   return (
     <div className="min-h-screen flex">
-      <aside className="w-60 shrink-0 border-r border-edge bg-panel2 flex flex-col">
+      {/* Backdrop — only present while the drawer is open on mobile */}
+      {navOpen && (
+        <div onClick={() => setNavOpen(false)}
+          className="fixed inset-0 z-30 bg-black/50 md:hidden" aria-hidden="true" />
+      )}
+
+      <aside className={`fixed inset-y-0 left-0 z-40 w-60 shrink-0 border-r border-edge bg-panel2
+          flex flex-col transition-transform duration-200 ease-out
+          md:static md:z-auto md:translate-x-0
+          ${navOpen ? "translate-x-0" : "-translate-x-full"}`}>
         <div className="px-5 py-5 flex items-center gap-2.5 border-b border-edge">
           <Radar className="w-5 h-5 text-beacon" />
           <div>
             <div className="font-semibold tracking-tight leading-none">Beacon</div>
             <div className="text-[10px] uppercase tracking-[0.2em] text-muted mt-1">Trader</div>
           </div>
+          <button onClick={() => setNavOpen(false)}
+            className="ml-auto p-1.5 rounded-lg text-muted hover:text-ink hover:bg-panel md:hidden"
+            title="Close menu" aria-label="Close menu">
+            <X className="w-4 h-4" />
+          </button>
         </div>
-        <nav className="p-2 flex-1">
+        <nav className="p-2 flex-1 overflow-y-auto">
           {NAV.map(({ id, label, icon: Icon }) => (
-            <button key={id} onClick={() => setView(id)}
+            <button key={id} onClick={() => go(id)}
               className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm mb-0.5 transition
                 ${view === id ? "bg-beacon/10 text-beacon" : "text-muted hover:text-ink hover:bg-panel"}`}>
               <Icon className="w-4 h-4" /> {label}
@@ -70,8 +94,15 @@ export default function Layout({ view, setView, children }) {
       </aside>
 
       <div className="flex-1 flex flex-col min-w-0">
-        <header className="h-14 border-b border-edge flex items-center justify-between px-6">
-          <div className="text-sm font-medium capitalize">{view}</div>
+        <header className="h-14 border-b border-edge flex items-center justify-between px-4 md:px-6">
+          <div className="flex items-center gap-2 min-w-0">
+            <button onClick={() => setNavOpen(true)}
+              className="p-2 -ml-2 rounded-lg text-muted hover:text-ink hover:bg-panel md:hidden"
+              title="Menu" aria-label="Open menu">
+              <Menu className="w-5 h-5" />
+            </button>
+            <div className="text-sm font-medium capitalize truncate">{view}</div>
+          </div>
           <div className="flex items-center gap-2">
             <button onClick={() => setTokenOpen(v => !v)}
               className="p-2 rounded-lg text-muted hover:text-ink hover:bg-panel" title="API token">
@@ -89,17 +120,17 @@ export default function Layout({ view, setView, children }) {
         </header>
 
         {tokenOpen && (
-          <div className="px-6 py-3 border-b border-edge bg-panel2 flex items-center gap-3">
+          <div className="px-4 md:px-6 py-3 border-b border-edge bg-panel2 flex flex-wrap items-center gap-2 sm:gap-3">
             <span className="text-xs text-muted">API token</span>
             <input value={tok} onChange={e => setTok(e.target.value)} type="password"
               placeholder="paste API_TOKEN"
-              className="flex-1 bg-panel border border-edge rounded-lg px-3 py-1.5 text-sm num" />
+              className="flex-1 min-w-[10rem] bg-panel border border-edge rounded-lg px-3 py-1.5 text-sm num" />
             <button onClick={() => { setToken(tok); setTokenOpen(false); location.reload(); }}
               className="px-3 py-1.5 rounded-lg bg-beacon/15 text-beacon text-sm font-medium">Save</button>
           </div>
         )}
 
-        <main className="p-6 flex-1 overflow-auto">{children}</main>
+        <main className="p-4 md:p-6 flex-1 overflow-auto">{children}</main>
       </div>
     </div>
   );
