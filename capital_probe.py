@@ -112,11 +112,16 @@ class Capital:
             h.update(extra)
         return h
 
-    def login(self, max_retries: int = 5) -> dict:
+    def login(self, max_retries: int = 4) -> dict:
         print(f"Base URL : {self.base}  ({'DEMO' if self.demo else 'LIVE'})")
         print(f"API key  : {mask(self.api_key)}")
         print(f"Username : {self.username}")
-        delay = 5
+        start_wait = int(os.environ.get("CAP_START_WAIT", "0"))
+        if start_wait:
+            print(f"  waiting {start_wait}s before first attempt (letting the "
+                  f"throttle window clear)…")
+            time.sleep(start_wait)
+        delay = 30
         for attempt in range(1, max_retries + 1):
             r = self._c.post("/api/v1/session",
                              headers=self._headers(),
@@ -124,19 +129,28 @@ class Capital:
             if r.status_code == 200:
                 break
             if r.status_code == 429:
-                # Session-creation throttle. Usually means another client (your
-                # running Beacon services) is also creating sessions with this key.
-                print(f"  429 too-many-requests — waiting {delay}s "
-                      f"(attempt {attempt}/{max_retries}). "
-                      f"Tip: `docker compose stop executor monitor api` first.")
+                # Session-creation throttle, per API KEY. If the Beacon stack is
+                # already down and you still see this, another app (e.g. Beacon
+                # Screener's live WebSocket) is using the SAME key. Give it its
+                # own key, or idle everything ~5 min. NOTE: each attempt here can
+                # re-extend the window, so we retry slowly and few times.
+                if attempt == max_retries:
+                    break
+                print(f"  429 too-many-requests — attempt {attempt}/{max_retries}, "
+                      f"waiting {delay}s. If the stack is already down, another "
+                      f"app is sharing this API key (see Beacon Screener).")
                 time.sleep(delay)
-                delay = min(delay * 2, 60)
+                delay = min(delay * 2, 120)
                 continue
             dump("SESSION ERROR", {"status": r.status_code, "body": r.text})
             sys.exit("Login failed. Check credentials and demo/live mode.")
         else:
-            sys.exit("Still rate-limited after retries. Stop the Beacon stack "
-                     "and wait ~1–2 minutes, then try again.")
+            r = None
+        if r is None or r.status_code != 200:
+            sys.exit("Still rate-limited. Stop EVERY app using this API key "
+                     "(including Beacon Screener), leave it idle ~5 minutes with "
+                     "no probe runs, then try once. Better: create a separate "
+                     "Capital.com API key just for Beacon Trader.")
         self.cst = r.headers.get("CST")
         self.xst = r.headers.get("X-SECURITY-TOKEN")
         keyfields("session tokens", {"CST": mask(self.cst or ""),
