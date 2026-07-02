@@ -14,6 +14,7 @@ from sqlalchemy import select
 
 from beacon_core.ai import service as ai_service
 from beacon_core.bus import Bus
+from beacon_core.settings_store import get_setting
 from beacon_core.config import (CH_SIGNAL_VALID, CH_TRADE_OPENED, get_settings)
 from beacon_core.logging import get_logger
 from beacon_core.health import run_health_server
@@ -109,8 +110,10 @@ async def _execute_on_account(session, sig, parsed, source, acct,
 
         # Instrument currency comes from the broker market; convert account->instr.
         instrument_ccy = quote.currency or "USD"
+        fx_overrides = await get_setting(session, "fx", {}) or {}
         try:
-            fx_factor = await fx.factor(adapter, account_ccy, instrument_ccy)
+            fx_factor = await fx.factor(adapter, account_ccy, instrument_ccy,
+                                        overrides=fx_overrides)
         except fx.FxUnavailable as exc:
             log.warning("signal %s acct %s: %s — skipping (won't mis-size)",
                         sig.id, acct.id, exc)

@@ -27,7 +27,7 @@ from beacon_core.db.base import Session, init_models
 from beacon_core.db.models import (Account, Broker, Event, Leg, Signal, Source,
                                    SymbolMap, Trade)
 from beacon_core.brokers import get_adapter, resolve_credentials
-from beacon_core.brokers.types import ModifyPositionRequest
+from beacon_core.brokers.types import AuthError, ModifyPositionRequest
 from beacon_core.strategy.rules import PositionCtx, evaluate
 
 log = get_logger("monitor")
@@ -53,13 +53,33 @@ async def _rules_for(session, trade) -> tuple[list, dict, int]:
     return strat.get("sl_rules", []), strat, strat.get("entry_ttl_minutes", 60)
 
 
+# Persistent broker sessions, reused across ticks. Re-logging in (and switching
+# account) on every 5s tick floods Capital.com's /session rate limit and stalls
+# reconciliation. We keep one logged-in adapter per account and only rebuild it
+# on an auth failure.
+_ADAPTERS: dict = {}
+
+
 async def _adapter_for(session, account_id: int):
     acct = await session.get(Account, account_id)
     broker = await session.get(Broker, acct.broker_id)
-    creds = resolve_credentials(broker.credentials_ref)
-    creds.setdefault("is_demo", broker.is_demo)
-    creds["account_id"] = acct.broker_account_id   # reconcile the mapped account
-    return acct, broker, get_adapter(broker.type, creds)
+    adapter = _ADAPTERS.get(account_id)
+    if adapter is None:
+        creds = resolve_credentials(broker.credentials_ref)
+        creds.setdefault("is_demo", broker.is_demo)
+        creds["account_id"] = acct.broker_account_id   # reconcile the mapped account
+        adapter = get_adapter(broker.type, creds)
+        _ADAPTERS[account_id] = adapter
+    return acct, broker, adapter
+
+
+async def _evict_adapter(account_id: int) -> None:
+    adapter = _ADAPTERS.pop(account_id, None)
+    if adapter is not None:
+        try:
+            await adapter.aclose()
+        except Exception:
+            pass
 
 
 async def _symbol_map(session, broker_id, symbol):
@@ -305,8 +325,10 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                 await _analyze_outcome(session, trade, ai_cfg)
         elif closed:
             trade.status = "partial"
-    finally:
-        await adapter.aclose()
+    except AuthError:
+        # Session went bad — drop it so the next tick logs in fresh.
+        await _evict_adapter(trade.account_id)
+        raise
 
 
 async def tick() -> None:
