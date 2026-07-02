@@ -31,6 +31,11 @@ log = get_logger("executor")
 settings = get_settings()
 bus = Bus()
 
+# Defense-in-depth: sources whose name contains any of these tokens (case-insensitive)
+# are never allowed to place live orders, regardless of the DB enabled_for_trading flag.
+# Added by the PM bot (2026-07-02) after a "Test" source was found live and trusted.
+EXECUTION_NAME_BLOCKLIST = ("test", "sample", "demo")
+
 
 def _to_parsed(sig: Signal) -> ParsedSignal:
     return ParsedSignal(
@@ -64,6 +69,16 @@ async def handle_signal(signal_id: int) -> None:
         source = await session.get(Source, sig.source_id) if sig.source_id else None
         if not source or not source.enabled_for_trading:
             log.info("signal %s: source not enabled for trading; skipping", signal_id)
+            return
+
+        # Defense-in-depth guards (do not rely solely on the DB flag for real money).
+        if not source.is_trusted:
+            log.warning("signal %s: source %s (%s) not trusted; refusing live execution",
+                        signal_id, source.id, source.name)
+            return
+        if any(tok in (source.name or "").lower() for tok in EXECUTION_NAME_BLOCKLIST):
+            log.warning("signal %s: source %s name blocklisted (%s); refusing live execution",
+                        signal_id, source.id, source.name)
             return
 
         accounts = await _accounts_for(session, source)
