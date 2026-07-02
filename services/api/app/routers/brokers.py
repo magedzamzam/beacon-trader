@@ -92,6 +92,22 @@ async def update_broker(broker_id: int, body: dict, db: AsyncSession = Depends(g
     for k in ("name", "is_demo", "enabled", "credentials_ref"):
         if k in body:
             setattr(b, k, body[k])
+    # Allow replacing credentials with UI-entered secrets, stored encrypted —
+    # this is how you move Capital.com creds out of .env onto the broker.
+    if any(body.get(k) for k in ("api_key", "username", "password")):
+        if not has_key():
+            raise HTTPException(400, "SECRET_KEY is not set; cannot store secrets encrypted")
+        ref = dict(b.credentials_ref or {})
+        # drop any prior env/enc references so the two schemes don't mix
+        ref = {k: v for k, v in ref.items() if not (k.endswith("_env") or k.endswith("_enc"))}
+        ref["is_demo"] = b.is_demo
+        if body.get("api_key"):
+            ref["api_key_enc"] = encrypt(body["api_key"])
+        if body.get("username"):
+            ref["account_username_enc"] = encrypt(body["username"])
+        if body.get("password"):
+            ref["account_password_enc"] = encrypt(body["password"])
+        b.credentials_ref = ref
     await db.commit()
     return {"ok": True}
 

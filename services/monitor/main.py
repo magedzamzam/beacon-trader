@@ -88,6 +88,22 @@ async def _symbol_map(session, broker_id, symbol):
         SymbolMap.internal_symbol == symbol))).scalar_one_or_none()
 
 
+def _classify_outcome(close_px, entry_px, tp, sl, sl_moved, tol) -> str:
+    """Name a close from its level. A stop that was ratcheted to ~entry and then
+    hit is a BREAKEVEN, not a loss (P&L ~0) — so we don't report it as sl_hit."""
+    if close_px is None:
+        return "manual"
+    if abs(close_px - tp) <= tol:
+        return "tp_hit"
+    if sl_moved and abs(close_px - entry_px) <= tol:
+        return "breakeven"
+    if abs(close_px - sl) <= tol:
+        if sl_moved and abs(sl - entry_px) <= tol:
+            return "breakeven"
+        return "sl_hit"
+    return "manual"
+
+
 def _tps_hit(direction: str, price: Decimal, legs) -> set[int]:
     hit = set()
     for l in legs:
@@ -206,12 +222,74 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                 best["_used"] = True
             return best
 
+        def _match_any_trade(txns, lot: Decimal):
+            """Any closed broker trade for this size in the window (proof it
+            filled+closed), when the close level doesn't line up with a level."""
+            for t in txns:
+                if t.get("_used") or t.get("close_level") is None:
+                    continue
+                if t.get("type") and t["type"] not in ("TRADE", "DEAL", "POSITION"):
+                    continue
+                sz = t.get("size")
+                if (sz is not None and lot is not None
+                        and abs(abs(sz) - abs(lot)) > max(abs(lot) * Decimal("0.02"), Decimal("0.01"))):
+                    continue
+                t["_used"] = True
+                return t
+            return None
+
+        async def _close_leg(leg, txns, require_txn: bool = False) -> bool:
+            """Attribute a leg's close from broker history (source of truth),
+            else the live-price heuristic. With require_txn=True it only closes
+            when the broker confirms a trade — used to tell a real fill+close
+            apart from a genuinely cancelled/expired working order."""
+            tp = Decimal(str(leg.tp)); sl = Decimal(str(leg.sl))
+            entry_px = Decimal(str(leg.fill_price if leg.fill_price is not None else leg.entry))
+            tol = Decimal(str(smap.min_stop_distance or "0")) or (abs(tp) * Decimal("0.001"))
+            lot = Decimal(str(leg.lot))
+            m = (_match_txn(txns, tp, tol, lot) or _match_txn(txns, sl, tol, lot)
+                 or _match_txn(txns, entry_px, tol, lot) or _match_any_trade(txns, lot))
+            if m is None and require_txn:
+                return False
+            if m is not None:
+                close_px, pl, src = m["close_level"], m.get("pl"), "broker"
+            else:
+                tp_reached = (price >= tp) if trade.direction == "BUY" else (price <= tp)
+                sl_reached = (price <= sl) if trade.direction == "BUY" else (price >= sl)
+                if tp_reached or abs(price - tp) <= tol:
+                    close_px = tp
+                elif sl_reached or abs(price - sl) <= tol:
+                    close_px = sl
+                else:
+                    close_px = price
+                pl, src = None, "heuristic"
+
+            outcome = _classify_outcome(close_px, entry_px, tp, sl, bool(leg.sl_moved), tol)
+            if pl is None:   # heuristic P&L is in INSTRUMENT currency
+                dist = (close_px - entry_px)
+                if trade.direction == "SELL":
+                    dist = -dist
+                pl = dist * lot * vpp
+            elif pl == 0:
+                outcome = "breakeven"
+
+            leg.outcome = outcome
+            leg.close_price = close_px
+            leg.realized_pl = pl
+            leg.status = "closed"
+            leg.closed_at = _utcnow()
+            session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="closed",
+                              payload={"outcome": outcome, "pl": str(pl), "source": src}))
+            await bus.publish(CH_TRADE_EVENT, {"trade_id": trade.id, "leg_id": leg.id,
+                                               "outcome": outcome})
+            return True
+
         # --- pass 1: reconcile fills, detect + attribute closes ---
         for leg in legs:
             if leg.status == "working":
                 if leg.broker_order_ref not in orders:
-                    # Left the book: either filled (a new position appears) or
-                    # cancelled/deleted at the broker. Distinguish, don't assume.
+                    # Left the book: filled (open position appears), filled+closed
+                    # already (a broker trade in history), or truly cancelled.
                     fill_ref = _find_fill()
                     if fill_ref:
                         leg.broker_position_ref = fill_ref
@@ -219,68 +297,34 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                         linked_refs.add(fill_ref)
                         session.add(Event(trade_id=trade.id, leg_id=leg.id,
                                           kind="filled", payload={"position": fill_ref}))
-                    else:
+                    elif not await _close_leg(leg, await _transactions(), require_txn=True):
                         leg.status = "cancelled"
                         leg.outcome = "cancelled"
                         leg.closed_at = _utcnow()
                         session.add(Event(trade_id=trade.id, leg_id=leg.id,
                                           kind="cancelled_at_broker", payload={}))
                     continue
-                age = (_utcnow() - leg.created_at).total_seconds() / 60.0
-                if age > ttl_min:
-                    try:
-                        await adapter.cancel_order(leg.broker_order_ref)
-                    except Exception:
-                        pass
-                    leg.status = "expired"
-                    leg.outcome = "expired"
-                    leg.closed_at = _utcnow()
-                    session.add(Event(trade_id=trade.id, leg_id=leg.id,
-                                      kind="expired", payload={"age_min": age}))
+                # Still resting: honour TTL only when a positive TTL is configured
+                # (entry_ttl_minutes <= 0 disables auto-cancel).
+                if ttl_min and ttl_min > 0:
+                    age = (_utcnow() - leg.created_at).total_seconds() / 60.0
+                    if age > ttl_min:
+                        # Never expire something that actually filled+closed.
+                        if not await _close_leg(leg, await _transactions(), require_txn=True):
+                            try:
+                                await adapter.cancel_order(leg.broker_order_ref)
+                            except Exception:
+                                pass
+                            leg.status = "expired"
+                            leg.outcome = "expired"
+                            leg.closed_at = _utcnow()
+                            session.add(Event(trade_id=trade.id, leg_id=leg.id,
+                                              kind="expired", payload={"age_min": age}))
                 continue
 
             if (leg.status == "open" and leg.broker_position_ref
                     and leg.broker_position_ref not in positions):
-                tp = Decimal(str(leg.tp)); sl = Decimal(str(leg.sl))
-                entry_px = Decimal(str(leg.fill_price if leg.fill_price is not None else leg.entry))
-                tol = Decimal(str(smap.min_stop_distance or "0")) or (abs(tp) * Decimal("0.001"))
-                txns = await _transactions()
-
-                outcome, close_px, pl, src = None, None, None, "heuristic"
-                match = _match_txn(txns, tp, tol, Decimal(str(leg.lot)))
-                if match is not None:
-                    outcome, close_px, pl, src = "tp_hit", match["close_level"], match.get("pl"), "broker"
-                else:
-                    match = _match_txn(txns, sl, tol, Decimal(str(leg.lot)))
-                    if match is not None:
-                        outcome, close_px, pl, src = "sl_hit", match["close_level"], match.get("pl"), "broker"
-
-                if outcome is None:
-                    # No broker match — fall back to the live-price heuristic.
-                    tp_reached = (price >= tp) if trade.direction == "BUY" else (price <= tp)
-                    sl_reached = (price <= sl) if trade.direction == "BUY" else (price >= sl)
-                    if tp_reached or abs(price - tp) <= tol:
-                        outcome, close_px = "tp_hit", tp
-                    elif sl_reached or abs(price - sl) <= tol:
-                        outcome, close_px = "sl_hit", sl
-                    else:
-                        outcome, close_px = "manual", price
-
-                if pl is None:   # heuristic P&L is in INSTRUMENT currency
-                    dist = (close_px - entry_px)
-                    if trade.direction == "SELL":
-                        dist = -dist
-                    pl = dist * Decimal(str(leg.lot)) * vpp
-
-                leg.outcome = outcome
-                leg.close_price = close_px
-                leg.realized_pl = pl
-                leg.status = "closed"
-                leg.closed_at = _utcnow()
-                session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="closed",
-                                  payload={"outcome": outcome, "pl": str(pl), "source": src}))
-                await bus.publish(CH_TRADE_EVENT, {"trade_id": trade.id, "leg_id": leg.id,
-                                                   "outcome": outcome})
+                await _close_leg(leg, await _transactions(), require_txn=False)
 
         # --- which TPs have actually been reached (persisted across ticks)? ---
         closed_all = (await session.execute(select(Leg).where(

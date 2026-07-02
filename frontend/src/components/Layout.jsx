@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { Activity, BarChart3, Radio, Radar, ListChecks, Rss,
          Building2, Moon, Sun, KeyRound, ShieldCheck, Coins, CandlestickChart,
-         MessageSquare, Sparkles, GitBranch } from "lucide-react";
-import { api, getToken, setToken } from "../lib/api";
+         MessageSquare, Sparkles, GitBranch, LogOut } from "lucide-react";
+import { api, getToken, setToken, clearToken } from "../lib/api";
 import { toggleTheme } from "../lib/theme";
 
 const NAV = [
@@ -80,6 +80,10 @@ export default function Layout({ view, setView, children }) {
             <button onClick={() => setDark(toggleTheme())}
               className="p-2 rounded-lg text-muted hover:text-ink hover:bg-panel" title="Theme">
               {dark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+            </button>
+            <button onClick={() => { clearToken(); location.reload(); }}
+              className="p-2 rounded-lg text-muted hover:text-short hover:bg-panel" title="Log out">
+              <LogOut className="w-4 h-4" />
             </button>
           </div>
         </header>

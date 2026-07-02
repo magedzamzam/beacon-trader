@@ -1,5 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Layout from "./components/Layout";
+import Login from "./pages/Login";
+import { api, getToken, clearToken } from "./lib/api";
 import Dashboard from "./pages/Dashboard";
 import Positions from "./pages/Positions";
 import Signals from "./pages/Signals";
@@ -21,6 +23,21 @@ const PAGES = { dashboard: Dashboard, positions: Positions, signals: Signals,
 
 export default function App() {
   const [view, setView] = useState("dashboard");
+  const [authed, setAuthed] = useState(false);
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      if (!getToken()) { setChecking(false); return; }
+      try { await api.me(); setAuthed(true); }
+      catch { clearToken(); }
+      finally { setChecking(false); }
+    })();
+  }, []);
+
+  if (checking) return null;
+  if (!authed) return <Login onAuthed={() => setAuthed(true)} />;
+
   const Page = PAGES[view] || Dashboard;
   return <Layout view={view} setView={setView}><Page /></Layout>;
 }

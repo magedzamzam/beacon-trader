@@ -2,6 +2,7 @@ const BASE = import.meta.env.VITE_API_BASE || "/api";  // nginx proxies /api -> 
 
 export function getToken() { return localStorage.getItem("beacon_token") || ""; }
 export function setToken(t) { localStorage.setItem("beacon_token", t); }
+export function clearToken() { localStorage.removeItem("beacon_token"); }
 
 async function req(path, opts = {}) {
   const res = await fetch(BASE + path, {
@@ -26,6 +27,11 @@ const patch = (p, body) => req(p, { method: "PATCH", body: JSON.stringify(body) 
 const del = (p) => req(p, { method: "DELETE" });
 
 export const api = {
+  // auth
+  authStatus: () => req("/auth/status"),
+  login: (username, password) => post("/auth/login", { username, password }),
+  register: (username, password) => post("/auth/register", { username, password }),
+  me: () => req("/auth/me"),
   // reads
   health: () => req("/health"),
   dashboard: () => req("/dashboard/summary"),

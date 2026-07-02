@@ -146,6 +146,17 @@ class Event(Base):
     ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
+class User(Base):
+    """Portal login. Lets you sign in with username/password from any browser
+    instead of pasting the API token each time (see beacon_core.security)."""
+    __tablename__ = "users"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 class Setting(Base):
     """Runtime, editable-from-the-UI configuration (JSON value per key).
 
