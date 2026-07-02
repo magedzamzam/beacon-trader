@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import { RefreshCw, DownloadCloud } from "lucide-react";
 import { Card, Th, Td, Badge, Empty } from "../components/ui";
-import { Button, Select, Toggle, ErrorNote } from "../components/form";
+import { Modal, Button, Select, Toggle, ErrorNote } from "../components/form";
 import { api } from "../lib/api";
 
 const STATUS_TONE = { parsed: "long", rejected: "short", duplicate: "warn", none: "muted" };
+const firstLine = (t) => (t || "").split("\n").find(l => l.trim()) || "—";
+const when = (m) => (m.message_date || m.created_at || "").slice(0, 16).replace("T", " ");
 
 export default function Messages() {
   const [channels, setChannels] = useState([]);
@@ -13,6 +15,7 @@ export default function Messages() {
   const [onlySignals, setOnlySignals] = useState(false);
   const [err, setErr] = useState(null);
   const [syncing, setSyncing] = useState(false);
+  const [open, setOpen] = useState(null);   // message shown in the modal
 
   const load = async () => {
     try {
@@ -70,17 +73,16 @@ export default function Messages() {
         {!rows ? <Empty>Loading…</Empty> : !rows.length ? <Empty>No messages.</Empty> : (
           <table className="w-full">
             <thead><tr className="border-b border-edge">
-              <Th>When</Th><Th>Channel</Th><Th>Sender</Th><Th>Message</Th><Th>Parse</Th><Th right>Signal</Th>
+              <Th>When</Th><Th>Channel</Th><Th>Message</Th><Th>Parse</Th><Th right>Signal</Th>
             </tr></thead>
             <tbody>
               {rows.map(m => (
-                <tr key={m.id} className="border-b border-edge/60 align-top">
-                  <Td mono>{(m.message_date || m.created_at || "").slice(0, 16).replace("T", " ")}</Td>
+                <tr key={m.id} onClick={() => setOpen(m)}
+                    className="border-b border-edge/60 row-hover cursor-pointer">
+                  <Td mono>{when(m)}</Td>
                   <Td>{m.source_name}</Td>
-                  <Td mono>{m.sender || "—"}</Td>
-                  <Td><div className="max-w-xl whitespace-pre-wrap text-xs">{m.text}</div></Td>
-                  <Td><Badge tone={STATUS_TONE[m.parse_status] || "muted"}>{m.parse_status}</Badge>
-                    {m.reject_reason && <div className="text-[10px] text-muted mt-0.5">{m.reject_reason}</div>}</Td>
+                  <Td><div className="max-w-md truncate text-sm">{firstLine(m.text)}</div></Td>
+                  <Td><Badge tone={STATUS_TONE[m.parse_status] || "muted"}>{m.parse_status}</Badge></Td>
                   <Td right mono>{m.signal_id ? `#${m.signal_id}` : "—"}</Td>
                 </tr>
               ))}
@@ -88,6 +90,24 @@ export default function Messages() {
           </table>
         )}
       </Card>
+
+      {open && (
+        <Modal title="Message" onClose={() => setOpen(null)} wide>
+          <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
+            <Badge>{open.source_name}</Badge>
+            {open.sender && <span className="num">{open.sender}</span>}
+            <span className="num">{when(open)}</span>
+            <Badge tone={STATUS_TONE[open.parse_status] || "muted"}>{open.parse_status}</Badge>
+            {open.signal_id && <Badge tone="beacon">signal #{open.signal_id}</Badge>}
+          </div>
+          {open.reject_reason && (
+            <div className="text-xs text-short bg-short/10 rounded-lg px-3 py-2">{open.reject_reason}</div>
+          )}
+          <div className="whitespace-pre-wrap text-sm bg-panel2 border border-edge rounded-lg p-3 max-h-[50vh] overflow-auto">
+            {open.text || "—"}
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

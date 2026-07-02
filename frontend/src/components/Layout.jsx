@@ -45,7 +45,7 @@ function HealthPulse() {
   );
 }
 
-export default function Layout({ view, setView, children }) {
+export default function Layout({ view, setView, children, accounts = [], account = "", setAccount }) {
   const [dark, setDark] = useState(document.documentElement.classList.contains("dark"));
   const [tokenOpen, setTokenOpen] = useState(!getToken());
   const [tok, setTok] = useState(getToken());
@@ -112,6 +112,15 @@ export default function Layout({ view, setView, children }) {
             <div className="text-sm font-medium capitalize truncate">{view}</div>
           </div>
           <div className="flex items-center gap-2">
+            {setAccount && (
+              <select value={account} onChange={e => setAccount(e.target.value)}
+                title="Filter the whole app by account"
+                className="bg-panel2 border border-edge rounded-lg px-2.5 py-1.5 text-xs text-ink
+                           max-w-[40vw] sm:max-w-none outline-none focus:border-beacon">
+                <option value="">All accounts</option>
+                {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+              </select>
+            )}
             <button onClick={() => setTokenOpen(v => !v)}
               className="p-2 rounded-lg text-muted hover:text-ink hover:bg-panel" title="API token">
               <KeyRound className="w-4 h-4" />

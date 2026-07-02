@@ -26,6 +26,9 @@ export default function App() {
   const [view, setView] = useState("dashboard");
   const [authed, setAuthed] = useState(false);
   const [checking, setChecking] = useState(true);
+  // Global account filter — "" means "all accounts". Persisted across reloads.
+  const [account, setAccount] = useState(() => localStorage.getItem("beacon_account") || "");
+  const [accounts, setAccounts] = useState([]);
 
   useEffect(() => {
     (async () => {
@@ -36,9 +39,29 @@ export default function App() {
     })();
   }, []);
 
+  useEffect(() => {
+    if (!authed) return;
+    api.accounts().then(list => {
+      setAccounts(list);
+      // Drop a stale selection (e.g. the account was deleted).
+      setAccount(a => (a && !list.some(x => String(x.id) === String(a)) ? "" : a));
+    }).catch(() => {});
+  }, [authed]);
+
+  const chooseAccount = (id) => {
+    setAccount(id);
+    if (id) localStorage.setItem("beacon_account", id);
+    else localStorage.removeItem("beacon_account");
+  };
+
   if (checking) return null;
   if (!authed) return <Login onAuthed={() => setAuthed(true)} />;
 
   const Page = PAGES[view] || Dashboard;
-  return <Layout view={view} setView={setView}><Page setView={setView} /></Layout>;
+  return (
+    <Layout view={view} setView={setView}
+      accounts={accounts} account={account} setAccount={chooseAccount}>
+      <Page setView={setView} account={account} />
+    </Layout>
+  );
 }
