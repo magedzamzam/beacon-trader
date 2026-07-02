@@ -1,28 +1,46 @@
 import { useEffect, useState } from "react";
-import { Plus, RotateCcw } from "lucide-react";
+import { Plus, RotateCcw, Sparkles } from "lucide-react";
 import { Card, Table, Th, Td, Badge, Empty } from "../components/ui";
 import { Button, ErrorNote, Modal, Field, Input, NumberInput, Select } from "../components/form";
 import { api } from "../lib/api";
 
+const AI_TONE = { approve: "long", caution: "warn", reject: "short" };
+
 export default function Signals() {
   const [data, setData] = useState(null);
   const [sources, setSources] = useState([]);
+  const [filter, setFilter] = useState("");
   const [err, setErr] = useState(null);
   const [add, setAdd] = useState(false);
+  const [busy, setBusy] = useState(null);
 
   const load = async () => {
-    try { setData(await api.signals()); setSources(await api.sources()); setErr(null); }
-    catch (e) { setErr(e.message); }
+    try {
+      const q = filter ? `?source_id=${filter}` : "";
+      setData(await api.signals(q));
+      setSources(await api.sources());
+      setErr(null);
+    } catch (e) { setErr(e.message); }
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [filter]);
 
   const reinit = async (id) => { try { await api.reinitiate(id); await load(); } catch (e) { setErr(e.message); } };
+  const runAi = async (id) => {
+    setBusy(id);
+    try { await api.aiAssessSignal(id); await load(); }
+    catch (e) { setErr(e.message); }
+    finally { setBusy(null); }
+  };
 
   if (!data) return <Card><Empty>Loading…</Empty></Card>;
   return (
     <div className="space-y-3">
       <ErrorNote>{err}</ErrorNote>
-      <div className="flex justify-end">
+      <div className="flex justify-between items-center">
+        <Select value={filter} onChange={e => setFilter(e.target.value)}>
+          <option value="">All channels</option>
+          {sources.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+        </Select>
         <Button onClick={() => setAdd(true)}><Plus className="w-4 h-4 inline -mt-0.5" /> Manual signal</Button>
       </div>
       <Card>
@@ -31,7 +49,7 @@ export default function Signals() {
           <Table>
             <thead><tr>
               <Th>#</Th><Th>Provider</Th><Th>Symbol</Th><Th>Side</Th><Th right>Entry</Th><Th right>SL</Th>
-              <Th>TPs</Th><Th>Type</Th><Th>Status</Th><Th right>Actions</Th>
+              <Th>TPs</Th><Th>Type</Th><Th>Status</Th><Th>AI</Th><Th right>Actions</Th>
             </tr></thead>
             <tbody>
               {data.map(s => (
@@ -46,7 +64,16 @@ export default function Signals() {
                   <Td>{s.order_type}</Td>
                   <Td><Badge dot tone={s.status === "rejected" ? "short" : s.status === "executed" ? "long" : "beacon"}>{s.status}</Badge>
                     {s.reject_reason && <div className="text-[10px] text-muted mt-0.5">{s.reject_reason}</div>}</Td>
-                  <Td right><Button variant="ghost" onClick={() => reinit(s.id)} title="Re-initiate"><RotateCcw className="w-4 h-4" /></Button></Td>
+                  <Td>{s.ai_verdict
+                    ? <Badge tone={AI_TONE[s.ai_verdict] || "muted"}>{s.ai_verdict}{s.ai_confidence != null ? ` ${Math.round(s.ai_confidence * 100)}%` : ""}</Badge>
+                    : <span className="text-xs text-muted">—</span>}</Td>
+                  <Td right>
+                    <div className="flex items-center gap-1 justify-end">
+                      <Button variant="ghost" onClick={() => runAi(s.id)} title="Run AI validation">
+                        <Sparkles className={`w-4 h-4 ${busy === s.id ? "animate-pulse" : ""}`} /></Button>
+                      <Button variant="ghost" onClick={() => reinit(s.id)} title="Re-initiate"><RotateCcw className="w-4 h-4" /></Button>
+                    </div>
+                  </Td>
                 </tr>
               ))}
             </tbody>

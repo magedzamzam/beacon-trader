@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from beacon_core.db.models import Signal, Source
+from beacon_core.db.models import AiAssessment, Signal, Source
 from beacon_core.parsing import parse
 from ..deps import get_db
 from ..auth import require_token
@@ -12,21 +12,44 @@ from ._ingest import ingest_structured
 router = APIRouter(tags=["signals"])
 
 
+async def _latest_ai_by_signal(db, signal_ids, kind="signal_validation") -> dict:
+    """Map signal_id -> latest AI assessment of a kind, for the given signals."""
+    if not signal_ids:
+        return {}
+    rows = (await db.execute(
+        select(AiAssessment)
+        .where(AiAssessment.kind == kind, AiAssessment.signal_id.in_(signal_ids))
+        .order_by(AiAssessment.id.desc()))).scalars().all()
+    out: dict = {}
+    for a in rows:                       # first seen per signal is the newest
+        out.setdefault(a.signal_id, a)
+    return out
+
+
 @router.get("/signals", dependencies=[Depends(require_token)])
-async def list_signals(db: AsyncSession = Depends(get_db), limit: int = 100):
+async def list_signals(db: AsyncSession = Depends(get_db), limit: int = 100,
+                       source_id: int | None = None):
     q = (select(Signal, Source.name, Source.kind)
          .outerjoin(Source, Source.id == Signal.source_id)
          .order_by(Signal.id.desc()).limit(limit))
+    if source_id is not None:
+        q = q.where(Signal.source_id == source_id)
     rows = (await db.execute(q)).all()
-    return [{"id": s.id, "source_id": s.source_id,
-             "source_name": sname or "—", "source_kind": skind,
-             "symbol": s.symbol,
-             "direction": s.direction, "entry_from": float(s.entry_from),
-             "entry_to": float(s.entry_to), "sl": float(s.sl), "tps": s.tps,
-             "order_type": s.order_type, "status": s.status,
-             "reject_reason": s.reject_reason,
-             "created_at": s.created_at.isoformat() if s.created_at else None}
-            for (s, sname, skind) in rows]
+    ai = await _latest_ai_by_signal(db, [s.id for (s, _, _) in rows])
+    out = []
+    for (s, sname, skind) in rows:
+        a = ai.get(s.id)
+        out.append({"id": s.id, "source_id": s.source_id,
+                    "source_name": sname or "—", "source_kind": skind,
+                    "symbol": s.symbol,
+                    "direction": s.direction, "entry_from": float(s.entry_from),
+                    "entry_to": float(s.entry_to), "sl": float(s.sl), "tps": s.tps,
+                    "order_type": s.order_type, "status": s.status,
+                    "reject_reason": s.reject_reason,
+                    "ai_verdict": a.verdict if a else None,
+                    "ai_confidence": float(a.confidence) if a and a.confidence is not None else None,
+                    "created_at": s.created_at.isoformat() if s.created_at else None})
+    return out
 
 
 @router.post("/signals/manual", dependencies=[Depends(require_token)])

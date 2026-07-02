@@ -18,6 +18,7 @@ from decimal import Decimal
 
 from sqlalchemy import select
 
+from beacon_core.ai import service as ai_service
 from beacon_core.bus import Bus
 from beacon_core.config import CH_TRADE_EVENT, get_settings
 from beacon_core.logging import get_logger
@@ -77,11 +78,37 @@ def _tps_hit(direction: str, price: Decimal, legs) -> set[int]:
     return hit
 
 
-async def _process_trade(session, trade) -> None:
+async def _analyze_outcome(session, trade, ai_cfg) -> None:
+    """Best-effort AI post-mortem when a trade has just fully closed."""
+    if ai_cfg is None or not (ai_cfg.ready and ai_cfg.analyze_outcomes):
+        return
+    try:
+        legs = (await session.execute(select(Leg).where(Leg.trade_id == trade.id))).scalars().all()
+        sig = await session.get(Signal, trade.signal_id)
+        source = await session.get(Source, sig.source_id) if sig and sig.source_id else None
+        trade_dict = {
+            "symbol": trade.symbol, "direction": trade.direction,
+            "planned_risk": str(trade.planned_risk) if trade.planned_risk else None,
+            "realized_pl": str(trade.realized_pl),
+            "source_name": source.name if source else "unknown",
+            "legs": [{"tp_index": l.tp_index, "outcome": l.outcome,
+                      "entry": str(l.entry),
+                      "close_price": str(l.close_price) if l.close_price is not None else None,
+                      "realized_pl": str(l.realized_pl) if l.realized_pl is not None else None}
+                     for l in legs],
+        }
+        await ai_service.assess_outcome(session, trade_dict, trade.id, cfg=ai_cfg)
+    except Exception as exc:                          # never break the loop
+        log.warning("AI outcome analysis failed (trade %s): %s", trade.id, exc)
+
+
+async def _process_trade(session, trade, ai_cfg=None) -> None:
     legs = (await session.execute(select(Leg).where(
         Leg.trade_id == trade.id, Leg.status.in_(OPEN_LEG)))).scalars().all()
     if not legs:
-        trade.status = "closed"
+        if trade.status != "closed":
+            trade.status = "closed"
+            await _analyze_outcome(session, trade, ai_cfg)
         return
 
     acct, broker, adapter = await _adapter_for(session, trade.account_id)
@@ -207,7 +234,10 @@ async def _process_trade(session, trade) -> None:
         trade.realized_pl = sum((Decimal(str(l.realized_pl)) for l in closed
                                  if l.realized_pl is not None), Decimal("0"))
         if not remaining:
+            was_closed = trade.status == "closed"
             trade.status = "closed"
+            if not was_closed:
+                await _analyze_outcome(session, trade, ai_cfg)
         elif closed:
             trade.status = "partial"
     finally:
@@ -216,10 +246,11 @@ async def _process_trade(session, trade) -> None:
 
 async def tick() -> None:
     async with Session()() as session:
+        ai_cfg = await ai_service.load_config(session)
         trades = await _open_trades(session)
         for trade in trades:
             try:
-                await _process_trade(session, trade)
+                await _process_trade(session, trade, ai_cfg)
             except Exception as exc:
                 log.warning("trade %s tick failed: %s", trade.id, exc)
         await session.commit()

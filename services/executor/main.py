@@ -12,6 +12,7 @@ from decimal import Decimal
 
 from sqlalchemy import select
 
+from beacon_core.ai import service as ai_service
 from beacon_core.bus import Bus
 from beacon_core.config import (CH_SIGNAL_VALID, CH_TRADE_OPENED, get_settings)
 from beacon_core.logging import get_logger
@@ -74,15 +75,17 @@ async def handle_signal(signal_id: int) -> None:
         strat = source.strategy or {}
         order_position_type = strat.get("order_position_type", sig.order_type or "MARKET")
 
+        ai_cfg = await ai_service.load_config(session)
+
         for acct in accounts:
             await _execute_on_account(session, sig, parsed, source, acct,
-                                      order_position_type)
+                                      order_position_type, ai_cfg)
         sig.status = "executed"
         await session.commit()
 
 
 async def _execute_on_account(session, sig, parsed, source, acct,
-                              order_position_type) -> None:
+                              order_position_type, ai_cfg=None) -> None:
     broker = await session.get(Broker, acct.broker_id)
     smap = await _symbol_map(session, broker.id, parsed.symbol)
     if not smap:
@@ -130,6 +133,35 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         if not valid:
             log.info("signal %s acct %s: no legs survived sizing", sig.id, acct.id)
             return
+
+        # --- AI execution review (best-effort; optional hard gate) ---
+        if ai_cfg is not None and ai_cfg.ready and ai_cfg.review_execution:
+            planned_risk = plan_total_risk(plan.legs)
+            risk_pct = (float(planned_risk) / float(equity) * 100.0) if equity else None
+            plan_dict = {
+                "account_currency": account_ccy, "equity": str(equity),
+                "planned_risk": str(planned_risk),
+                "risk_pct": round(risk_pct, 3) if risk_pct is not None else None,
+                "legs": [{"tp_index": l.tp_index, "entry": str(l.entry),
+                          "tp": str(l.tp), "sl": str(l.sl), "lot": str(l.lot)}
+                         for l in valid],
+            }
+            try:
+                a = await ai_service.assess_execution(session, sig, source, plan_dict,
+                                                      acct.id, cfg=ai_cfg)
+                await session.commit()
+                if (a is not None and ai_cfg.gate_execution and a.verdict == "reject"
+                        and (a.confidence is None
+                             or float(a.confidence) >= ai_cfg.min_confidence)):
+                    session.add(Event(kind="ai_blocked",
+                                      payload={"signal_id": sig.id, "account_id": acct.id,
+                                               "rationale": a.rationale}))
+                    await session.commit()
+                    log.warning("signal %s acct %s: BLOCKED by AI: %s",
+                                sig.id, acct.id, a.rationale)
+                    return
+            except Exception as exc:                 # AI must never break execution
+                log.warning("AI execution review failed: %s", exc)
 
         trade = Trade(signal_id=sig.id, account_id=acct.id, symbol=parsed.symbol,
                       direction=parsed.direction, status="open",

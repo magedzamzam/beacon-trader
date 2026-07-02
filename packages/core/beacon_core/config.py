@@ -15,6 +15,16 @@ class Settings:
         # Single-user auth for the portal (Phase 1).
         self.api_token: str = os.getenv("API_TOKEN", "change-me")
 
+        # Secret used to encrypt credentials/AI keys stored in the DB
+        # (see beacon_core.crypto). Falls back to API_TOKEN so an existing
+        # deployment keeps working, but a dedicated SECRET_KEY is recommended.
+        self.secret_key: str = os.getenv("SECRET_KEY", "") or os.getenv("API_TOKEN", "")
+
+        # AI integrations (Anthropic Claude). Key can also be stored, encrypted,
+        # in the settings table from the UI; this env var is the default source.
+        self.anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
+        self.ai_default_model: str = os.getenv("AI_DEFAULT_MODEL", "claude-opus-4-8")
+
         # Telegram (user MTProto session — see services/telegram/login.py).
         self.tg_api_id: str = os.getenv("TG_API_ID", "")
         self.tg_api_hash: str = os.getenv("TG_API_HASH", "")
@@ -39,5 +49,6 @@ CH_SIGNAL_RAW = "signals.raw"            # detected, pre-parse
 CH_SIGNAL_VALID = "signals.validated"    # parsed + validated, ready to trade
 CH_TRADE_OPENED = "trades.opened"
 CH_TRADE_EVENT = "trades.events"
+CH_TG_CONTROL = "telegram.control"       # backfill / reload requests to telegram
 HEARTBEAT_PREFIX = "hb:"                  # hb:<service> -> unix ts
 EXEC_QUEUE = "queue:exec"                # paced broker-call queue

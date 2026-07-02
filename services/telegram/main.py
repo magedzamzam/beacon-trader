@@ -1,8 +1,12 @@
-"""Telegram detection + parse + validate + publish.
+"""Telegram detection + full-history persistence + parse + validate + publish.
 
-Listens to the channels configured as telegram Sources, parses each message,
-validates geometry, dedupes, persists a Signal, and publishes signal_id on the
-validated channel for the executor. Non-signals are ignored silently.
+Listens to the channels configured as telegram Sources. EVERY message on a
+watched channel is persisted (signal or not) so the portal shows the complete
+history per channel. Messages that parse into a valid signal are stored as a
+Signal, published for the executor, and (when enabled) assessed by the AI layer.
+
+On startup — and on demand via the `telegram.control` Redis channel — it
+backfills recent channel history so a freshly-installed portal isn't empty.
 """
 from __future__ import annotations
 
@@ -15,12 +19,13 @@ from sqlalchemy import select
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 
+from beacon_core.ai import service as ai_service
 from beacon_core.bus import Bus
-from beacon_core.config import CH_SIGNAL_VALID, get_settings
+from beacon_core.config import CH_SIGNAL_VALID, CH_TG_CONTROL, get_settings
 from beacon_core.logging import get_logger
 from beacon_core.health import run_health_server
 from beacon_core.db.base import Session, init_models
-from beacon_core.db.models import Signal, Source
+from beacon_core.db.models import Signal, Source, TelegramMessage
 from beacon_core.parsing import parse
 from beacon_core.execution.planner import validate_signal
 
@@ -29,6 +34,7 @@ settings = get_settings()
 bus = Bus()
 
 DEDUPE_WINDOW_MIN = 10
+BACKFILL_LIMIT = 200
 
 
 def _norm(text: str) -> str:
@@ -45,41 +51,120 @@ async def _telegram_sources():
         return {str(r.external_id): r.id for r in rows if r.external_id}
 
 
-async def _persist_and_publish(source_id, chat_key, message_text):
-    parsed = parse(message_text)
-    if parsed is None:
-        return
-    ok, reason = validate_signal(parsed)
-    dedupe = _hash(chat_key, message_text)
+async def _already_stored(session, chat_key: str, message_id) -> bool:
+    if message_id is None:
+        return False
+    return (await session.execute(select(TelegramMessage.id).where(
+        TelegramMessage.chat_id == chat_key,
+        TelegramMessage.message_id == int(message_id)))).first() is not None
 
+
+async def _handle_message(chat_key, source_id, message_id, sender, text, msg_date):
+    """Persist one message; if it parses to a valid signal, store + publish it."""
     async with Session()() as s:
-        # dedupe within window
-        recent = (await s.execute(select(Signal).where(
-            Signal.dedupe_hash == dedupe,
-            Signal.created_at >= dt.datetime.now(dt.timezone.utc)
-            - dt.timedelta(minutes=DEDUPE_WINDOW_MIN)))).scalars().first()
-        if recent:
-            log.info("duplicate signal ignored (%s)", dedupe[:8])
+        if await _already_stored(s, chat_key, message_id):
             return
 
-        sig = Signal(
-            source_id=source_id, symbol=parsed.symbol, direction=parsed.direction,
-            entry_from=parsed.entry_from, entry_to=parsed.entry_to, sl=parsed.sl,
-            tps=[str(t) for t in parsed.tps],
-            order_type=parsed.order_type_hint or "MARKET",
-            status="validated" if ok else "rejected",
-            reject_reason=None if ok else reason,
-            raw_text=message_text, dedupe_hash=dedupe,
-        )
-        s.add(sig)
-        await s.commit()
-        sig_id = sig.id
+        parsed = parse(text or "")
+        is_signal = parsed is not None
+        parse_status = "none"
+        reject_reason = None
+        signal_id = None
 
-    if ok:
-        await bus.publish(CH_SIGNAL_VALID, {"signal_id": sig_id})
-        log.info("signal %s published (%s %s)", sig_id, parsed.direction, parsed.symbol)
-    else:
-        log.info("signal rejected: %s", reason)
+        if parsed is not None:
+            ok, reason = validate_signal(parsed)
+            parse_status = "parsed" if ok else "rejected"
+            reject_reason = None if ok else reason
+            dedupe = _hash(chat_key, text)
+            recent = (await s.execute(select(Signal).where(
+                Signal.dedupe_hash == dedupe,
+                Signal.created_at >= dt.datetime.now(dt.timezone.utc)
+                - dt.timedelta(minutes=DEDUPE_WINDOW_MIN)))).scalars().first()
+            if recent:
+                signal_id = recent.id
+                parse_status = "duplicate"
+            else:
+                sig = Signal(
+                    source_id=source_id, symbol=parsed.symbol, direction=parsed.direction,
+                    entry_from=parsed.entry_from, entry_to=parsed.entry_to, sl=parsed.sl,
+                    tps=[str(t) for t in parsed.tps],
+                    order_type=parsed.order_type_hint or "MARKET",
+                    status="validated" if ok else "rejected",
+                    reject_reason=reject_reason, raw_text=text, dedupe_hash=dedupe,
+                )
+                s.add(sig)
+                await s.flush()
+                signal_id = sig.id
+
+        msg = TelegramMessage(
+            source_id=source_id, chat_id=chat_key,
+            message_id=int(message_id) if message_id is not None else None,
+            sender=sender, text=text, is_signal=is_signal,
+            parse_status=parse_status, reject_reason=reject_reason,
+            signal_id=signal_id, message_date=msg_date,
+        )
+        s.add(msg)
+
+        # AI validation on freshly-stored, valid signals (best-effort).
+        new_valid = (parse_status == "parsed" and signal_id is not None)
+        if new_valid:
+            sig_row = await s.get(Signal, signal_id)
+            source = await s.get(Source, source_id) if source_id else None
+            try:
+                await ai_service.assess_signal(s, sig_row, source)
+            except Exception as exc:                     # never block ingestion
+                log.warning("AI signal assess failed: %s", exc)
+
+        await s.commit()
+
+    if parse_status == "parsed" and signal_id is not None:
+        await bus.publish(CH_SIGNAL_VALID, {"signal_id": signal_id})
+        log.info("signal %s published (%s %s)", signal_id, parsed.direction, parsed.symbol)
+    elif parse_status == "rejected":
+        log.info("signal rejected: %s", reject_reason)
+
+
+def _sender_name(message) -> str | None:
+    try:
+        who = getattr(message, "post_author", None)
+        if who:
+            return str(who)
+        sid = getattr(message, "sender_id", None)
+        return str(sid) if sid is not None else None
+    except Exception:
+        return None
+
+
+async def _backfill(client, sources: dict, limit: int = BACKFILL_LIMIT) -> None:
+    """Pull recent history for each watched channel and persist anything new."""
+    for chat_key, source_id in sources.items():
+        try:
+            chat = int(chat_key)
+        except ValueError:
+            chat = chat_key
+        try:
+            count = 0
+            async for message in client.iter_messages(chat, limit=limit):
+                text = getattr(message, "message", None) or ""
+                if not text:
+                    continue
+                await _handle_message(
+                    chat_key, source_id, message.id, _sender_name(message), text,
+                    getattr(message, "date", None))
+                count += 1
+            log.info("backfill %s: scanned %s messages", chat_key, count)
+        except Exception as exc:
+            log.warning("backfill failed for %s: %s", chat_key, exc)
+
+
+async def _control_loop(client, sources: dict) -> None:
+    """Listen for backfill/reload requests from the API."""
+    async for msg in bus.subscribe(CH_TG_CONTROL):
+        action = (msg or {}).get("action")
+        if action == "backfill":
+            limit = int((msg or {}).get("limit", BACKFILL_LIMIT))
+            log.info("control: backfill requested (limit=%s)", limit)
+            await _backfill(client, sources, limit=limit)
 
 
 async def main() -> None:
@@ -102,13 +187,19 @@ async def main() -> None:
         if source_id is None:
             return
         try:
-            await _persist_and_publish(source_id, chat_key, event.message.message or "")
+            await _handle_message(
+                chat_key, source_id, event.message.id, _sender_name(event.message),
+                event.message.message or "", getattr(event.message, "date", None))
         except Exception as exc:
             log.warning("message handling failed: %s", exc)
 
     asyncio.create_task(run_health_server("telegram", bus, port=8080))
     await client.start()
     log.info("telegram listening on %s channels", len(watch))
+    # Backfill recent history so the portal isn't empty, then stay responsive
+    # to on-demand sync requests from the API.
+    asyncio.create_task(_backfill(client, sources))
+    asyncio.create_task(_control_loop(client, sources))
     await client.run_until_disconnected()
 
 

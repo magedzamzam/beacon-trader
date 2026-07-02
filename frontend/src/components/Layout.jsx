@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Activity, BarChart3, Radio, Radar, ListChecks, Rss,
-         Building2, Moon, Sun, KeyRound, ShieldCheck, Coins, CandlestickChart } from "lucide-react";
+         Building2, Moon, Sun, KeyRound, ShieldCheck, Coins, CandlestickChart,
+         MessageSquare, Sparkles, GitBranch } from "lucide-react";
 import { api, getToken, setToken } from "../lib/api";
 import { toggleTheme } from "../lib/theme";
 
@@ -9,8 +10,11 @@ const NAV = [
   { id: "positions", label: "Positions", icon: Radar },
   { id: "chart", label: "Chart", icon: CandlestickChart },
   { id: "signals", label: "Signals", icon: Radio },
+  { id: "messages", label: "Messages", icon: MessageSquare },
+  { id: "activity", label: "Activity", icon: GitBranch },
   { id: "history", label: "History", icon: ListChecks },
   { id: "performance", label: "Performance", icon: BarChart3 },
+  { id: "ai", label: "AI", icon: Sparkles },
   { id: "risk", label: "Risk", icon: ShieldCheck },
   { id: "sources", label: "Sources", icon: Rss },
   { id: "brokers", label: "Brokers", icon: Building2 },

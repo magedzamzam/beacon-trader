@@ -43,13 +43,22 @@ Edit `.env`:
   `postgresql+asyncpg://USER:PASSWORD@HOST:5432/beacon`
 - `API_TOKEN` — a long random string (this is your portal login token):
   `openssl rand -hex 24`
+- `SECRET_KEY` — a long random string used to encrypt secrets you enter from the
+  UI (broker credentials, AI key): `openssl rand -hex 32`. Set it once; changing
+  it later makes previously-stored encrypted secrets unreadable.
 - `CAP_API_KEY`, `CAP_USERNAME`, `CAP_PASSWORD` — Capital.com (demo first).
+  *Optional:* you can instead add the broker with credentials entered directly in
+  the portal — they are stored encrypted rather than referenced from `.env`.
 - `TG_API_ID`, `TG_API_HASH` — from my.telegram.org. (`TG_SESSION` comes next.)
+- `ANTHROPIC_API_KEY` — *optional*, enables the AI validation layer (or set it,
+  encrypted, from the **AI** page later). `AI_DEFAULT_MODEL` defaults to
+  `claude-opus-4-8`.
 - `VITE_API_BASE` — the URL the browser uses to reach the API,
   e.g. `http://YOUR_HOST:8000`.
 
-Secrets live only in `.env` (git-ignored). The database stores *references* to
-these env vars, never the secrets themselves.
+Secrets you reference via `*_env` keys live only in `.env` (git-ignored). Secrets
+you enter from the portal are Fernet-encrypted with `SECRET_KEY` before storage —
+never kept in plaintext.
 
 ## 4. Mint the Telegram session (once)
 

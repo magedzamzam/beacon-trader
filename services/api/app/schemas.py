@@ -7,7 +7,24 @@ class BrokerIn(BaseModel):
     name: str
     is_demo: bool = True
     enabled: bool = True
+    # Either reference env vars (credentials_ref with *_env keys) OR provide the
+    # secrets directly and they are stored encrypted in the DB (*_enc keys).
     credentials_ref: dict = {}
+    api_key: Optional[str] = None
+    username: Optional[str] = None
+    password: Optional[str] = None
+
+
+class AiConfigIn(BaseModel):
+    enabled: bool = False
+    provider: str = "anthropic"
+    model: str = "claude-opus-4-8"
+    validate_signals: bool = True
+    review_execution: bool = True
+    analyze_outcomes: bool = True
+    gate_execution: bool = False
+    min_confidence: float = 0.0
+    api_key: Optional[str] = None          # write-only; stored encrypted
 
 
 class AccountIn(BaseModel):

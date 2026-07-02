@@ -7,3 +7,8 @@ __pycache__/
 node_modules/
 frontend/dist/
 .DS_Store
+
+# Python build artifacts
+build/
+*.egg-info/
+.venv/

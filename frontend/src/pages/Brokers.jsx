@@ -110,6 +110,12 @@ export default function Brokers() {
 function AddBrokerModal({ onClose, onSaved }) {
   const [name, setName] = useState("Capital");
   const [isDemo, setIsDemo] = useState(true);
+  const [direct, setDirect] = useState(true);     // enter secrets vs reference env
+  // direct (encrypted-at-rest) credentials
+  const [apiKey, setApiKey] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  // env-reference credentials
   const [apiKeyEnv, setApiKeyEnv] = useState("CAP_API_KEY");
   const [userEnv, setUserEnv] = useState("CAP_USERNAME");
   const [passEnv, setPassEnv] = useState("CAP_PASSWORD");
@@ -117,11 +123,16 @@ function AddBrokerModal({ onClose, onSaved }) {
 
   const save = async () => {
     try {
-      await api.createBroker({
-        type: "capital.com", name, is_demo: isDemo, enabled: true,
-        credentials_ref: { api_key_env: apiKeyEnv, account_username_env: userEnv,
-                           account_password_env: passEnv, is_demo: isDemo },
-      });
+      const body = { type: "capital.com", name, is_demo: isDemo, enabled: true };
+      if (direct) {
+        body.api_key = apiKey; body.username = username; body.password = password;
+      } else {
+        body.credentials_ref = {
+          api_key_env: apiKeyEnv, account_username_env: userEnv,
+          account_password_env: passEnv, is_demo: isDemo,
+        };
+      }
+      await api.createBroker(body);
       onSaved();
     } catch (e) { setErr(e.message); }
   };
@@ -129,13 +140,29 @@ function AddBrokerModal({ onClose, onSaved }) {
     <Modal title="Add broker" onClose={onClose}>
       <ErrorNote>{err}</ErrorNote>
       <Field label="Name"><Input value={name} onChange={e => setName(e.target.value)} /></Field>
-      <Field label="Mode"><Toggle checked={isDemo} onChange={setIsDemo} label={isDemo ? "Demo" : "Live"} /></Field>
-      <div className="text-xs text-muted">Credentials are read from these .env variables — the secrets never touch the database.</div>
-      <div className="grid grid-cols-3 gap-3">
-        <Field label="API key env"><Input mono value={apiKeyEnv} onChange={e => setApiKeyEnv(e.target.value)} /></Field>
-        <Field label="Username env"><Input mono value={userEnv} onChange={e => setUserEnv(e.target.value)} /></Field>
-        <Field label="Password env"><Input mono value={passEnv} onChange={e => setPassEnv(e.target.value)} /></Field>
+      <div className="flex gap-6">
+        <Field label="Mode"><Toggle checked={isDemo} onChange={setIsDemo} label={isDemo ? "Demo" : "Live"} /></Field>
+        <Field label="Credentials"><Toggle checked={direct} onChange={setDirect} label={direct ? "enter here (encrypted)" : "reference .env"} /></Field>
       </div>
+      {direct ? (
+        <>
+          <div className="text-xs text-muted">Secrets are encrypted with SECRET_KEY before they are stored — never kept in plaintext.</div>
+          <Field label="API key"><Input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="Capital.com API key" /></Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Username"><Input value={username} onChange={e => setUsername(e.target.value)} /></Field>
+            <Field label="Password"><Input type="password" value={password} onChange={e => setPassword(e.target.value)} /></Field>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="text-xs text-muted">Credentials are read from these .env variables — the secrets never touch the database.</div>
+          <div className="grid grid-cols-3 gap-3">
+            <Field label="API key env"><Input mono value={apiKeyEnv} onChange={e => setApiKeyEnv(e.target.value)} /></Field>
+            <Field label="Username env"><Input mono value={userEnv} onChange={e => setUserEnv(e.target.value)} /></Field>
+            <Field label="Password env"><Input mono value={passEnv} onChange={e => setPassEnv(e.target.value)} /></Field>
+          </div>
+        </>
+      )}
       <div className="flex justify-end gap-2 pt-2">
         <Button variant="ghost" onClick={onClose}>Cancel</Button>
         <Button onClick={save}>Add broker</Button>

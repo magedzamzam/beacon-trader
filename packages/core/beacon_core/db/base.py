@@ -33,6 +33,12 @@ def Session() -> async_sessionmaker[AsyncSession]:
 
 
 async def init_models() -> None:
-    """Create tables if absent. Idempotent; safe to call on startup."""
+    """Create tables if absent. Idempotent; safe to call on startup.
+
+    Import the models module so every table is registered on Base.metadata
+    before create_all runs — otherwise a caller that only imported a subset
+    (or none) of the models would create an incomplete schema."""
+    from . import models  # noqa: F401  (populates Base.metadata)
+
     async with engine().begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

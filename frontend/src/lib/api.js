@@ -30,7 +30,7 @@ export const api = {
   health: () => req("/health"),
   dashboard: () => req("/dashboard/summary"),
   trades: () => req("/trades"),
-  signals: () => req("/signals"),
+  signals: (q = "") => req(`/signals${q}`),
   sources: () => req("/sources"),
   brokers: () => req("/brokers"),
   accounts: () => req("/accounts"),
@@ -39,6 +39,19 @@ export const api = {
   perfBySource: () => req("/performance/by_source"),
   brokerHealth: (id) => req(`/brokers/${id}/health`),
   brokerLiveAccounts: (id) => req(`/brokers/${id}/accounts`),
+  // messages (telegram history)
+  messages: (q = "") => req(`/messages${q}`),
+  channels: () => req("/messages/channels"),
+  syncMessages: (limit = 200) => post(`/messages/sync?limit=${limit}`, {}),
+  // execution workflow / audit
+  events: (q = "") => req(`/events${q}`),
+  tradeDetail: (id) => req(`/trades/${id}`),
+  // AI
+  aiConfig: () => req("/ai/config"),
+  saveAiConfig: (c) => req("/ai/config", { method: "PUT", body: JSON.stringify(c) }),
+  aiAssessments: (q = "") => req(`/ai/assessments${q}`),
+  aiAssessSignal: (id) => post(`/ai/signals/${id}/assess`, {}),
+  aiAssessTrade: (id) => post(`/ai/trades/${id}/assess`, {}),
   // brokers
   createBroker: (b) => post("/brokers", b),
   updateBroker: (id, b) => patch(`/brokers/${id}`, b),

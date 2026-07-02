@@ -7,13 +7,16 @@ from decimal import Decimal
 
 from sqlalchemy import select
 
+from beacon_core.ai import service as ai_service
 from beacon_core.bus import Bus
 from beacon_core.config import CH_SIGNAL_VALID
-from beacon_core.db.models import Signal
+from beacon_core.db.models import Signal, Source
+from beacon_core.logging import get_logger
 from beacon_core.parsing.models import ParsedSignal
 from beacon_core.execution.planner import validate_signal
 
 bus = Bus()
+log = get_logger("ingest")
 
 
 def _hash(source_id, symbol, direction, entry_from, sl) -> str:
@@ -46,6 +49,15 @@ async def ingest_structured(session, *, source_id, symbol, direction, entry_from
         reject_reason=None if ok else reason, raw_text=raw_text, dedupe_hash=dedupe,
     )
     session.add(sig)
+    await session.flush()
+
+    if ok:                                   # best-effort AI validation
+        try:
+            source = await session.get(Source, source_id) if source_id else None
+            await ai_service.assess_signal(session, sig, source)
+        except Exception as exc:
+            log.warning("AI signal assess failed: %s", exc)
+
     await session.commit()
     if ok:
         await bus.publish(CH_SIGNAL_VALID, {"signal_id": sig.id})
