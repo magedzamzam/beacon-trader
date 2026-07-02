@@ -59,8 +59,15 @@ async def _already_stored(session, chat_key: str, message_id) -> bool:
         TelegramMessage.message_id == int(message_id)))).first() is not None
 
 
-async def _handle_message(chat_key, source_id, message_id, sender, text, msg_date):
-    """Persist one message; if it parses to a valid signal, store + publish it."""
+async def _handle_message(chat_key, source_id, message_id, sender, text, msg_date,
+                          is_live: bool = True):
+    """Persist one message; if it parses to a valid signal, store it.
+
+    Only LIVE messages are published to the executor and AI-validated. Historical
+    backfill is persisted for the message/signal history but never traded or sent
+    to the AI — otherwise a restart would replay old signals as fresh trades and
+    hammer the broker's session rate limit.
+    """
     async with Session()() as s:
         if await _already_stored(s, chat_key, message_id):
             return
@@ -84,12 +91,16 @@ async def _handle_message(chat_key, source_id, message_id, sender, text, msg_dat
                 signal_id = recent.id
                 parse_status = "duplicate"
             else:
+                # Historical (backfilled) signals are recorded as "history" so
+                # they are visible per channel but clearly never queued to trade.
+                status = ("validated" if ok else "rejected") if is_live else (
+                    "history" if ok else "rejected")
                 sig = Signal(
                     source_id=source_id, symbol=parsed.symbol, direction=parsed.direction,
                     entry_from=parsed.entry_from, entry_to=parsed.entry_to, sl=parsed.sl,
                     tps=[str(t) for t in parsed.tps],
                     order_type=parsed.order_type_hint or "MARKET",
-                    status="validated" if ok else "rejected",
+                    status=status,
                     reject_reason=reject_reason, raw_text=text, dedupe_hash=dedupe,
                 )
                 s.add(sig)
@@ -105,9 +116,9 @@ async def _handle_message(chat_key, source_id, message_id, sender, text, msg_dat
         )
         s.add(msg)
 
-        # AI validation on freshly-stored, valid signals (best-effort).
+        # AI validation only for freshly-stored, valid, LIVE signals (best-effort).
         new_valid = (parse_status == "parsed" and signal_id is not None)
-        if new_valid:
+        if new_valid and is_live:
             sig_row = await s.get(Signal, signal_id)
             source = await s.get(Source, source_id) if source_id else None
             try:
@@ -117,7 +128,8 @@ async def _handle_message(chat_key, source_id, message_id, sender, text, msg_dat
 
         await s.commit()
 
-    if parse_status == "parsed" and signal_id is not None:
+    # Only LIVE signals are handed to the executor. Backfilled history is not.
+    if is_live and parse_status == "parsed" and signal_id is not None:
         await bus.publish(CH_SIGNAL_VALID, {"signal_id": signal_id})
         log.info("signal %s published (%s %s)", signal_id, parsed.direction, parsed.symbol)
     elif parse_status == "rejected":
@@ -150,7 +162,7 @@ async def _backfill(client, sources: dict, limit: int = BACKFILL_LIMIT) -> None:
                     continue
                 await _handle_message(
                     chat_key, source_id, message.id, _sender_name(message), text,
-                    getattr(message, "date", None))
+                    getattr(message, "date", None), is_live=False)
                 count += 1
             log.info("backfill %s: scanned %s messages", chat_key, count)
         except Exception as exc:

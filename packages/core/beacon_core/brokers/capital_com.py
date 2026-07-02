@@ -71,6 +71,12 @@ class CapitalComAdapter(BrokerAdapter):
             await self._client.aclose()
             self._client = None
 
+    # Capital.com strictly rate-limits the /session (login) endpoint. Retry a
+    # 429 a few times with exponential backoff so bursts of activity ride it out
+    # instead of failing the whole operation.
+    _SESSION_MAX_RETRIES = 4
+    _SESSION_BACKOFF_BASE = 1.5   # seconds: 1.5, 3, 6, 12
+
     async def _ensure_session(self) -> None:
         if self._cst and self._sec_token:
             return
@@ -78,31 +84,41 @@ class CapitalComAdapter(BrokerAdapter):
             if self._cst and self._sec_token:
                 return
             client = await self._get_client()
-            try:
-                resp = await client.post(
-                    "/api/v1/session",
-                    json={
-                        "identifier": self.credentials.get("account_username", ""),
-                        "password": self.credentials.get("account_password", ""),
-                    },
-                    headers={"X-CAP-API-KEY": self.credentials.get("api_key", "")},
-                )
-            except httpx.RequestError as exc:
-                raise NetworkError(f"Capital.com unreachable: {exc}") from exc
 
-            if resp.status_code == 401:
-                raise AuthError("Capital.com rejected the credentials")
-            if resp.status_code == 429:
-                raise RateLimitError("Capital.com rate-limited the session call")
-            if resp.status_code >= 400:
-                raise BrokerError(f"Session failed: HTTP {resp.status_code} {resp.text[:200]}")
+            last_rate_limit: Optional[RateLimitError] = None
+            for attempt in range(self._SESSION_MAX_RETRIES):
+                try:
+                    resp = await client.post(
+                        "/api/v1/session",
+                        json={
+                            "identifier": self.credentials.get("account_username", ""),
+                            "password": self.credentials.get("account_password", ""),
+                        },
+                        headers={"X-CAP-API-KEY": self.credentials.get("api_key", "")},
+                    )
+                except httpx.RequestError as exc:
+                    raise NetworkError(f"Capital.com unreachable: {exc}") from exc
 
-            cst = resp.headers.get("CST")
-            sec = resp.headers.get("X-SECURITY-TOKEN")
-            if not cst or not sec:
-                raise AuthError("Capital.com session response missing CST/X-SECURITY-TOKEN")
-            self._cst = cst
-            self._sec_token = sec
+                if resp.status_code == 429:
+                    last_rate_limit = RateLimitError(
+                        "Capital.com rate-limited the session call")
+                    if attempt < self._SESSION_MAX_RETRIES - 1:
+                        await asyncio.sleep(self._SESSION_BACKOFF_BASE * (2 ** attempt))
+                        continue
+                    raise last_rate_limit
+
+                if resp.status_code == 401:
+                    raise AuthError("Capital.com rejected the credentials")
+                if resp.status_code >= 400:
+                    raise BrokerError(f"Session failed: HTTP {resp.status_code} {resp.text[:200]}")
+
+                cst = resp.headers.get("CST")
+                sec = resp.headers.get("X-SECURITY-TOKEN")
+                if not cst or not sec:
+                    raise AuthError("Capital.com session response missing CST/X-SECURITY-TOKEN")
+                self._cst = cst
+                self._sec_token = sec
+                return
 
     def _auth_headers(self) -> Dict[str, str]:
         return {
