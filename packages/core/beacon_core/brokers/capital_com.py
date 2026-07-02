@@ -18,7 +18,10 @@ from .types import (
     ModifyPositionRequest, NetworkError, NotFoundError, OrderSide,
     OrderStatus, OrderType, PlaceOrderRequest, RateLimitError, to_dec,
 )
+from ..logging import get_logger
 from datetime import datetime
+
+log = get_logger("capital")
 
 
 _LIVE_HOST = "api-capital.backend-capital.com"
@@ -118,7 +121,36 @@ class CapitalComAdapter(BrokerAdapter):
                     raise AuthError("Capital.com session response missing CST/X-SECURITY-TOKEN")
                 self._cst = cst
                 self._sec_token = sec
+                await self._select_account(client)
                 return
+
+    async def _select_account(self, client) -> None:
+        """Switch the session to the configured account (accountId).
+
+        Capital.com places every order on the session's *active* account. Without
+        this, orders would land on the login's default account regardless of the
+        account you mapped in Beacon — so nothing would appear on the account you
+        are watching. Best-effort: a bad/absent id leaves the default active."""
+        acct = self.credentials.get("account_id")
+        if not acct:
+            return
+        try:
+            resp = await client.put(
+                "/api/v1/session", json={"accountId": str(acct)},
+                headers=self._auth_headers())
+            if resp.status_code >= 400:
+                log.warning("account switch to %s failed: HTTP %s %s",
+                            acct, resp.status_code, resp.text[:150])
+                return
+            # Some responses rotate the session tokens; keep them in sync.
+            cst = resp.headers.get("CST")
+            sec = resp.headers.get("X-SECURITY-TOKEN")
+            if cst:
+                self._cst = cst
+            if sec:
+                self._sec_token = sec
+        except httpx.RequestError as exc:
+            log.warning("account switch to %s errored: %s", acct, exc)
 
     def _auth_headers(self) -> Dict[str, str]:
         return {
@@ -173,7 +205,14 @@ class CapitalComAdapter(BrokerAdapter):
         accounts = data.get("accounts") or []
         if not accounts:
             raise NotFoundError("Capital.com returned no accounts")
-        a = accounts[0]
+        # Report the mapped account (equity used for sizing must match the
+        # account we actually trade on), else the preferred/first one.
+        target = self.credentials.get("account_id")
+        a = None
+        if target:
+            a = next((x for x in accounts if str(x.get("accountId")) == str(target)), None)
+        if a is None:
+            a = next((x for x in accounts if x.get("preferred")), accounts[0])
         bal = a.get("balance") or {}
         return AccountInfo(
             account_id=str(a.get("accountId") or ""),
@@ -290,9 +329,48 @@ class CapitalComAdapter(BrokerAdapter):
             raise BrokerError(f"Capital.com place_order missing dealReference: {data}")
 
         confirm = await self._request("GET", f"/api/v1/confirms/{deal_ref}")
-        status = _map_status(confirm.get("status") or confirm.get("dealStatus"))
+
+        # dealStatus is the authority on accept/reject (ACCEPTED | REJECTED).
+        # `status` is the resulting deal state (OPEN/…) and must NOT be used to
+        # infer acceptance. `reason` explains a rejection (e.g. MARKET_CLOSED,
+        # RISK_CHECK, INSUFFICIENT_FUNDS, MIN_SIZE, invalid epic).
+        deal_status = (confirm.get("dealStatus") or "").upper()
+        reason = confirm.get("reason")
+        affected = confirm.get("affectedDeals") or []
+
+        if deal_status and deal_status != "ACCEPTED":
+            return BrokerOrder(
+                broker_order_ref=str(confirm.get("dealId") or deal_ref),
+                broker_symbol=str(confirm.get("epic") or req.broker_symbol),
+                side=req.side, order_type=req.order_type,
+                quantity=req.quantity, limit_price=req.limit_price,
+                stop_loss=req.stop_loss, take_profit=req.take_profit,
+                status=OrderStatus.REJECTED,
+                rejection_reason=reason or confirm.get("status") or "rejected",
+                currency=confirm.get("currency"), raw=confirm,
+            )
+
+        if req.order_type == OrderType.MARKET:
+            # The opened position carries its OWN dealId in affectedDeals; that
+            # is the id GET /positions lists, so the monitor can reconcile it.
+            opened = next(
+                (d.get("dealId") for d in affected
+                 if (d.get("status") or "").upper() in ("OPENED", "OPEN", "FULLY_CLOSED")),
+                None,
+            )
+            ref = str(opened or confirm.get("dealId") or deal_ref)
+            status = OrderStatus.FILLED
+            fill_price = to_dec(confirm.get("level"))
+            fill_qty = to_dec(confirm.get("size")) or req.quantity
+        else:
+            # A resting working order: its dealId is what GET /workingorders lists.
+            ref = str(confirm.get("dealId") or deal_ref)
+            status = OrderStatus.WORKING
+            fill_price = None
+            fill_qty = None
+
         return BrokerOrder(
-            broker_order_ref=str(confirm.get("dealId") or deal_ref),
+            broker_order_ref=ref,
             broker_symbol=str(confirm.get("epic") or req.broker_symbol),
             side=req.side, order_type=req.order_type,
             quantity=to_dec(confirm.get("size")) or req.quantity,
@@ -300,10 +378,9 @@ class CapitalComAdapter(BrokerAdapter):
             stop_loss=to_dec(confirm.get("stopLevel") or req.stop_loss),
             take_profit=to_dec(confirm.get("profitLevel") or req.take_profit),
             status=status,
-            fill_price=to_dec(confirm.get("level")),
-            fill_quantity=to_dec(confirm.get("size")) if status == OrderStatus.FILLED else None,
+            fill_price=fill_price,
+            fill_quantity=fill_qty,
             currency=confirm.get("currency"),
-            rejection_reason=confirm.get("reason") if status == OrderStatus.REJECTED else None,
             raw=confirm,
         )
 

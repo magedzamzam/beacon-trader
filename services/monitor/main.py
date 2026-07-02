@@ -58,6 +58,7 @@ async def _adapter_for(session, account_id: int):
     broker = await session.get(Broker, acct.broker_id)
     creds = resolve_credentials(broker.credentials_ref)
     creds.setdefault("is_demo", broker.is_demo)
+    creds["account_id"] = acct.broker_account_id   # reconcile the mapped account
     return acct, broker, get_adapter(broker.type, creds)
 
 

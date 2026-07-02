@@ -24,6 +24,7 @@ async def _adapter_for_account(db, account_id):
     acct = await db.get(Account, account_id)
     broker = await db.get(Broker, acct.broker_id)
     creds = resolve_credentials(broker.credentials_ref); creds.setdefault("is_demo", broker.is_demo)
+    creds["account_id"] = acct.broker_account_id   # act on the mapped account
     return get_adapter(broker.type, creds)
 
 

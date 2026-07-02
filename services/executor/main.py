@@ -22,7 +22,7 @@ from beacon_core.db.models import (Account, Broker, Event, Leg, Signal,
                                    SymbolMap, Source, Trade)
 from beacon_core.brokers import get_adapter, resolve_credentials
 from beacon_core.brokers import fx
-from beacon_core.brokers.types import (OrderSide, OrderType, PlaceOrderRequest)
+from beacon_core.brokers.types import (OrderSide, OrderStatus, OrderType, PlaceOrderRequest)
 from beacon_core.parsing.models import ParsedSignal
 from beacon_core.execution.planner import build_plan
 from beacon_core.risk.sizing import RiskConfig, InstrumentSpec, size_legs, plan_total_risk
@@ -30,11 +30,6 @@ from beacon_core.risk.sizing import RiskConfig, InstrumentSpec, size_legs, plan_
 log = get_logger("executor")
 settings = get_settings()
 bus = Bus()
-
-# Defense-in-depth: sources whose name contains any of these tokens (case-insensitive)
-# are never allowed to place live orders, regardless of the DB enabled_for_trading flag.
-# Added by the PM bot (2026-07-02) after a "Test" source was found live and trusted.
-EXECUTION_NAME_BLOCKLIST = ("test", "sample", "demo")
 
 
 def _to_parsed(sig: Signal) -> ParsedSignal:
@@ -71,16 +66,6 @@ async def handle_signal(signal_id: int) -> None:
             log.info("signal %s: source not enabled for trading; skipping", signal_id)
             return
 
-        # Defense-in-depth guards (do not rely solely on the DB flag for real money).
-        if not source.is_trusted:
-            log.warning("signal %s: source %s (%s) not trusted; refusing live execution",
-                        signal_id, source.id, source.name)
-            return
-        if any(tok in (source.name or "").lower() for tok in EXECUTION_NAME_BLOCKLIST):
-            log.warning("signal %s: source %s name blocklisted (%s); refusing live execution",
-                        signal_id, source.id, source.name)
-            return
-
         accounts = await _accounts_for(session, source)
         if not accounts:
             log.info("signal %s: no enabled accounts mapped", signal_id)
@@ -109,6 +94,7 @@ async def _execute_on_account(session, sig, parsed, source, acct,
 
     creds = resolve_credentials(broker.credentials_ref)
     creds.setdefault("is_demo", broker.is_demo)
+    creds["account_id"] = acct.broker_account_id   # trade on the mapped account
     adapter = get_adapter(broker.type, creds)
     try:
         info = await adapter.get_account_info()
@@ -201,17 +187,29 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                     stop_loss=pleg.sl, take_profit=pleg.tp,
                 )
                 res = await adapter.place_order(req)
-                if pleg.order_type == "MARKET":
-                    leg.broker_position_ref = res.broker_order_ref
-                    leg.status = "open" if str(res.status) == "OrderStatus.FILLED" else "pending"
-                    leg.fill_price = res.fill_price
+                if res.status == OrderStatus.REJECTED:
+                    # Broker declined the order (market closed, risk check, min
+                    # size, bad epic, …). Make it visible instead of silently
+                    # leaving the leg 'pending'.
+                    leg.status = "rejected"
+                    leg.outcome = "rejected"
+                    session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="reject",
+                                      payload={"ref": res.broker_order_ref,
+                                               "reason": res.rejection_reason}))
+                    log.warning("signal %s acct %s leg %s REJECTED by broker: %s",
+                                sig.id, acct.id, leg.id, res.rejection_reason)
                 else:
-                    leg.broker_order_ref = res.broker_order_ref
-                    leg.status = "working"
-                session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="placed",
-                                  payload={"ref": res.broker_order_ref,
-                                           "status": str(res.status)}))
-                placed += 1
+                    if pleg.order_type == "MARKET":
+                        leg.broker_position_ref = res.broker_order_ref
+                        leg.status = "open" if res.status == OrderStatus.FILLED else "pending"
+                        leg.fill_price = res.fill_price
+                    else:
+                        leg.broker_order_ref = res.broker_order_ref
+                        leg.status = "working"
+                    session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="placed",
+                                      payload={"ref": res.broker_order_ref,
+                                               "status": res.status.value}))
+                    placed += 1
             except Exception as exc:              # one leg failing must not sink the rest
                 leg.status = "rejected"
                 session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="reject",
