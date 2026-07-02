@@ -112,16 +112,31 @@ class Capital:
             h.update(extra)
         return h
 
-    def login(self) -> dict:
+    def login(self, max_retries: int = 5) -> dict:
         print(f"Base URL : {self.base}  ({'DEMO' if self.demo else 'LIVE'})")
         print(f"API key  : {mask(self.api_key)}")
         print(f"Username : {self.username}")
-        r = self._c.post("/api/v1/session",
-                         headers=self._headers(),
-                         json={"identifier": self.username, "password": self.password})
-        if r.status_code != 200:
+        delay = 5
+        for attempt in range(1, max_retries + 1):
+            r = self._c.post("/api/v1/session",
+                             headers=self._headers(),
+                             json={"identifier": self.username, "password": self.password})
+            if r.status_code == 200:
+                break
+            if r.status_code == 429:
+                # Session-creation throttle. Usually means another client (your
+                # running Beacon services) is also creating sessions with this key.
+                print(f"  429 too-many-requests — waiting {delay}s "
+                      f"(attempt {attempt}/{max_retries}). "
+                      f"Tip: `docker compose stop executor monitor api` first.")
+                time.sleep(delay)
+                delay = min(delay * 2, 60)
+                continue
             dump("SESSION ERROR", {"status": r.status_code, "body": r.text})
             sys.exit("Login failed. Check credentials and demo/live mode.")
+        else:
+            sys.exit("Still rate-limited after retries. Stop the Beacon stack "
+                     "and wait ~1–2 minutes, then try again.")
         self.cst = r.headers.get("CST")
         self.xst = r.headers.get("X-SECURITY-TOKEN")
         keyfields("session tokens", {"CST": mask(self.cst or ""),
