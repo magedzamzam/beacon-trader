@@ -1,6 +1,6 @@
 """Idempotent seed: a demo Capital.com broker (credentials via .env), one
 account with a default risk config, an XAUUSD symbol map, and two sample
-sources (a telegram channel + a manual desk) wired with a tp_strategy, SL
+sources (a telegram channel + a manual desk) wired with SL
 rules, and per-TP risk. Safe to run repeatedly.
 
     docker compose run --rm api python -m app.seed
@@ -61,11 +61,12 @@ async def main():
                 external_id="-1000000000000", enabled_for_trading=False,
                 is_trusted=True,
                 strategy={"order_position_type": "MARKET",
-                          "tp_strategy": "tp1, tp1, tp2, tp3",
                           "entry_ttl_minutes": 60,
                           "sl_rules": [
                               {"trigger": {"type": "tp_hit", "index": 1},
-                               "action": {"type": "move_sl_to", "target": "entry"}}]},
+                               "action": {"type": "move_sl_to", "target": "entry"}},
+                              {"trigger": {"type": "tp_hit", "index": 2},
+                               "action": {"type": "move_sl_to", "target": "previous_tp"}}]},
                 risk_config={},                # inherit account risk_config
                 account_map=[account.id]))
 
@@ -76,7 +77,6 @@ async def main():
                 external_id="manual-desk-key", enabled_for_trading=True,
                 is_trusted=True,
                 strategy={"order_position_type": "MARKET",
-                          "tp_strategy": "tp1, tp2, tp3",
                           "entry_ttl_minutes": 60,
                           "sl_rules": [
                               {"trigger": {"type": "tp_hit", "index": 1},

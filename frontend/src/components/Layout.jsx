@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { Activity, BarChart3, Radio, Radar, ListChecks, Rss,
-         Building2, Moon, Sun, KeyRound, ShieldCheck, Coins } from "lucide-react";
+         Building2, Moon, Sun, KeyRound, ShieldCheck, Coins, CandlestickChart } from "lucide-react";
 import { api, getToken, setToken } from "../lib/api";
 import { toggleTheme } from "../lib/theme";
 
 const NAV = [
   { id: "dashboard", label: "Dashboard", icon: Activity },
   { id: "positions", label: "Positions", icon: Radar },
+  { id: "chart", label: "Chart", icon: CandlestickChart },
   { id: "signals", label: "Signals", icon: Radio },
   { id: "history", label: "History", icon: ListChecks },
   { id: "performance", label: "Performance", icon: BarChart3 },

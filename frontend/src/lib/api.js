@@ -54,6 +54,13 @@ export const api = {
   // legs
   cancelLeg: (id) => post(`/legs/${id}/cancel`, {}),
   closeLeg: (id) => post(`/legs/${id}/close`, {}),
+  bulkLegs: (payload) => post(`/legs/bulk`, payload),
+  // signals
+  manualSignal: (s) => post(`/signals/manual`, s),
+  reinitiate: (id) => post(`/signals/${id}/reinitiate`, {}),
+  // market
+  candles: (symbol, resolution, max_bars=200) => req(`/market/candles?symbol=${symbol}&resolution=${resolution}&max_bars=${max_bars}`),
+  quote: (symbol) => req(`/market/quote?symbol=${symbol}`),
   // sources
   createSource: (s) => post("/sources", s),
   updateSource: (id, s) => patch(`/sources/${id}`, s),

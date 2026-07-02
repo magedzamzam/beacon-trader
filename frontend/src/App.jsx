@@ -9,10 +9,11 @@ import Sources from "./pages/Sources";
 import Brokers from "./pages/Brokers";
 import Symbols from "./pages/Symbols";
 import Risk from "./pages/Risk";
+import Chart from "./pages/Chart";
 
 const PAGES = { dashboard: Dashboard, positions: Positions, signals: Signals,
   history: History, performance: Performance, sources: Sources, brokers: Brokers,
-  symbols: Symbols, risk: Risk };
+  symbols: Symbols, risk: Risk, chart: Chart };
 
 export default function App() {
   const [view, setView] = useState("dashboard");

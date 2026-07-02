@@ -72,18 +72,17 @@ async def handle_signal(signal_id: int) -> None:
 
         parsed = _to_parsed(sig)
         strat = source.strategy or {}
-        tp_strategy = strat.get("tp_strategy", "")
         order_position_type = strat.get("order_position_type", sig.order_type or "MARKET")
 
         for acct in accounts:
             await _execute_on_account(session, sig, parsed, source, acct,
-                                      tp_strategy, order_position_type)
+                                      order_position_type)
         sig.status = "executed"
         await session.commit()
 
 
 async def _execute_on_account(session, sig, parsed, source, acct,
-                              tp_strategy, order_position_type) -> None:
+                              order_position_type) -> None:
     broker = await session.get(Broker, acct.broker_id)
     smap = await _symbol_map(session, broker.id, parsed.symbol)
     if not smap:
@@ -116,8 +115,7 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             return
 
         plan = build_plan(
-            parsed, tp_strategy=tp_strategy,
-            order_position_type=order_position_type, current_price=current,
+            parsed, order_position_type=order_position_type, current_price=current,
             min_stop_distance=smap.min_stop_distance,
         )
         risk = RiskConfig.from_dict(source.risk_config or acct.risk_config or {})

@@ -43,7 +43,6 @@ export default function Sources() {
                   <Td><Badge>{s.kind}</Badge></Td>
                   <Td mono>{s.external_id || "—"}</Td>
                   <Td>{s.strategy?.order_position_type || "—"}</Td>
-                  <Td mono>{s.strategy?.tp_strategy || "—"}</Td>
                   <Td mono>{(s.account_map || []).length}</Td>
                   <Td><Toggle checked={s.enabled_for_trading}
                     onChange={async v => { await api.updateSource(s.id, { enabled_for_trading: v }); load(); }} /></Td>
@@ -72,7 +71,6 @@ function SourceModal({ source, accounts, onClose, onSaved }) {
   const [name, setName] = useState(s.name || "");
   const [externalId, setExternalId] = useState(s.external_id || "");
   const [orderType, setOrderType] = useState(strat.order_position_type || "MARKET");
-  const [tpStrategy, setTpStrategy] = useState(strat.tp_strategy || "tp1, tp2, tp3");
   const [ttl, setTtl] = useState(strat.entry_ttl_minutes ?? 60);
   const [trusted, setTrusted] = useState(s.is_trusted || false);
   const [enabled, setEnabled] = useState(s.enabled_for_trading || false);
@@ -89,7 +87,7 @@ function SourceModal({ source, accounts, onClose, onSaved }) {
     const payload = {
       kind, name, external_id: externalId || null,
       is_trusted: trusted, enabled_for_trading: enabled,
-      strategy: { order_position_type: orderType, tp_strategy: tpStrategy,
+      strategy: { order_position_type: orderType,
                   entry_ttl_minutes: +ttl, sl_rules: slRules },
       risk_config: useRisk ? risk : {},
       account_map: accountMap,
@@ -120,15 +118,12 @@ function SourceModal({ source, accounts, onClose, onSaved }) {
         <Input mono value={externalId} onChange={e => setExternalId(e.target.value)} />
       </Field>
 
-      <div className="grid grid-cols-3 gap-3">
-        <Field label="Order type" hint="LIMIT = limit orders only">
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Order type" hint="LIMIT = limit orders only; opens one leg per TP per entry">
           <Select value={orderType} onChange={e => setOrderType(e.target.value)}>
             <option value="MARKET">MARKET</option>
             <option value="LIMIT">LIMIT</option>
           </Select>
-        </Field>
-        <Field label="TP strategy" hint="repeat a token to weight it">
-          <Input mono value={tpStrategy} onChange={e => setTpStrategy(e.target.value)} />
         </Field>
         <Field label="Entry TTL (min)"><Input type="number" value={ttl} onChange={e => setTtl(e.target.value)} /></Field>
       </div>

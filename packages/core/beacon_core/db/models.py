@@ -66,7 +66,7 @@ class Source(Base):
     external_id: Mapped[str | None] = mapped_column(String(64), nullable=True)  # channel_id / api key
     enabled_for_trading: Mapped[bool] = mapped_column(Boolean, default=False)
     is_trusted: Mapped[bool] = mapped_column(Boolean, default=False)
-    # strategy: {order_position_type, tp_strategy, entry_ttl_minutes, sl_rules:[...]}
+    # strategy: {order_position_type, entry_ttl_minutes, sl_rules:[...]}
     strategy: Mapped[dict] = mapped_column(JSON, default=dict)
     risk_config: Mapped[dict] = mapped_column(JSON, default=dict)  # overrides account default
     account_map: Mapped[list] = mapped_column(JSON, default=list)  # [account_id, ...]

@@ -60,56 +60,52 @@ Capital.com ships in the box; adding a broker is one class + a registry entry.
 One signal becomes **N legs**:
 
 ```
-legs = (distinct entry levels) × (tp_strategy tokens)
+legs = (distinct entry levels) × (take-profit levels)
 ```
 
-`tp_strategy` is a per-source template, e.g. `"tp1, tp1, tp2, tp3"`. Each token
-is one leg targeting that TP; repeating `tp1` is how you weight the
-high-probability target. A single entry with `tp1,tp2,tp3` → 3 legs; a **range
-entry** (`entry_from ≠ entry_to`) doubles it to 6.
-
-**Worked example** (verified in `packages/core`): `BUY 4105-4102, TP 4110/4112/4114,
-SL 4098`, template `tp1,tp1,tp2,tp3`, MARKET at 4104.5 → **8 legs**.
+One leg per TP per entry — nothing else. A single entry with 3 TPs → 3 legs; a
+**range entry** (`entry_from ≠ entry_to`) with 3 TPs → 6 legs. The signal's own
+entries and TPs define the shape.
 
 **Risk** is two independent choices (see `beacon_core.risk.sizing`):
 
 - **basis** — how the per-signal budget is set:
   - `capital_percent` → budget = equity × value/100
-  - `fixed_cash` → budget = an exact dollar amount you're willing to lose
+  - `fixed_cash` → an exact amount you're willing to lose
 - **allocation** — how it spreads across legs:
   - `even` → each leg risks budget / N
   - `per_tp` → each leg risks `equity × per_tp_percent[tp_index]/100`
-    (mirrors the old `tpN_capital_risk_percent`)
 
-`lot = risk_cash / (|entry − sl| × value_per_point)`, rounded down to `lot_step`;
-legs below `min_lot` are dropped, not over-risked.
+`lot = risk_cash / (|entry − sl| × value_per_point)`, rounded down to `lot_step`.
 
-> **Calibrate `value_per_point`.** It is money per 1.0 price move per 1.0 broker
-> size, stored on the symbol map. It is the one number that makes real-money
-> sizing correct. The seed uses `1` as a placeholder — set it to your broker's
-> actual gold contract value before trading real funds.
+**Currency is handled dynamically.** The executor reads the account currency
+(from the account) and the instrument currency (from the broker's gold market),
+then resolves the FX rate from the broker's **own FX market** — no hardcoded
+rate — to convert the risk budget before sizing. A USD account needs no
+conversion; an AED account is converted at the live rate. If no FX route exists,
+that account is skipped (logged `fx_unavailable`) rather than mis-sized.
 
-> **`per_tp` + range entries multiply exposure.** Each entry leg takes the full
-> per-TP risk, so a 2-entry signal with `4%/2%/1.5%` risks ~23% of equity if
-> everything hits SL. Use `even`, trim the template, or lower the percentages if
-> that's more than you intend. The dashboard shows worst-case risk per trade.
+> **Calibrate `value_per_point`** (money per 1.0 price move per 1.0 size, in the
+> instrument's currency) on the symbol map before trading real funds.
 
 ---
 
 ## Stop-loss rules
 
 Declarative per source (`strategy.sl_rules`), evaluated by the monitor off the
-**live price** (so a reversal is acted on without waiting for a fill confirm):
+**live price**. Rules chain — each fires independently and the engine applies
+whichever tightens the stop most (it never loosens).
 
-```json
-{"trigger": {"type": "tp_hit", "index": 1},
- "action":  {"type": "move_sl_to", "target": "entry"}}
-{"trigger": {"type": "price_move", "points": 3},
- "action":  {"type": "move_sl_to", "target": "number", "value": 4102}}
+Triggers: `tp_hit` (index) or `price_move` (points).
+Actions (`move_sl_to`): `entry`, `number` (value), `tp` (index), `previous_tp`.
+
+The classic ratchet:
+
 ```
-
-Two actions: **move SL to entry**, **move SL to a number**. Stops only ever
-tighten toward profit — a rule can never loosen a stop.
+TP1 hit → SL to entry
+TP2 hit → SL to previous_tp   (TP1)
+TP3 hit → SL to previous_tp   (TP2)
+```
 
 ---
 

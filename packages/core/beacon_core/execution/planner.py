@@ -1,22 +1,18 @@
-"""Fanout planner — turns one ParsedSignal into N concrete legs.
+"""Fanout planner — one ParsedSignal becomes N concrete legs.
 
-legs = (distinct entry levels) x (tp_strategy tokens)
+    legs = (distinct entry levels) x (take-profit levels)
 
-`tp_strategy` is a per-source template like "tp1, tp1, tp2, tp3": each token is
-one leg targeting that TP index. Repeating tp1 is how a source weights the
-high-probability target. A single entry with "tp1,tp2,tp3" => 3 legs; a range
-entry (entry_from != entry_to) doubles that to 6, matching the spec example.
+One leg per TP per entry. A single entry with 3 TPs -> 3 legs; a range entry
+(entry_from != entry_to) with 3 TPs -> 6 legs. No templates, no weighting: the
+signal's own entries and TPs define the shape.
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import List, Optional
 
 from ..parsing.models import ParsedSignal
-
-_TOKEN_RE = re.compile(r"tp\s*(\d+)", re.I)
 
 
 @dataclass
@@ -63,14 +59,7 @@ def validate_signal(sig: ParsedSignal) -> tuple[bool, Optional[str]]:
     return True, None
 
 
-def _parse_template(tp_strategy: str, n_tps: int) -> List[int]:
-    tokens = [int(m) for m in _TOKEN_RE.findall(tp_strategy or "")]
-    if not tokens:                       # default: one leg per available TP
-        tokens = list(range(1, n_tps + 1))
-    return tokens
-
-
-def build_plan(sig: ParsedSignal, *, tp_strategy: str, order_position_type: str,
+def build_plan(sig: ParsedSignal, *, order_position_type: str,
                current_price: Decimal,
                min_stop_distance: Optional[Decimal] = None) -> FanoutPlan:
     order_type = (order_position_type or "MARKET").upper()
@@ -78,22 +67,17 @@ def build_plan(sig: ParsedSignal, *, tp_strategy: str, order_position_type: str,
     if sig.entry_to != sig.entry_from:
         entries.append(sig.entry_to)
 
-    tokens = _parse_template(tp_strategy, len(sig.tps))
     plan = FanoutPlan(symbol=sig.symbol, direction=sig.direction, order_type=order_type)
 
     for entry in entries:
         # MARKET fills at the live price; LIMIT rests at the signalled level.
         leg_entry = current_price if order_type == "MARKET" else entry
-        for tok in tokens:
-            if tok < 1 or tok > len(sig.tps):
-                continue
-            tp = sig.tps[tok - 1]
+        for idx, tp in enumerate(sig.tps, start=1):
             leg = PlannedLeg(side=sig.direction, entry=leg_entry, tp=tp,
-                             sl=sig.sl, tp_index=tok, order_type=order_type)
+                             sl=sig.sl, tp_index=idx, order_type=order_type)
             # Broker minimum stop/limit distance: drop only the offending leg.
-            if min_stop_distance is not None:
-                if abs(tp - leg_entry) < min_stop_distance:
-                    leg.valid = False
-                    leg.skip_reason = "tp within broker min distance"
+            if min_stop_distance is not None and abs(tp - leg_entry) < min_stop_distance:
+                leg.valid = False
+                leg.skip_reason = "tp within broker min distance"
             plan.legs.append(leg)
     return plan

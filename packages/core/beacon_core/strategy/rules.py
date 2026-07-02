@@ -1,18 +1,27 @@
 """SL-move rule engine. Declarative triggers -> actions, evaluated by the
-monitor. Kept to exactly what's needed now (move SL to entry / to a number),
-but the shape extends to trailing without touching callers.
+monitor. Multiple rules chain naturally: each fires independently, and the
+engine applies the one that tightens the stop the most.
 
-Rule example:
-  {"trigger": {"type": "tp_hit", "index": 1},
-   "action":  {"type": "move_sl_to", "target": "entry"}}
-  {"trigger": {"type": "price_move", "points": 3},
-   "action":  {"type": "move_sl_to", "target": "number", "value": 4102}}
+Triggers:
+  {"type": "tp_hit", "index": 1}
+  {"type": "price_move", "points": 3}
+
+Actions (move_sl_to):
+  {"target": "entry"}
+  {"target": "number", "value": 4102}
+  {"target": "tp", "index": 1}        -> move SL onto TP1's price
+  {"target": "previous_tp"}           -> move SL onto the TP before the one that fired
+
+Example (the classic ratchet):
+  TP1 hit  -> SL to entry
+  TP2 hit  -> SL to previous_tp   (i.e. TP1)
+  TP3 hit  -> SL to previous_tp   (i.e. TP2)
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import List, Optional, Set
+from typing import Dict, List, Optional, Set
 
 
 @dataclass
@@ -21,6 +30,7 @@ class PositionCtx:
     entry: Decimal
     current_sl: Optional[Decimal]
     current_price: Decimal
+    tps: Dict[int, Decimal] = field(default_factory=dict)   # {1: price, 2: price, ...}
 
 
 def _triggered(trigger: dict, ctx: PositionCtx, tps_hit: Set[int]) -> bool:
@@ -35,7 +45,8 @@ def _triggered(trigger: dict, ctx: PositionCtx, tps_hit: Set[int]) -> bool:
     return False
 
 
-def _target_sl(action: dict, ctx: PositionCtx) -> Optional[Decimal]:
+def _target_sl(rule: dict, ctx: PositionCtx) -> Optional[Decimal]:
+    action = rule.get("action", {})
     if action.get("type") != "move_sl_to":
         return None
     target = action.get("target")
@@ -44,6 +55,15 @@ def _target_sl(action: dict, ctx: PositionCtx) -> Optional[Decimal]:
     if target == "number":
         v = action.get("value")
         return Decimal(str(v)) if v is not None else None
+    if target == "tp":
+        i = int(action.get("index", 0))
+        return ctx.tps.get(i)
+    if target == "previous_tp":
+        trig = rule.get("trigger", {})
+        if trig.get("type") != "tp_hit":
+            return None
+        prev = int(trig.get("index", 0)) - 1
+        return ctx.tps.get(prev)
     return None
 
 
@@ -62,7 +82,7 @@ def evaluate(ctx: PositionCtx, rules: List[dict],
     for rule in rules or []:
         if not _triggered(rule.get("trigger", {}), ctx, tps_hit):
             continue
-        cand = _target_sl(rule.get("action", {}), ctx)
+        cand = _target_sl(rule, ctx)
         if cand is None or not _is_improvement(ctx.side, cand, ctx.current_sl):
             continue
         if best is None or _is_improvement(ctx.side, cand, best):

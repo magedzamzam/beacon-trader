@@ -3,20 +3,54 @@
 @tailwind utilities;
 
 :root {
-  --bg: #0b0e14; --panel: #121722; --panel-2: #0f141d; --edge: #1e2633;
-  --ink: #e6eaf2; --muted: #8a93a6;
-  --beacon: #34e1c4; --long: #21d07a; --short: #ff5c6c; --warn: #f5a524;
+  --bg: #090c12; --panel: #10151f; --panel-2: #0c1119; --edge: #1c2430;
+  --ink: #eaeef6; --muted: #8b95a7;
+  --beacon: #35e0c4; --beacon-2: #4b9bff; --violet: #9a7cff;
+  --long: #29d391; --short: #ff5d6c; --warn: #f7b955;
+  --grad-a: linear-gradient(135deg, #35e0c4 0%, #4b9bff 100%);
+  --grad-b: linear-gradient(135deg, #29d391 0%, #17b0a3 100%);
+  --grad-c: linear-gradient(135deg, #ff5d6c 0%, #ff7aa0 100%);
+  --grad-d: linear-gradient(135deg, #9a7cff 0%, #4b9bff 100%);
 }
 :root:not(.dark) {
-  --bg: #f5f7fa; --panel: #ffffff; --panel-2: #eef2f7; --edge: #e2e7ef;
-  --ink: #10151f; --muted: #5c6675;
-  --beacon: #0bb39a; --long: #12a85e; --short: #e23b4a; --warn: #c77b00;
+  --bg: #f4f6fb; --panel: #ffffff; --panel-2: #eef2f8; --edge: #e4e9f2;
+  --ink: #0f1523; --muted: #5b6577;
+  --beacon: #0bb39a; --beacon-2: #2f7ff0; --violet: #7b5cf0;
+  --long: #10a35c; --short: #e23b4a; --warn: #c77b00;
+  --grad-a: linear-gradient(135deg, #12c3ab 0%, #3f8bf5 100%);
+  --grad-b: linear-gradient(135deg, #17b877 0%, #0e9c90 100%);
+  --grad-c: linear-gradient(135deg, #f0505f 0%, #f57a9a 100%);
+  --grad-d: linear-gradient(135deg, #7b5cf0 0%, #3f8bf5 100%);
 }
 html, body, #root { height: 100%; }
 body { background: var(--bg); color: var(--ink); font-family: Inter, system-ui, sans-serif; }
 .num { font-family: "JetBrains Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
 
-/* Signature: the beacon pulse — a slow radar sweep that reads "alive". */
+/* soft radial glow behind the app for depth */
+body::before {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+  background:
+    radial-gradient(60rem 40rem at 80% -10%, color-mix(in srgb, var(--beacon-2) 12%, transparent), transparent 60%),
+    radial-gradient(50rem 30rem at -10% 20%, color-mix(in srgb, var(--violet) 10%, transparent), transparent 60%);
+}
+#root { position: relative; z-index: 1; }
+
+.grad-a { background-image: var(--grad-a); }
+.grad-b { background-image: var(--grad-b); }
+.grad-c { background-image: var(--grad-c); }
+.grad-d { background-image: var(--grad-d); }
+
+/* frosted card */
+.card {
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  border: 1px solid var(--edge);
+  border-radius: 1rem;
+  box-shadow: 0 1px 0 0 color-mix(in srgb, #fff 4%, transparent) inset,
+              0 12px 30px -18px rgba(0,0,0,.6);
+  backdrop-filter: blur(6px);
+}
+.row-hover:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); }
+
 @keyframes beacon-pulse {
   0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--beacon) 55%, transparent); }
   70% { box-shadow: 0 0 0 10px transparent; }

@@ -98,6 +98,7 @@ async def _process_trade(session, trade) -> None:
         orders = {o.broker_order_ref: o for o in await adapter.list_orders()}
         rules, strat, ttl_min = await _rules_for(session, trade)
         tps_hit = _tps_hit(trade.direction, price, legs)
+        tp_levels = {l.tp_index: Decimal(str(l.tp)) for l in legs}
 
         # positions already linked to an open leg of this trade (so we don't
         # re-claim them when deciding whether a vanished order was filled).
@@ -183,7 +184,8 @@ async def _process_trade(session, trade) -> None:
 
                 # --- SL-move rules on still-open legs ---
                 ctx = PositionCtx(side=trade.direction, entry=Decimal(str(leg.entry)),
-                                  current_sl=Decimal(str(leg.sl)), current_price=price)
+                                  current_sl=Decimal(str(leg.sl)), current_price=price,
+                                  tps=tp_levels)
                 new_sl = evaluate(ctx, rules, tps_hit)
                 if new_sl is not None:
                     try:

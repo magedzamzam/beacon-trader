@@ -64,3 +64,15 @@ async def tradingview_webhook(key: str, request: Request, db: AsyncSession = Dep
             sl=body["sl"], tps=body["tps"], order_type=body.get("order_type", "MARKET"),
             raw_text="tv")
     return {"signal_id": sid, "accepted": ok, "reason": reason}
+
+
+@router.post("/signals/{signal_id}/reinitiate", dependencies=[Depends(require_token)])
+async def reinitiate_signal(signal_id: int, db: AsyncSession = Depends(get_db)):
+    """Re-run a stored signal through the executor (opens fresh trades)."""
+    from beacon_core.bus import Bus
+    from beacon_core.config import CH_SIGNAL_VALID
+    sig = await db.get(Signal, signal_id)
+    if not sig:
+        raise HTTPException(404, "signal not found")
+    await Bus().publish(CH_SIGNAL_VALID, {"signal_id": sig.id})
+    return {"ok": True, "signal_id": sig.id}
