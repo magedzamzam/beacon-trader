@@ -563,6 +563,60 @@ class CapitalComAdapter(BrokerAdapter):
             ))
         return out
 
+    @staticmethod
+    def _parse_money(v) -> Optional[Decimal]:
+        """Parse Capital's profitAndLoss strings: 'AED176.40', '-USD1.23',
+        'USD-1.23', '(USD1.23)', 'USD 1,234.56' -> Decimal (sign preserved)."""
+        if v is None:
+            return None
+        if isinstance(v, (int, float, Decimal)):
+            return to_dec(v)
+        s = str(v).strip()
+        import re
+        first = re.search(r"\d", s)
+        if not first:
+            return None
+        neg = ("-" in s[:first.start()]) or s.startswith("(")
+        num = re.search(r"\d[\d,]*\.?\d*", s[first.start():])
+        try:
+            d = Decimal(num.group(0).replace(",", ""))
+        except Exception:
+            return None
+        return -d if neg else d
+
+    async def get_transactions(self, *, last_period: int = 3600,
+                               from_ts: Optional[str] = None,
+                               to_ts: Optional[str] = None) -> List[dict]:
+        """Recent account transactions (closed deals) with realized P&L.
+
+        GET /api/v1/history/transactions. Returns normalized dicts carrying the
+        actual close level, size, currency and realized P&L (in the ACCOUNT
+        currency) — the source of truth for what a closed position really made,
+        instead of inferring it from the live price at poll time.
+        """
+        params: Dict[str, str] = {}
+        if from_ts:
+            params["from"] = from_ts
+        if to_ts:
+            params["to"] = to_ts
+        if not (from_ts or to_ts):
+            params["lastPeriod"] = str(int(last_period))
+        data = await self._request("GET", "/api/v1/history/transactions", params=params)
+        out: List[dict] = []
+        for t in (data.get("transactions") or []):
+            out.append({
+                "instrument": t.get("instrumentName"),
+                "type": (t.get("transactionType") or "").upper(),
+                "open_level": to_dec(t.get("openLevel")),
+                "close_level": to_dec(t.get("closeLevel")),
+                "size": to_dec(t.get("size")),
+                "currency": t.get("currency"),
+                "pl": self._parse_money(t.get("profitAndLoss")),
+                "reference": t.get("reference"),
+                "raw": t,
+            })
+        return out
+
     async def get_quote(self, broker_symbol: str) -> BrokerQuote:
         """Live quote for one Capital.com epic.
 

@@ -126,7 +126,11 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
         orders = {o.broker_order_ref: o for o in await adapter.list_orders()}
         rules, strat, ttl_min = await _rules_for(session, trade)
         tps_hit = _tps_hit(trade.direction, price, legs)
-        tp_levels = {l.tp_index: Decimal(str(l.tp)) for l in legs}
+        # TP price map across ALL legs of the trade, so a ratchet rule that
+        # references a TP whose legs already closed still resolves its level.
+        _all_legs = (await session.execute(select(Leg).where(
+            Leg.trade_id == trade.id))).scalars().all()
+        tp_levels = {l.tp_index: Decimal(str(l.tp)) for l in _all_legs}
 
         # positions already linked to an open leg of this trade (so we don't
         # re-claim them when deciding whether a vanished order was filled).
@@ -143,12 +147,47 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                     return ref
             return None
 
-        def _near(target: Decimal) -> bool:
-            tol = Decimal(str(smap.min_stop_distance or "0")) or (abs(target) * Decimal("0.0005"))
-            return abs(price - target) <= tol
+        vpp = Decimal(str(smap.value_per_point))
 
+        # Broker deal history: fetched lazily (only when a close is detected) and
+        # once per tick. It gives the ACTUAL close level and realized P&L in the
+        # account currency — the source of truth. A closed leg is matched to a
+        # transaction by close level (nearest the leg's TP, else SL) and size,
+        # which also correctly labels a fast TP touch the poll interval missed.
+        _txn_cache = {"loaded": False, "list": []}
+
+        async def _transactions():
+            if not _txn_cache["loaded"]:
+                _txn_cache["loaded"] = True
+                getter = getattr(adapter, "get_transactions", None)
+                if getter is not None:
+                    try:
+                        _txn_cache["list"] = await getter(last_period=6 * 3600)
+                    except Exception as exc:
+                        log.warning("history fetch failed (trade %s): %s", trade.id, exc)
+            return _txn_cache["list"]
+
+        def _match_txn(txns, target: Decimal, tol: Decimal, lot: Decimal):
+            best = None
+            for t in txns:
+                if t.get("_used") or t.get("close_level") is None:
+                    continue
+                if t.get("type") and t["type"] not in ("TRADE", "DEAL", "POSITION"):
+                    continue
+                sz = t.get("size")
+                if (sz is not None and lot is not None
+                        and abs(abs(sz) - abs(lot)) > max(abs(lot) * Decimal("0.02"), Decimal("0.01"))):
+                    continue
+                if abs(t["close_level"] - target) > tol:
+                    continue
+                if best is None or abs(t["close_level"] - target) < abs(best["close_level"] - target):
+                    best = t
+            if best is not None:
+                best["_used"] = True
+            return best
+
+        # --- pass 1: reconcile fills, detect + attribute closes ---
         for leg in legs:
-            # --- reconcile working (limit) legs ---
             if leg.status == "working":
                 if leg.broker_order_ref not in orders:
                     # Left the book: either filled (a new position appears) or
@@ -167,65 +206,90 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                         session.add(Event(trade_id=trade.id, leg_id=leg.id,
                                           kind="cancelled_at_broker", payload={}))
                     continue
-                else:
-                    # TTL: cancel stale unfilled entries.
-                    age = (_utcnow() - leg.created_at).total_seconds() / 60.0
-                    if age > ttl_min:
-                        try:
-                            await adapter.cancel_order(leg.broker_order_ref)
-                        except Exception:
-                            pass
-                        leg.status = "expired"
-                        leg.outcome = "expired"
-                        leg.closed_at = _utcnow()
-                        session.add(Event(trade_id=trade.id, leg_id=leg.id,
-                                          kind="expired", payload={"age_min": age}))
-                    continue
+                age = (_utcnow() - leg.created_at).total_seconds() / 60.0
+                if age > ttl_min:
+                    try:
+                        await adapter.cancel_order(leg.broker_order_ref)
+                    except Exception:
+                        pass
+                    leg.status = "expired"
+                    leg.outcome = "expired"
+                    leg.closed_at = _utcnow()
+                    session.add(Event(trade_id=trade.id, leg_id=leg.id,
+                                      kind="expired", payload={"age_min": age}))
+                continue
 
-            # --- reconcile open positions: detect close ---
-            if leg.status == "open" and leg.broker_position_ref:
-                if leg.broker_position_ref not in positions:
-                    # Position gone. Attribute: near TP -> tp_hit, near SL ->
-                    # sl_hit, otherwise a manual/broker-side close.
-                    tp = Decimal(str(leg.tp)); sl = Decimal(str(leg.sl))
+            if (leg.status == "open" and leg.broker_position_ref
+                    and leg.broker_position_ref not in positions):
+                tp = Decimal(str(leg.tp)); sl = Decimal(str(leg.sl))
+                entry_px = Decimal(str(leg.fill_price if leg.fill_price is not None else leg.entry))
+                tol = Decimal(str(smap.min_stop_distance or "0")) or (abs(tp) * Decimal("0.001"))
+                txns = await _transactions()
+
+                outcome, close_px, pl, src = None, None, None, "heuristic"
+                match = _match_txn(txns, tp, tol, Decimal(str(leg.lot)))
+                if match is not None:
+                    outcome, close_px, pl, src = "tp_hit", match["close_level"], match.get("pl"), "broker"
+                else:
+                    match = _match_txn(txns, sl, tol, Decimal(str(leg.lot)))
+                    if match is not None:
+                        outcome, close_px, pl, src = "sl_hit", match["close_level"], match.get("pl"), "broker"
+
+                if outcome is None:
+                    # No broker match — fall back to the live-price heuristic.
                     tp_reached = (price >= tp) if trade.direction == "BUY" else (price <= tp)
                     sl_reached = (price <= sl) if trade.direction == "BUY" else (price >= sl)
-                    if tp_reached or _near(tp):
-                        leg.outcome = "tp_hit"; leg.close_price = tp
-                    elif sl_reached or _near(sl):
-                        leg.outcome = "sl_hit"; leg.close_price = sl
+                    if tp_reached or abs(price - tp) <= tol:
+                        outcome, close_px = "tp_hit", tp
+                    elif sl_reached or abs(price - sl) <= tol:
+                        outcome, close_px = "sl_hit", sl
                     else:
-                        leg.outcome = "manual"; leg.close_price = price
-                    dist = (leg.close_price - Decimal(str(leg.entry)))
+                        outcome, close_px = "manual", price
+
+                if pl is None:   # heuristic P&L is in INSTRUMENT currency
+                    dist = (close_px - entry_px)
                     if trade.direction == "SELL":
                         dist = -dist
-                    leg.realized_pl = dist * Decimal(str(leg.lot)) * Decimal(str(smap.value_per_point))
-                    leg.status = "closed"
-                    leg.closed_at = _utcnow()
-                    session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="closed",
-                                      payload={"outcome": leg.outcome,
-                                               "pl": str(leg.realized_pl)}))
-                    await bus.publish(CH_TRADE_EVENT, {"trade_id": trade.id,
-                                                       "leg_id": leg.id,
-                                                       "outcome": leg.outcome})
-                    continue
+                    pl = dist * Decimal(str(leg.lot)) * vpp
 
-                # --- SL-move rules on still-open legs ---
-                ctx = PositionCtx(side=trade.direction, entry=Decimal(str(leg.entry)),
-                                  current_sl=Decimal(str(leg.sl)), current_price=price,
-                                  tps=tp_levels)
-                new_sl = evaluate(ctx, rules, tps_hit)
-                if new_sl is not None:
-                    try:
-                        await adapter.modify_position(ModifyPositionRequest(
-                            broker_position_ref=leg.broker_position_ref, stop_loss=new_sl))
-                        leg.sl = new_sl
-                        leg.sl_moved = True
-                        session.add(Event(trade_id=trade.id, leg_id=leg.id,
-                                          kind="sl_moved", payload={"new_sl": str(new_sl)}))
-                        log.info("trade %s leg %s SL -> %s", trade.id, leg.id, new_sl)
-                    except Exception as exc:
-                        log.warning("SL move failed (leg %s): %s", leg.id, exc)
+                leg.outcome = outcome
+                leg.close_price = close_px
+                leg.realized_pl = pl
+                leg.status = "closed"
+                leg.closed_at = _utcnow()
+                session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="closed",
+                                  payload={"outcome": outcome, "pl": str(pl), "source": src}))
+                await bus.publish(CH_TRADE_EVENT, {"trade_id": trade.id, "leg_id": leg.id,
+                                                   "outcome": outcome})
+
+        # --- which TPs have actually been reached (persisted across ticks)? ---
+        closed_all = (await session.execute(select(Leg).where(
+            Leg.trade_id == trade.id, Leg.status == "closed"))).scalars().all()
+        achieved = {l.tp_index for l in closed_all if l.outcome == "tp_hit"}
+        effective_tps_hit = tps_hit | achieved
+
+        # --- pass 2: SL-move ratchet on still-open legs ---
+        for leg in legs:
+            if leg.status != "open" or not leg.broker_position_ref:
+                continue
+            if leg.broker_position_ref not in positions:
+                continue
+            ctx = PositionCtx(
+                side=trade.direction,
+                entry=Decimal(str(leg.fill_price if leg.fill_price is not None else leg.entry)),
+                current_sl=Decimal(str(leg.sl)), current_price=price, tps=tp_levels)
+            new_sl = evaluate(ctx, rules, effective_tps_hit)
+            if new_sl is not None:
+                try:
+                    await adapter.modify_position(ModifyPositionRequest(
+                        broker_position_ref=leg.broker_position_ref, stop_loss=new_sl))
+                    leg.sl = new_sl
+                    leg.sl_moved = True
+                    session.add(Event(trade_id=trade.id, leg_id=leg.id,
+                                      kind="sl_moved", payload={"new_sl": str(new_sl)}))
+                    log.info("trade %s leg %s SL -> %s", trade.id, leg.id, new_sl)
+                except Exception as exc:
+                    log.warning("SL move failed (leg %s): %s", leg.id, exc)
 
         # roll up trade
         remaining = (await session.execute(select(Leg).where(

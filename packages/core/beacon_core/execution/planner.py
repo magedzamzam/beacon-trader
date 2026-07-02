@@ -63,9 +63,15 @@ def build_plan(sig: ParsedSignal, *, order_position_type: str,
                current_price: Decimal,
                min_stop_distance: Optional[Decimal] = None) -> FanoutPlan:
     order_type = (order_position_type or "MARKET").upper()
-    entries = [sig.entry_from]
-    if sig.entry_to != sig.entry_from:
-        entries.append(sig.entry_to)
+    # A MARKET order fills once at the live price, so a range entry is meaningless
+    # here — using both bounds would open TWO identical legs per TP (double size).
+    # Only LIMIT orders rest a separate leg at each distinct entry level.
+    if order_type == "MARKET":
+        entries = [sig.entry_from]
+    else:
+        entries = [sig.entry_from]
+        if sig.entry_to != sig.entry_from:
+            entries.append(sig.entry_to)
 
     plan = FanoutPlan(symbol=sig.symbol, direction=sig.direction, order_type=order_type)
 
