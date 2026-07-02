@@ -1,24 +1,27 @@
 import { useEffect, useState } from "react";
-import { Activity, BarChart3, Radio, Radar, ListChecks, Rss,
-         Building2, Moon, Sun, KeyRound, ShieldCheck, Coins, CandlestickChart,
-         MessageSquare, Sparkles, GitBranch, LogOut, Menu, X } from "lucide-react";
+import { Activity, Radio, Radar, ListChecks, CandlestickChart,
+         MessageSquare, GitBranch, Moon, Sun, KeyRound, LogOut,
+         Menu, X, SlidersHorizontal } from "lucide-react";
 import { api, getToken, setToken, clearToken } from "../lib/api";
 import { toggleTheme } from "../lib/theme";
 
+// Consolidated navigation: a lean Overview + Live monitoring set, with every
+// broker/account/risk/source/symbol/AI/currency setting folded into Configuration.
 const NAV = [
-  { id: "dashboard", label: "Dashboard", icon: Activity },
-  { id: "positions", label: "Positions", icon: Radar },
-  { id: "chart", label: "Chart", icon: CandlestickChart },
-  { id: "signals", label: "Signals", icon: Radio },
-  { id: "messages", label: "Messages", icon: MessageSquare },
-  { id: "activity", label: "Activity", icon: GitBranch },
-  { id: "history", label: "History", icon: ListChecks },
-  { id: "performance", label: "Performance", icon: BarChart3 },
-  { id: "ai", label: "AI", icon: Sparkles },
-  { id: "risk", label: "Risk", icon: ShieldCheck },
-  { id: "sources", label: "Sources", icon: Rss },
-  { id: "brokers", label: "Brokers", icon: Building2 },
-  { id: "symbols", label: "Symbols", icon: Coins },
+  { title: "Overview", items: [
+    { id: "dashboard", label: "Dashboard", icon: Activity },
+  ]},
+  { title: "Live", items: [
+    { id: "positions", label: "Positions", icon: Radar },
+    { id: "signals", label: "Signals", icon: Radio },
+    { id: "chart", label: "Chart", icon: CandlestickChart },
+    { id: "messages", label: "Messages", icon: MessageSquare },
+    { id: "activity", label: "Activity", icon: GitBranch },
+    { id: "history", label: "History", icon: ListChecks },
+  ]},
+  { title: "Settings", items: [
+    { id: "configuration", label: "Configuration", icon: SlidersHorizontal },
+  ]},
 ];
 
 function HealthPulse() {
@@ -81,13 +84,18 @@ export default function Layout({ view, setView, children }) {
             <X className="w-4 h-4" />
           </button>
         </div>
-        <nav className="p-2 flex-1 overflow-y-auto">
-          {NAV.map(({ id, label, icon: Icon }) => (
-            <button key={id} onClick={() => go(id)}
-              className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm mb-0.5 transition
-                ${view === id ? "bg-beacon/10 text-beacon" : "text-muted hover:text-ink hover:bg-panel"}`}>
-              <Icon className="w-4 h-4" /> {label}
-            </button>
+        <nav className="p-2 flex-1 overflow-y-auto space-y-3">
+          {NAV.map(group => (
+            <div key={group.title}>
+              <div className="px-3 pt-1 pb-1.5 text-[10px] uppercase tracking-[0.16em] text-muted">{group.title}</div>
+              {group.items.map(({ id, label, icon: Icon }) => (
+                <button key={id} onClick={() => go(id)}
+                  className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm mb-0.5 transition
+                    ${view === id ? "bg-beacon/10 text-beacon" : "text-muted hover:text-ink hover:bg-panel"}`}>
+                  <Icon className="w-4 h-4" /> {label}
+                </button>
+              ))}
+            </div>
           ))}
         </nav>
         <div className="p-4 border-t border-edge"><HealthPulse /></div>
