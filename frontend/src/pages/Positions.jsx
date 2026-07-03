@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { RefreshCw, XCircle, Ban, Shield } from "lucide-react";
 import { Card, Table, Th, Td, Badge, Empty } from "../components/ui";
 import { Button, ErrorNote, Modal, Field, NumberInput } from "../components/form";
+import TradeDetail from "../components/TradeDetail";
 import { api } from "../lib/api";
 
 const OPEN = new Set(["open", "working", "pending"]);
@@ -12,6 +13,7 @@ export default function Positions() {
   const [sel, setSel] = useState(new Set());
   const [busy, setBusy] = useState(false);
   const [moveSl, setMoveSl] = useState(false);
+  const [detail, setDetail] = useState(null);
 
   const load = async () => {
     try { setTrades(await api.trades()); setErr(null); } catch (e) { setErr(e.message); }
@@ -71,7 +73,7 @@ export default function Positions() {
               {rows.map(({ t, l }) => (
                 <tr key={l.id} className="row-hover">
                   <Td><input type="checkbox" checked={sel.has(l.id)} onChange={() => toggle(l.id)} /></Td>
-                  <Td mono>{t.id}</Td><Td>{t.symbol}</Td>
+                  <Td mono><button className="text-beacon hover:underline" onClick={() => setDetail(t.id)}>{t.id}</button></Td><Td>{t.symbol}</Td>
                   <Td><Badge dot tone={t.direction === "BUY" ? "long" : "short"}>{t.direction}</Badge></Td>
                   <Td>{l.order_type}</Td><Td right mono>{l.tp_index}</Td>
                   <Td right mono>{Number(l.entry).toFixed(2)}</Td>
@@ -96,6 +98,7 @@ export default function Positions() {
 
       {moveSl && <MoveSlModal count={sel.size} onClose={() => setMoveSl(false)}
         onSubmit={async (sl) => { setMoveSl(false); await run({ action: "move_sl", leg_ids: selIds, sl }); }} />}
+      {detail && <TradeDetail tradeId={detail} onClose={() => setDetail(null)} />}
     </div>
   );
 }

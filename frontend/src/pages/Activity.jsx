@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { Card, Th, Td, Badge, Empty } from "../components/ui";
 import { Button, ErrorNote } from "../components/form";
+import TradeDetail from "../components/TradeDetail";
 import { api } from "../lib/api";
 
 // The execution workflow, end to end: every decision the platform made and
@@ -16,6 +17,7 @@ const TONE = {
 export default function Activity() {
   const [rows, setRows] = useState(null);
   const [err, setErr] = useState(null);
+  const [detail, setDetail] = useState(null);
 
   const load = async () => {
     try { setRows(await api.events("?limit=300")); setErr(null); }
@@ -41,7 +43,9 @@ export default function Activity() {
                 <tr key={e.id} className="border-b border-edge/60 align-top">
                   <Td mono>{(e.ts || "").slice(0, 19).replace("T", " ")}</Td>
                   <Td><Badge tone={TONE[e.kind] || "muted"}>{e.kind}</Badge></Td>
-                  <Td right mono>{e.trade_id ? `#${e.trade_id}` : "—"}</Td>
+                  <Td right mono>{e.trade_id
+                    ? <button className="text-beacon hover:underline" onClick={() => setDetail(e.trade_id)}>#{e.trade_id}</button>
+                    : "—"}</Td>
                   <Td right mono>{e.leg_id ? `#${e.leg_id}` : "—"}</Td>
                   <Td><code className="text-[11px] text-muted break-all">{JSON.stringify(e.payload)}</code></Td>
                 </tr>
@@ -50,6 +54,7 @@ export default function Activity() {
           </table>
         )}
       </Card>
+      {detail && <TradeDetail tradeId={detail} onClose={() => setDetail(null)} />}
     </div>
   );
 }

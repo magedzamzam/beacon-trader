@@ -1,9 +1,12 @@
+import { useState } from "react";
 import { Card, Th, Td, Badge, Empty } from "../components/ui";
+import TradeDetail from "../components/TradeDetail";
 import { api } from "../lib/api";
 import { useData, money, tone } from "./_useData";
 
 export default function History() {
   const { data: trades } = useData(api.trades);
+  const [detail, setDetail] = useState(null);
   if (!trades) return <Card><Empty>Loading…</Empty></Card>;
   const rows = [];
   trades.forEach(t => t.legs.filter(l => l.status === "closed").forEach(l => rows.push({ t, l })));
@@ -19,7 +22,7 @@ export default function History() {
         <tbody>
           {rows.map(({ t, l }) => (
             <tr key={l.id} className="border-b border-edge/60">
-              <Td mono>{t.id}</Td><Td>{t.symbol}</Td>
+              <Td mono><button className="text-beacon hover:underline" onClick={() => setDetail(t.id)}>{t.id}</button></Td><Td>{t.symbol}</Td>
               <Td><Badge tone={t.direction === "BUY" ? "long" : "short"}>{t.direction}</Badge></Td>
               <Td right mono>{l.tp_index}</Td>
               <Td right mono>{Number(l.entry).toFixed(2)}</Td>
@@ -31,6 +34,7 @@ export default function History() {
           ))}
         </tbody>
       </table>
+      {detail && <TradeDetail tradeId={detail} onClose={() => setDetail(null)} />}
     </Card>
   );
 }
