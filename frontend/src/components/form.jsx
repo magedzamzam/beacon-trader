@@ -1,4 +1,5 @@
 import { X } from "lucide-react";
+import { createPortal } from "react-dom";
 
 const MODAL_WIDTH = {
   lg: "max-w-lg", xl: "max-w-2xl", "3xl": "max-w-3xl",
@@ -10,7 +11,10 @@ export function Modal({ title, onClose, children, wide, size }) {
   // matter how tall the content is. `size` picks a max width; `wide` is the
   // legacy shortcut for the medium width.
   const width = MODAL_WIDTH[size] || (wide ? "max-w-2xl" : "max-w-lg");
-  return (
+  // Portal to <body> so the fixed overlay is positioned against the viewport,
+  // not trapped/clipped by an ancestor that creates a containing block for
+  // fixed elements (e.g. the .card `backdrop-filter: blur` on the History page).
+  return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
          onClick={onClose}>
       <div onClick={e => e.stopPropagation()}
@@ -25,7 +29,8 @@ export function Modal({ title, onClose, children, wide, size }) {
             so the card stays capped at max-h and the header never overflows. */}
         <div className="p-5 space-y-4 overflow-y-auto flex-1 min-h-0">{children}</div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
