@@ -33,6 +33,40 @@ function Section({ title, children }) {
   );
 }
 
+const OPEN_STATUS = new Set(["open", "working", "pending"]);
+
+/** Roll a trade's legs up into per-outcome counts + realized P&L. */
+function summarize(legs) {
+  const g = { tp: { n: 0, pl: 0 }, sl: { n: 0, pl: 0 },
+              be: { n: 0, pl: 0 }, other: { n: 0, pl: 0 }, open: 0 };
+  for (const l of legs || []) {
+    if (OPEN_STATUS.has(l.status)) { g.open++; continue; }
+    const pl = l.realized_pl != null ? Number(l.realized_pl) : 0;
+    if (l.outcome === "tp_hit") { g.tp.n++; g.tp.pl += pl; }
+    else if (l.outcome === "sl_hit") { g.sl.n++; g.sl.pl += pl; }
+    else if (l.outcome === "breakeven") { g.be.n++; g.be.pl += pl; }
+    else { g.other.n++; g.other.pl += pl; }
+  }
+  return g;
+}
+
+const DOT = { long: "bg-long", short: "bg-short", warn: "bg-warn", beacon: "bg-beacon" };
+
+function Stat({ label, tone: t, n, pl }) {
+  return (
+    <div className="bg-panel2 border border-edge rounded-lg px-3 py-2">
+      <div className="flex items-center gap-1.5">
+        <span className={`w-1.5 h-1.5 rounded-full ${DOT[t] || "bg-muted"}`} />
+        <span className="text-[10px] uppercase tracking-wider text-muted">{label}</span>
+      </div>
+      <div className="flex items-baseline gap-2 mt-0.5">
+        <span className="num text-lg font-semibold leading-none">{n}</span>
+        {pl != null && <span className={`num text-xs text-${tone(pl)}`}>{money(pl)}</span>}
+      </div>
+    </div>
+  );
+}
+
 export default function TradeDetail({ tradeId, onClose }) {
   const [t, setT] = useState(null);
   const [err, setErr] = useState(null);
@@ -57,6 +91,18 @@ export default function TradeDetail({ tradeId, onClose }) {
               <span className={`text-${tone(t.realized_pl)} font-semibold`}>{money(t.realized_pl)}</span>
             </span>
           </div>
+
+          {(() => {
+            const s = summarize(t.legs);
+            return (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <Stat label="TP hits" tone="long" n={s.tp.n} pl={s.tp.pl} />
+                <Stat label="SL hits" tone="short" n={s.sl.n} pl={s.sl.pl} />
+                <Stat label="Break-even" tone="warn" n={s.be.n} pl={s.be.pl} />
+                <Stat label="Open" tone="beacon" n={s.open} pl={null} />
+              </div>
+            );
+          })()}
 
           <Section title="Legs">
             <table className="w-full">
