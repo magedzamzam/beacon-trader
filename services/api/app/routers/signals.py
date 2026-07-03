@@ -79,7 +79,7 @@ async def tradingview_webhook(key: str, request: Request, db: AsyncSession = Dep
             db, source_id=src.id, symbol=parsed.symbol, direction=parsed.direction,
             entry_from=parsed.entry_from, entry_to=parsed.entry_to, sl=parsed.sl,
             tps=parsed.tps, order_type=parsed.order_type_hint or "MARKET",
-            raw_text=body["text"])
+            raw_text=body["text"], from_freetext=True)
     else:                                    # structured JSON
         sid, ok, reason = await ingest_structured(
             db, source_id=src.id, symbol=body["symbol"], direction=body["direction"],

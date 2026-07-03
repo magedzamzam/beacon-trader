@@ -7,6 +7,7 @@ rather than an error.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Optional
 
@@ -28,10 +29,16 @@ async def structured_call(
     schema: dict,
     effort: str = "low",
     max_tokens: int = 4000,
+    model: Optional[str] = None,
+    thinking: bool = True,
+    timeout: Optional[float] = None,
 ) -> dict:
     """Run one Anthropic message call constrained to `schema`; return the dict.
 
-    Raises AiUnavailable on any failure so callers can degrade gracefully.
+    `model` overrides cfg.model (e.g. a fast model for hot-path validation).
+    `thinking=False` disables extended thinking (faster). `timeout` (seconds)
+    caps the call — on expiry the call raises AiUnavailable so the caller can
+    degrade gracefully. Raises AiUnavailable on any failure.
     """
     if not cfg.ready:
         raise AiUnavailable("AI is not enabled or no API key is configured")
@@ -40,20 +47,27 @@ async def structured_call(
     except ImportError as exc:  # pragma: no cover - dependency missing
         raise AiUnavailable("anthropic SDK not installed") from exc
 
+    model_used = model or cfg.model
+    kwargs = dict(
+        model=model_used,
+        max_tokens=max_tokens,
+        output_config={"effort": effort,
+                       "format": {"type": "json_schema", "schema": schema}},
+        system=system,
+        messages=[{"role": "user", "content": user}],
+    )
+    if thinking:
+        kwargs["thinking"] = {"type": "adaptive"}
+
     client = anthropic.AsyncAnthropic(api_key=cfg.api_key)
     try:
-        resp = await client.messages.create(
-            model=cfg.model,
-            max_tokens=max_tokens,
-            thinking={"type": "adaptive"},
-            output_config={"effort": effort,
-                           "format": {"type": "json_schema", "schema": schema}},
-            system=system,
-            messages=[{"role": "user", "content": user}],
-        )
+        create = client.messages.create(**kwargs)
+        resp = await (asyncio.wait_for(create, timeout=timeout) if timeout else create)
+    except asyncio.TimeoutError as exc:
+        raise AiUnavailable(f"AI timed out after {timeout}s") from exc
     except anthropic.APIStatusError as exc:
         raise AiUnavailable(f"AI API error {exc.status_code}: {exc.message}") from exc
-    except Exception as exc:  # network, timeout, etc.
+    except Exception as exc:  # network, transport, etc.
         raise AiUnavailable(f"AI call failed: {exc}") from exc
     finally:
         try:
@@ -71,5 +85,5 @@ async def structured_call(
         data = json.loads(text)
     except (ValueError, TypeError) as exc:
         raise AiUnavailable(f"AI returned non-JSON output: {text[:200]}") from exc
-    data.setdefault("_model", cfg.model)
+    data.setdefault("_model", model_used)
     return data

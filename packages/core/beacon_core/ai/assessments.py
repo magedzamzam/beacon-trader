@@ -12,7 +12,8 @@ from typing import Optional
 from .config import AiConfig
 from .provider import AiUnavailable, structured_call
 
-__all__ = ["validate_signal", "review_execution", "analyze_outcome", "AiUnavailable"]
+__all__ = ["validate_signal", "validate_and_correct_signal", "review_execution",
+           "analyze_outcome", "AiUnavailable"]
 
 _SYSTEM = (
     "You are a disciplined risk manager embedded in an automated trading "
@@ -33,6 +34,28 @@ _SIGNAL_SCHEMA = {
         "flags": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["verdict", "confidence", "quality_score", "rationale", "flags"],
+    "additionalProperties": False,
+}
+
+_CORRECT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "is_signal": {"type": "boolean"},
+        "verdict": {"type": "string", "enum": ["approve", "caution", "reject"]},
+        "confidence": {"type": "number"},
+        "symbol": {"type": "string"},
+        "direction": {"type": "string", "enum": ["BUY", "SELL"]},
+        "entry_from": {"type": "number"},
+        "entry_to": {"type": "number"},
+        "sl": {"type": "number"},
+        "tps": {"type": "array", "items": {"type": "number"}},
+        "order_type": {"type": "string", "enum": ["MARKET", "LIMIT"]},
+        "corrections": {"type": "array", "items": {"type": "string"}},
+        "rationale": {"type": "string"},
+    },
+    "required": ["is_signal", "verdict", "confidence", "symbol", "direction",
+                 "entry_from", "entry_to", "sl", "tps", "order_type",
+                 "corrections", "rationale"],
     "additionalProperties": False,
 }
 
@@ -95,6 +118,62 @@ async def validate_signal(cfg: AiConfig, signal: dict) -> dict:
         "score": data.get("quality_score"),
         "rationale": data.get("rationale"),
         "model": data.get("_model", cfg.model),
+        "payload": data,
+    }
+
+
+async def validate_and_correct_signal(cfg: AiConfig, signal: dict) -> dict:
+    """Validate a free-text-parsed signal against its ORIGINAL message and return
+    a corrected structured signal. The local parser can misread things (e.g. a
+    pip distance like '(1540 pips)' captured as a take-profit); the model uses the
+    raw message as the source of truth and fixes the fields. Runs on the fast
+    validation model with a hard timeout so it stays under a few seconds."""
+    user = (
+        "A trading signal was auto-parsed from a chat message. The local parser "
+        "can make mistakes — for example reading a pip/point distance shown in "
+        "parentheses like '(1540 pips)' as a take-profit level. Using the ORIGINAL "
+        "message as the source of truth, return the CORRECT structured signal.\n\n"
+        f"Original message:\n{signal.get('raw_text') or '(none)'}\n\n"
+        "Parser interpretation (may be wrong):\n"
+        f"  Symbol: {signal.get('symbol')}\n"
+        f"  Direction: {signal.get('direction')}\n"
+        f"  Entry: {signal.get('entry_from')} to {signal.get('entry_to')}\n"
+        f"  Stop loss: {signal.get('sl')}\n"
+        f"  Take profits: {signal.get('tps')}\n"
+        f"  Order type: {signal.get('order_type')}\n\n"
+        "Rules:\n"
+        "- Use ONLY price levels actually stated in the message.\n"
+        "- Ignore pip/point distances and any parenthetical or non-price annotations.\n"
+        "- Keep the stop loss and EVERY take-profit on the correct side of entry "
+        "for the direction (SELL: SL above, TPs below; BUY: SL below, TPs above).\n"
+        "- Preserve the stated entry (or entry zone) unless the message is explicit.\n"
+        "- Return take-profits in the order given.\n"
+        "- If the message is NOT actually a tradeable signal, set is_signal=false "
+        "and verdict=reject.\n\n"
+        "Return the corrected symbol, direction, entry_from, entry_to, sl, tps, "
+        "order_type, the list of corrections you made, a verdict "
+        "(approve/caution/reject) and confidence 0-1."
+    )
+    data = await structured_call(
+        cfg, system=_SYSTEM, user=user, schema=_CORRECT_SCHEMA,
+        model=cfg.validation_model, thinking=cfg.validation_thinking,
+        timeout=cfg.validation_timeout_seconds, max_tokens=1500,
+    )
+    return {
+        "is_signal": bool(data.get("is_signal")),
+        "verdict": data.get("verdict"),
+        "confidence": _clamp01(data.get("confidence")),
+        "corrected": {
+            "symbol": data.get("symbol"),
+            "direction": (data.get("direction") or "").upper(),
+            "entry_from": data.get("entry_from"),
+            "entry_to": data.get("entry_to"),
+            "sl": data.get("sl"),
+            "tps": data.get("tps") or [],
+            "order_type": (data.get("order_type") or "MARKET").upper(),
+        },
+        "rationale": data.get("rationale"),
+        "model": data.get("_model", cfg.validation_model),
         "payload": data,
     }
 

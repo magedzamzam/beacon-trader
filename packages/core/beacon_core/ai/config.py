@@ -17,7 +17,7 @@ from ..crypto import decrypt, is_encrypted
 class AiConfig:
     enabled: bool = False               # master switch for AI assessments
     provider: str = "anthropic"
-    model: str = "claude-opus-4-8"
+    model: str = "claude-opus-4-8"      # used for execution review + outcome analysis
     # per-stage toggles
     validate_signals: bool = True       # assess signals as they arrive
     review_execution: bool = True       # sanity-check the plan before placing
@@ -25,6 +25,12 @@ class AiConfig:
     # gate: if True, a `reject` verdict blocks execution
     gate_execution: bool = False
     min_confidence: float = 0.0         # gate only fires at/above this confidence
+    # Signal validation/correction runs on the hot path (a signal must be
+    # validated before it can trade), so it uses its own fast model, has extended
+    # thinking off by default, and a hard timeout — tuned for sub-5s replies.
+    validation_model: str = "claude-haiku-4-5-20251001"
+    validation_timeout_seconds: float = 5.0
+    validation_thinking: bool = False
     api_key: Optional[str] = field(default=None, repr=False)
 
     @property
@@ -42,6 +48,9 @@ class AiConfig:
             "analyze_outcomes": self.analyze_outcomes,
             "gate_execution": self.gate_execution,
             "min_confidence": self.min_confidence,
+            "validation_model": self.validation_model,
+            "validation_timeout_seconds": self.validation_timeout_seconds,
+            "validation_thinking": self.validation_thinking,
             "has_api_key": bool(self.api_key),
         }
 
@@ -51,6 +60,7 @@ def resolve_ai_config(stored: Optional[dict]) -> AiConfig:
     stored = stored or {}
     settings = get_settings()
 
+    _defaults = AiConfig()
     cfg = AiConfig(
         enabled=bool(stored.get("enabled", False)),
         provider=stored.get("provider", "anthropic"),
@@ -60,6 +70,10 @@ def resolve_ai_config(stored: Optional[dict]) -> AiConfig:
         analyze_outcomes=bool(stored.get("analyze_outcomes", True)),
         gate_execution=bool(stored.get("gate_execution", False)),
         min_confidence=float(stored.get("min_confidence", 0.0) or 0.0),
+        validation_model=stored.get("validation_model") or _defaults.validation_model,
+        validation_timeout_seconds=float(
+            stored.get("validation_timeout_seconds") or _defaults.validation_timeout_seconds),
+        validation_thinking=bool(stored.get("validation_thinking", False)),
     )
 
     # Key: encrypted-in-DB wins, else env.

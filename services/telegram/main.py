@@ -68,6 +68,7 @@ async def _handle_message(chat_key, source_id, message_id, sender, text, msg_dat
     to the AI — otherwise a restart would replay old signals as fresh trades and
     hammer the broker's session rate limit.
     """
+    ai_rejected = False
     async with Session()() as s:
         if await _already_stored(s, chat_key, message_id):
             return
@@ -116,22 +117,30 @@ async def _handle_message(chat_key, source_id, message_id, sender, text, msg_dat
         )
         s.add(msg)
 
-        # AI validation only for freshly-stored, valid, LIVE signals (best-effort).
+        # Telegram signals are free-text: AI validates AND corrects them before
+        # they can trade (the parser can misread levels). Only freshly-stored,
+        # valid, LIVE signals. If the AI is unavailable the signal is executed on
+        # the parser output but flagged (fail-open); if the AI rejects it, it is
+        # not published.
         new_valid = (parse_status == "parsed" and signal_id is not None)
         if new_valid and is_live:
             sig_row = await s.get(Signal, signal_id)
             source = await s.get(Source, source_id) if source_id else None
             try:
-                await ai_service.assess_signal(s, sig_row, source)
+                status = await ai_service.apply_signal_validation(s, sig_row, source)
+                if status == "rejected":
+                    ai_rejected = True
             except Exception as exc:                     # never block ingestion
-                log.warning("AI signal assess failed: %s", exc)
+                log.warning("AI signal validation failed: %s", exc)
 
         await s.commit()
 
     # Only LIVE signals are handed to the executor. Backfilled history is not.
-    if is_live and parse_status == "parsed" and signal_id is not None:
+    if is_live and parse_status == "parsed" and signal_id is not None and not ai_rejected:
         await bus.publish(CH_SIGNAL_VALID, {"signal_id": signal_id})
         log.info("signal %s published (%s %s)", signal_id, parsed.direction, parsed.symbol)
+    elif ai_rejected:
+        log.info("signal %s rejected by AI validation", signal_id)
     elif parse_status == "rejected":
         log.info("signal rejected: %s", reject_reason)
 

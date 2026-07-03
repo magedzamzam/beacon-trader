@@ -45,6 +45,9 @@ async def put_config(body: AiConfigIn, db: AsyncSession = Depends(get_db)):
         "analyze_outcomes": body.analyze_outcomes,
         "gate_execution": body.gate_execution,
         "min_confidence": body.min_confidence,
+        "validation_model": body.validation_model,
+        "validation_timeout_seconds": body.validation_timeout_seconds,
+        "validation_thinking": body.validation_thinking,
     })
     if body.api_key:                            # only overwrite when a new key is sent
         if not has_key():

@@ -24,6 +24,10 @@ class AiConfigIn(BaseModel):
     analyze_outcomes: bool = True
     gate_execution: bool = False
     min_confidence: float = 0.0
+    # Fast hot-path validation/correction of free-text signals.
+    validation_model: str = "claude-haiku-4-5-20251001"
+    validation_timeout_seconds: float = 5.0
+    validation_thinking: bool = False
     api_key: Optional[str] = None          # write-only; stored encrypted
 
 

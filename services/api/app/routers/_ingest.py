@@ -25,7 +25,8 @@ def _hash(source_id, symbol, direction, entry_from, sl) -> str:
 
 
 async def ingest_structured(session, *, source_id, symbol, direction, entry_from,
-                            entry_to, sl, tps, order_type, raw_text=""):
+                            entry_to, sl, tps, order_type, raw_text="",
+                            from_freetext=False):
     parsed = ParsedSignal(
         symbol=symbol, direction=direction.upper(),
         entry_from=Decimal(str(entry_from)), entry_to=Decimal(str(entry_to)),
@@ -51,12 +52,18 @@ async def ingest_structured(session, *, source_id, symbol, direction, entry_from
     session.add(sig)
     await session.flush()
 
-    if ok:                                   # best-effort AI validation
+    # Free-text signals (parsed from a chat/webhook message) are validated and
+    # corrected by the AI before they can trade — the parser can misread levels.
+    # Structured/manual signals are treated as already confirmed and skip this.
+    if ok and from_freetext:
         try:
             source = await session.get(Source, source_id) if source_id else None
-            await ai_service.assess_signal(session, sig, source)
-        except Exception as exc:
-            log.warning("AI signal assess failed: %s", exc)
+            status = await ai_service.apply_signal_validation(session, sig, source)
+            if status == "rejected":
+                ok = False
+                reason = sig.reject_reason or "AI rejected the signal"
+        except Exception as exc:                 # never break ingestion
+            log.warning("AI signal validation failed: %s", exc)
 
     await session.commit()
     if ok:

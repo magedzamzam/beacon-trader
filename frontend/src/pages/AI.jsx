@@ -74,6 +74,33 @@ export default function AI() {
             <Field label="Review executions"><Toggle checked={cfg.review_execution} onChange={v => set("review_execution", v)} /></Field>
             <Field label="Analyze outcomes"><Toggle checked={cfg.analyze_outcomes} onChange={v => set("analyze_outcomes", v)} /></Field>
           </div>
+
+          <div className="border-t border-edge pt-4">
+            <div className="text-xs uppercase tracking-wider text-muted mb-1.5">Signal validation (fast path)</div>
+            <div className="text-[11px] text-muted mb-3 max-w-2xl">
+              Free-text signals (Telegram / TradingView text) are validated and <b>corrected</b> by a
+              fast model before they trade — the local parser can misread levels (e.g. a “(1540 pips)”
+              distance read as a take-profit). Manual and structured signals are treated as confirmed
+              and skip this. Tune below for replies under 5 seconds; if the model can’t answer in time
+              the signal still trades on the parser output but is flagged “unvalidated”.
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Validation model" hint="a fast model for the hot path (e.g. Haiku)">
+                <Input value={cfg.validation_model || ""} onChange={e => set("validation_model", e.target.value)} />
+              </Field>
+              <Field label="Timeout (seconds)" hint="fail-open (flagged) if exceeded">
+                <Input type="number" step="0.5" min="1" value={cfg.validation_timeout_seconds ?? 5}
+                  onChange={e => set("validation_timeout_seconds", parseFloat(e.target.value) || 5)} />
+              </Field>
+            </div>
+            <div className="flex gap-8 flex-wrap mt-3">
+              <Field label="Extended thinking" hint="off = faster replies">
+                <Toggle checked={!!cfg.validation_thinking} onChange={v => set("validation_thinking", v)}
+                  label={cfg.validation_thinking ? "on" : "off"} />
+              </Field>
+            </div>
+          </div>
+
           <div className="flex gap-8 flex-wrap items-end">
             <Field label="Gate execution" hint="block trades the AI rejects"><Toggle checked={cfg.gate_execution} onChange={v => set("gate_execution", v)} /></Field>
             <Field label="Min confidence to gate">
