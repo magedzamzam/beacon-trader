@@ -73,20 +73,16 @@ async def handle_signal(signal_id: int) -> None:
             return
 
         parsed = _to_parsed(sig)
-        strat = source.strategy or {}
-        order_position_type = strat.get("order_position_type", sig.order_type or "MARKET")
-
         ai_cfg = await ai_service.load_config(session)
 
         for acct in accounts:
-            await _execute_on_account(session, sig, parsed, source, acct,
-                                      order_position_type, ai_cfg)
+            await _execute_on_account(session, sig, parsed, source, acct, ai_cfg)
         sig.status = "executed"
         await session.commit()
 
 
 async def _execute_on_account(session, sig, parsed, source, acct,
-                              order_position_type, ai_cfg=None) -> None:
+                              ai_cfg=None) -> None:
     broker = await session.get(Broker, acct.broker_id)
     smap = await _symbol_map(session, broker.id, parsed.symbol)
     if not smap:
@@ -108,6 +104,18 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             log.warning("no price for %s; skipping account %s", smap.broker_epic, acct.id)
             return
 
+        # Current-candle range: a leg whose entry the candle has already crossed is
+        # opened MARKET (see build_plan). Best-effort; falls back to the live price.
+        candle_high = candle_low = None
+        try:
+            bars = await adapter.get_bars(smap.broker_epic, "MINUTE", max_bars=2)
+            if bars:
+                last = bars[-1]
+                candle_high = Decimal(str(last["h"])) if last.get("h") is not None else None
+                candle_low = Decimal(str(last["l"])) if last.get("l") is not None else None
+        except Exception as exc:
+            log.info("candle fetch failed for %s: %s", smap.broker_epic, exc)
+
         # Instrument currency comes from the broker market; convert account->instr.
         instrument_ccy = quote.currency or "USD"
         fx_overrides = await get_setting(session, "fx", {}) or {}
@@ -122,7 +130,8 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             return
 
         plan = build_plan(
-            parsed, order_position_type=order_position_type, current_price=current,
+            parsed, current_price=current,
+            candle_high=candle_high, candle_low=candle_low,
             min_stop_distance=smap.min_stop_distance,
         )
         risk = RiskConfig.from_dict(source.risk_config or acct.risk_config or {})

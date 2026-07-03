@@ -72,21 +72,49 @@ For every open leg of an open trade:
 - **open, gone from `GET /positions`** → **closed**. Match the closing
   transaction by dealId, take realized P&L from it, classify the outcome.
 
-### Outcome classification
-- **break-even** if EITHER the SL was ratcheted to ~entry and hit, OR realized
-  P&L ≈ 0 (`|pl| <= BE_MONEY_TOL`, account currency).
-- else **tp_hit** / **sl_hit** by the close price's proximity to TP/SL, with the
-  sign of realized P&L as the tie-breaker (a position auto-closes at its attached
-  profitLevel/stopLevel, so profit ⇒ TP, loss ⇒ SL).
-- `size` can arrive unsigned; a stop-out is always booked as a loss.
+### Outcome classification (truth-first)
+The broker's own reason for a close is the source of truth, read from
+`GET /history/activity` — the closing `POSITION` activity's `source` (`SL`,
+`TP`/`PROFIT`, `USER`). Order of precedence:
+1. **activity source** → `SL` ⇒ sl_hit, `TP`/`PROFIT` ⇒ tp_hit, `USER` ⇒ manual
+   (a source=SL that hit an SL ratcheted to ~entry is booked **break-even**);
+2. else the **heuristic**: break-even if the SL was moved to ~entry and hit or
+   realized P&L ≈ 0; otherwise tp_hit/sl_hit by close-price proximity, tie-broken
+   by the sign of realized P&L.
+- Realized **P&L** always comes from the matching `/history/transactions` row
+  (signed, in account currency). `size` may arrive unsigned; a stop-out is booked
+  as a loss.
+
+### Full audit — `position_activities`
+Every `/history/activity` item for a tracked deal (working order executed,
+position opened, `EDIT_STOP_AND_LIMIT`, SL/TP/user close) is recorded once in the
+**`position_activities`** table (`deal_id`, `deal_reference`, `source`, `type`,
+`status`, `activity_at`, and realized P&L + currency for closes). This is the
+broker-agnostic "truth" log — it makes SL-moved-to-entry, exact per-position
+P&L, and the whole lifecycle queryable for later analysis, and is surfaced under
+`GET /trades/{id}` as `activities`. `Leg` keeps its live `dealId` refs for
+reconciliation; this table never changes if a broker's id scheme differs.
+
+## Order type — LIMIT with per-leg MARKET fallback
+Sources no longer choose MARKET vs LIMIT. Every entry rests as a **LIMIT** at its
+signalled level, EXCEPT a leg whose entry the current candle has already crossed
+(`build_plan` folds the latest 1-min candle high/low with the live price): that
+leg opens **MARKET** now, because the price already touched the level and may not
+rebound. Decided per entry level — a two-level entry can be one MARKET fill plus
+one resting LIMIT. All already-crossed entries collapse into a single market fill
+(never double the size), and a leg whose SL/TP is untradeable from the actual
+fill is dropped.
 
 ## Key code
+- `beacon_core/db/models.py` — `PositionActivity` (the audit/truth table).
 - `beacon_core/brokers/types.py` — `BrokerPosition.working_order_ref`.
 - `beacon_core/brokers/capital_com.py` — `list_positions` (surfaces
   `workingOrderId`), `get_transactions` (dealId + P&L-from-`size` mapping),
-  `place_order` (working order → confirm dealId; MARKET → affectedDeals dealId).
+  `get_activity` (`/history/activity`), `place_order`.
+- `beacon_core/execution/planner.py` — `build_plan` (LIMIT + per-leg MARKET
+  fallback via candle cross).
 - `services/monitor/main.py` — `_process_trade` reconciliation, `_txn_by_dealid`,
-  `_classify_outcome`.
+  `_close_source`/`_outcome_from_source`, `_audit_activities`, `_classify_outcome`.
 
 ## Known limitations / follow-ups
 - The closing transaction has no close level, so the ledger close *price* is a

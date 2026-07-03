@@ -66,7 +66,7 @@ class Source(Base):
     external_id: Mapped[str | None] = mapped_column(String(64), nullable=True)  # channel_id / api key
     enabled_for_trading: Mapped[bool] = mapped_column(Boolean, default=False)
     is_trusted: Mapped[bool] = mapped_column(Boolean, default=False)
-    # strategy: {order_position_type, entry_ttl_minutes, sl_rules:[...]}
+    # strategy: {entry_ttl_minutes, sl_rules:[...]}  (orders are LIMIT-with-market-fallback)
     strategy: Mapped[dict] = mapped_column(JSON, default=dict)
     risk_config: Mapped[dict] = mapped_column(JSON, default=dict)  # overrides account default
     account_map: Mapped[list] = mapped_column(JSON, default=list)  # [account_id, ...]
@@ -187,6 +187,37 @@ class TelegramMessage(Base):
     reject_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
     signal_id: Mapped[int | None] = mapped_column(ForeignKey("signals.id"), nullable=True)
     message_date: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class PositionActivity(Base):
+    """Broker-authoritative audit of everything that happened to a deal.
+
+    One row per Capital.com /history/activity item (working order executed,
+    position opened, SL/TP edited, position closed by SL/TP/user, …) plus the
+    realized P&L + currency for closes (from /history/transactions). This is the
+    'truth' record — the exact lifecycle and money of each working order and
+    position — kept broker-agnostic and separate from the Leg so it can be mined
+    for performance analysis later. Leg still carries the live dealId refs for
+    reconciliation; this table never has to change if a broker's id scheme does.
+    """
+    __tablename__ = "position_activities"
+    __table_args__ = (UniqueConstraint("account_id", "deal_id", "activity_at", "type",
+                                       name="uq_activity_dedupe"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id"), nullable=True)
+    trade_id: Mapped[int | None] = mapped_column(ForeignKey("trades.id"), nullable=True, index=True)
+    leg_id: Mapped[int | None] = mapped_column(ForeignKey("legs.id"), nullable=True, index=True)
+    epic: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    deal_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    deal_reference: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source: Mapped[str | None] = mapped_column(String(24), nullable=True)   # SYSTEM|USER|SL|TP|...
+    type: Mapped[str | None] = mapped_column(String(32), nullable=True)     # WORKING_ORDER|POSITION|EDIT_STOP_AND_LIMIT|...
+    status: Mapped[str | None] = mapped_column(String(24), nullable=True)   # ACCEPTED|EXECUTED|...
+    realized_pl: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)  # signed, account ccy (closes only)
+    currency: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    activity_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)               # raw broker activity
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

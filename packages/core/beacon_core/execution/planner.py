@@ -59,30 +59,69 @@ def validate_signal(sig: ParsedSignal) -> tuple[bool, Optional[str]]:
     return True, None
 
 
-def build_plan(sig: ParsedSignal, *, order_position_type: str,
-               current_price: Decimal,
+def _entry_crossed(direction: str, entry: Decimal,
+                   high: Optional[Decimal], low: Optional[Decimal]) -> bool:
+    """Has the market already reached this entry level? A BUY limit fills when
+    price falls to entry (so a candle low at/below it = crossed); a SELL limit
+    fills when price rises to entry (candle high at/above it = crossed)."""
+    if direction == "BUY":
+        return low is not None and low <= entry
+    return high is not None and high >= entry
+
+
+def _tp_beyond(direction: str, tp: Decimal, entry: Decimal) -> bool:
+    """TP must sit in the profit direction from the (actual) entry."""
+    return tp > entry if direction == "BUY" else tp < entry
+
+
+def _sl_protective(direction: str, sl: Decimal, entry: Decimal) -> bool:
+    """SL must sit on the protective side of the (actual) entry."""
+    return sl < entry if direction == "BUY" else sl > entry
+
+
+def build_plan(sig: ParsedSignal, *, current_price: Decimal,
+               candle_high: Optional[Decimal] = None,
+               candle_low: Optional[Decimal] = None,
                min_stop_distance: Optional[Decimal] = None) -> FanoutPlan:
-    order_type = (order_position_type or "MARKET").upper()
-    # A MARKET order fills once at the live price, so a range entry is meaningless
-    # here — using both bounds would open TWO identical legs per TP (double size).
-    # Only LIMIT orders rest a separate leg at each distinct entry level.
-    if order_type == "MARKET":
-        entries = [sig.entry_from]
-    else:
-        entries = [sig.entry_from]
-        if sig.entry_to != sig.entry_from:
-            entries.append(sig.entry_to)
+    """Sources are LIMIT-only, but per leg: if the current candle has already
+    crossed an entry level, that leg is opened MARKET now (the price already
+    touched the level and may not rebound) at the live price; otherwise it rests
+    as a LIMIT at the signalled level. Decided per entry level, not per signal.
+    """
+    entries = [sig.entry_from]
+    if sig.entry_to != sig.entry_from:
+        entries.append(sig.entry_to)
 
-    plan = FanoutPlan(symbol=sig.symbol, direction=sig.direction, order_type=order_type)
+    # Fold the live price into the candle range so an in-progress touch counts.
+    highs = [x for x in (candle_high, current_price) if x is not None]
+    lows = [x for x in (candle_low, current_price) if x is not None]
+    hi = max(highs) if highs else None
+    lo = min(lows) if lows else None
 
-    for entry in entries:
-        # MARKET fills at the live price; LIMIT rests at the signalled level.
-        leg_entry = current_price if order_type == "MARKET" else entry
+    # Any already-crossed entry collapses into ONE market fill at the live price
+    # (two market legs at the same price would just double the size); each entry
+    # still waiting rests as its own LIMIT.
+    order_plan = []  # (order_type, leg_entry)
+    if any(_entry_crossed(sig.direction, e, hi, lo) for e in entries):
+        order_plan.append(("MARKET", current_price))
+    for e in entries:
+        if not _entry_crossed(sig.direction, e, hi, lo):
+            order_plan.append(("LIMIT", e))
+
+    plan = FanoutPlan(symbol=sig.symbol, direction=sig.direction, order_type="LIMIT")
+
+    for order_type, leg_entry in order_plan:
         for idx, tp in enumerate(sig.tps, start=1):
             leg = PlannedLeg(side=sig.direction, entry=leg_entry, tp=tp,
                              sl=sig.sl, tp_index=idx, order_type=order_type)
-            # Broker minimum stop/limit distance: drop only the offending leg.
-            if min_stop_distance is not None and abs(tp - leg_entry) < min_stop_distance:
+            # Drop a leg the actual entry has made untradeable, or too tight.
+            if not _sl_protective(sig.direction, sig.sl, leg_entry):
+                leg.valid = False
+                leg.skip_reason = "sl on wrong side of entry"
+            elif not _tp_beyond(sig.direction, tp, leg_entry):
+                leg.valid = False
+                leg.skip_reason = "tp already passed at entry"
+            elif min_stop_distance is not None and abs(tp - leg_entry) < min_stop_distance:
                 leg.valid = False
                 leg.skip_reason = "tp within broker min distance"
             plan.legs.append(leg)

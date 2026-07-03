@@ -24,8 +24,8 @@ from beacon_core.config import CH_TRADE_EVENT, get_settings
 from beacon_core.logging import get_logger
 from beacon_core.health import run_health_server
 from beacon_core.db.base import Session, init_models
-from beacon_core.db.models import (Account, Broker, Event, Leg, Signal, Source,
-                                   SymbolMap, Trade)
+from beacon_core.db.models import (Account, Broker, Event, Leg, PositionActivity,
+                                   Signal, Source, SymbolMap, Trade)
 from beacon_core.brokers import get_adapter, resolve_credentials
 from beacon_core.brokers.types import AuthError, ModifyPositionRequest
 from beacon_core.strategy.rules import PositionCtx, evaluate
@@ -53,6 +53,30 @@ def _is_close_txn(t: dict) -> bool:
     if note:
         return "clos" in note
     return (t.get("type") or "") in ("TRADE", "DEAL", "POSITION")
+
+
+def _parse_dt(v):
+    """Parse a broker ISO timestamp into a tz-aware UTC datetime (or None)."""
+    if not v:
+        return None
+    try:
+        d = dt.datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        return d if d.tzinfo else d.replace(tzinfo=dt.timezone.utc)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _outcome_from_source(src) -> str | None:
+    """Map a Capital.com activity `source` to a leg outcome. None = unknown, so
+    the caller falls back to the price/P&L heuristic."""
+    s = (src or "").upper()
+    if s == "SL":
+        return "sl_hit"
+    if s in ("TP", "PROFIT", "TAKE_PROFIT", "LIMIT"):
+        return "tp_hit"
+    if s == "USER":
+        return "manual"
+    return None
 
 
 async def _open_trades(session):
@@ -265,6 +289,47 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                     return t
             return None
 
+        def _txn_lookup(txns, deal_id):
+            """Read-only close lookup by dealId (does NOT consume the row)."""
+            if not deal_id:
+                return None
+            for t in txns:
+                if not _is_close_txn(t):
+                    continue
+                if str(t.get("deal_id") or "") == str(deal_id):
+                    return t
+            return None
+
+        # Broker activity log: the authoritative "why" behind each state change
+        # (fill / SL / TP / user edit / close). Fetched lazily, once per tick.
+        _act_cache = {"loaded": False, "list": []}
+
+        async def _activities():
+            if not _act_cache["loaded"]:
+                _act_cache["loaded"] = True
+                getter = getattr(adapter, "get_activity", None)
+                if getter is not None:
+                    try:
+                        _act_cache["list"] = await getter(last_period=6 * 3600)
+                    except Exception as exc:
+                        log.warning("activity fetch failed (trade %s): %s", trade.id, exc)
+            return _act_cache["list"]
+
+        def _close_source(acts, position_ref):
+            """The activity `source` (SL/TP/USER) that CLOSED this position — the
+            newest POSITION activity for the deal that isn't the SYSTEM open."""
+            if not position_ref:
+                return None
+            for a in acts:                       # get_activity returns newest-first
+                if str(a.get("deal_id") or "") != str(position_ref):
+                    continue
+                if (a.get("type") or "").upper() != "POSITION":
+                    continue
+                if (a.get("source") or "").upper() == "SYSTEM":
+                    continue
+                return a.get("source")
+            return None
+
         async def _close_leg(leg, txns, require_txn: bool = False) -> bool:
             """Close a leg. Realized P&L and the close identity come from the
             broker's closing transaction, matched to THIS leg by position dealId
@@ -295,8 +360,18 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
             else:
                 close_px = price
 
-            outcome = _classify_outcome(close_px, entry_px, tp, sl,
-                                        bool(leg.sl_moved), tol, realized_pl)
+            # Outcome: the broker's own reason (activity source) is the truth;
+            # fall back to the price/P&L heuristic only when it's unknown. A stop
+            # that had been ratcheted to ~entry is a break-even, not a loss.
+            src_outcome = _outcome_from_source(
+                _close_source(await _activities(), leg.broker_position_ref))
+            if src_outcome == "sl_hit" and bool(leg.sl_moved) and abs(close_px - entry_px) <= tol:
+                outcome = "breakeven"
+            elif src_outcome is not None:
+                outcome = src_outcome
+            else:
+                outcome = _classify_outcome(close_px, entry_px, tp, sl,
+                                            bool(leg.sl_moved), tol, realized_pl)
 
             if realized_pl is None:
                 # No broker row — heuristic P&L in INSTRUMENT currency.
@@ -323,6 +398,54 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
             await bus.publish(CH_TRADE_EVENT, {"trade_id": trade.id, "leg_id": leg.id,
                                                "outcome": outcome})
             return True
+
+        async def _audit_activities():
+            """Persist every broker activity for THIS trade's deals into the
+            PositionActivity audit table (idempotently), attaching realized P&L +
+            currency to a close. This is the queryable 'truth' log for analysis."""
+            acts = await _activities()
+            if not acts:
+                return
+            all_trade_legs = (await session.execute(select(Leg).where(
+                Leg.trade_id == trade.id))).scalars().all()
+            leg_by_deal = {}
+            for l in all_trade_legs:
+                if l.broker_order_ref:
+                    leg_by_deal[str(l.broker_order_ref)] = l
+                if l.broker_position_ref:
+                    leg_by_deal[str(l.broker_position_ref)] = l
+            if not leg_by_deal:
+                return
+            txns = await _transactions()
+            seen: set = set()
+            for a in acts:
+                did = str(a.get("deal_id") or "")
+                leg = leg_by_deal.get(did)
+                if leg is None:
+                    continue
+                at = _parse_dt(a.get("date"))
+                atype = a.get("type")
+                key = (did, at, atype)
+                if key in seen:
+                    continue
+                seen.add(key)
+                exists = (await session.execute(select(PositionActivity.id).where(
+                    PositionActivity.account_id == trade.account_id,
+                    PositionActivity.deal_id == did,
+                    PositionActivity.activity_at == at,
+                    PositionActivity.type == atype))).first()
+                if exists:
+                    continue
+                rp = cur = None
+                if (atype or "").upper() == "POSITION" and (a.get("source") or "").upper() != "SYSTEM":
+                    t = _txn_lookup(txns, did)
+                    if t is not None:
+                        rp, cur = t.get("pl"), t.get("currency")
+                session.add(PositionActivity(
+                    account_id=trade.account_id, trade_id=trade.id, leg_id=leg.id,
+                    epic=a.get("epic"), deal_id=did, deal_reference=a.get("deal_reference"),
+                    source=a.get("source"), type=atype, status=a.get("status"),
+                    realized_pl=rp, currency=cur, activity_at=at, payload=a.get("raw") or {}))
 
         # --- pass 1: reconcile fills, detect + attribute closes ---
         for leg in legs:
@@ -398,6 +521,12 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                     log.info("trade %s leg %s SL -> %s", trade.id, leg.id, new_sl)
                 except Exception as exc:
                     log.warning("SL move failed (leg %s): %s", leg.id, exc)
+
+        # Persist the broker activity audit for this trade (best-effort).
+        try:
+            await _audit_activities()
+        except Exception as exc:
+            log.warning("activity audit failed (trade %s): %s", trade.id, exc)
 
         # roll up trade
         remaining = (await session.execute(select(Leg).where(

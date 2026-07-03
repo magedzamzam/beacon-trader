@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from beacon_core.db.models import AiAssessment, Event, Leg, Trade
+from beacon_core.db.models import AiAssessment, Event, Leg, PositionActivity, Trade
 from ..deps import get_db
 from ..auth import require_token
 
@@ -40,6 +40,9 @@ async def trade_detail(trade_id: int, db: AsyncSession = Depends(get_db)):
                                .order_by(Event.id))).scalars().all()
     ai = (await db.execute(select(AiAssessment).where(AiAssessment.trade_id == t.id)
                            .order_by(AiAssessment.id.desc()))).scalars().all()
+    acts = (await db.execute(select(PositionActivity).where(PositionActivity.trade_id == t.id)
+                             .order_by(PositionActivity.activity_at.desc(),
+                                       PositionActivity.id.desc()))).scalars().all()
     return {
         "id": t.id, "signal_id": t.signal_id, "account_id": t.account_id,
         "symbol": t.symbol, "direction": t.direction, "status": t.status,
@@ -61,4 +64,11 @@ async def trade_detail(trade_id: int, db: AsyncSession = Depends(get_db)):
                 "rationale": a.rationale, "model": a.model,
                 "created_at": a.created_at.isoformat() if a.created_at else None}
                for a in ai],
+        "activities": [{"id": p.id, "leg_id": p.leg_id, "deal_id": p.deal_id,
+                        "deal_reference": p.deal_reference, "epic": p.epic,
+                        "source": p.source, "type": p.type, "status": p.status,
+                        "realized_pl": float(p.realized_pl) if p.realized_pl is not None else None,
+                        "currency": p.currency,
+                        "at": p.activity_at.isoformat() if p.activity_at else None}
+                       for p in acts],
     }

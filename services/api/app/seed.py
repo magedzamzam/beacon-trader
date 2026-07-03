@@ -61,8 +61,7 @@ async def main():
             defaults=dict(
                 external_id="-1000000000000", enabled_for_trading=False,
                 is_trusted=True,
-                strategy={"order_position_type": "MARKET",
-                          "entry_ttl_minutes": 60,
+                strategy={"entry_ttl_minutes": 60,
                           "sl_rules": [
                               {"trigger": {"type": "tp_hit", "index": 1},
                                "action": {"type": "move_sl_to", "target": "entry"}},
@@ -77,8 +76,7 @@ async def main():
             defaults=dict(
                 external_id="manual-desk-key", enabled_for_trading=True,
                 is_trusted=True,
-                strategy={"order_position_type": "MARKET",
-                          "entry_ttl_minutes": 60,
+                strategy={"entry_ttl_minutes": 60,
                           "sl_rules": [
                               {"trigger": {"type": "tp_hit", "index": 1},
                                "action": {"type": "move_sl_to", "target": "entry"}}]},

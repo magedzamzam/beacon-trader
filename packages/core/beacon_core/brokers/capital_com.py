@@ -649,6 +649,38 @@ class CapitalComAdapter(BrokerAdapter):
             })
         return out
 
+    async def get_activity(self, *, last_period: int = 86400,
+                           from_ts: Optional[str] = None,
+                           to_ts: Optional[str] = None) -> List[dict]:
+        """Account activity log — GET /api/v1/history/activity.
+
+        The authoritative event stream per deal: a working order executing into a
+        position, a position opening, SL/TP edits, and a close with its `source`
+        (SL, TP/PROFIT, USER, SYSTEM). Used to record a full audit and to know WHY
+        a position closed instead of inferring it from price.
+        """
+        params: Dict[str, str] = {}
+        if from_ts:
+            params["from"] = from_ts
+        if to_ts:
+            params["to"] = to_ts
+        if not (from_ts or to_ts):
+            params["lastPeriod"] = str(int(last_period))
+        data = await self._request("GET", "/api/v1/history/activity", params=params)
+        out: List[dict] = []
+        for a in (data.get("activities") or []):
+            out.append({
+                "deal_id": str(a.get("dealId") or ""),
+                "deal_reference": a.get("dealReference"),
+                "epic": a.get("epic"),
+                "source": a.get("source"),
+                "type": a.get("type"),
+                "status": a.get("status"),
+                "date": a.get("dateUTC") or a.get("dateUtc") or a.get("date"),
+                "raw": a,
+            })
+        return out
+
     async def get_quote(self, broker_symbol: str) -> BrokerQuote:
         """Live quote for one Capital.com epic.
 
