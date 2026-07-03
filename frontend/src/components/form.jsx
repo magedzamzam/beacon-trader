@@ -14,14 +14,16 @@ export function Modal({ title, onClose, children, wide, size }) {
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
          onClick={onClose}>
       <div onClick={e => e.stopPropagation()}
-           className={`bg-panel border border-edge rounded-xl shadow-panel w-full ${width} max-h-[88vh] flex flex-col`}>
+           className={`bg-panel border border-edge rounded-xl shadow-panel w-full ${width} max-h-[88vh] flex flex-col overflow-hidden`}>
         <div className="flex items-center justify-between px-5 py-3 border-b border-edge shrink-0">
           <div className="font-medium">{title}</div>
           <button onClick={onClose} className="p-1 rounded-md text-muted hover:text-ink hover:bg-panel2">
             <X className="w-4 h-4" />
           </button>
         </div>
-        <div className="p-5 space-y-4 overflow-auto">{children}</div>
+        {/* flex-1 + min-h-0 lets this body take the remaining height and scroll,
+            so the card stays capped at max-h and the header never overflows. */}
+        <div className="p-5 space-y-4 overflow-y-auto flex-1 min-h-0">{children}</div>
       </div>
     </div>
   );
