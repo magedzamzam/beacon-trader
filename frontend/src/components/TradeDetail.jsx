@@ -79,7 +79,7 @@ export default function TradeDetail({ tradeId, onClose }) {
   }, [tradeId]);
 
   return (
-    <Modal title={`Trade #${tradeId}`} onClose={onClose} wide>
+    <Modal title={`Trade #${tradeId}`} onClose={onClose} size="4xl">
       {err && <div className="text-xs text-short bg-short/10 rounded-lg px-3 py-2">{err}</div>}
       {!t ? <Empty>Loading…</Empty> : (
         <div className="space-y-5">

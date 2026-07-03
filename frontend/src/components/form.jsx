@@ -1,18 +1,27 @@
 import { X } from "lucide-react";
 
-export function Modal({ title, onClose, children, wide }) {
+const MODAL_WIDTH = {
+  lg: "max-w-lg", xl: "max-w-2xl", "3xl": "max-w-3xl",
+  "4xl": "max-w-4xl", "5xl": "max-w-5xl",
+};
+
+export function Modal({ title, onClose, children, wide, size }) {
+  // Fixed header + independently scrolling body: the title stays pinned no
+  // matter how tall the content is. `size` picks a max width; `wide` is the
+  // legacy shortcut for the medium width.
+  const width = MODAL_WIDTH[size] || (wide ? "max-w-2xl" : "max-w-lg");
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
          onClick={onClose}>
       <div onClick={e => e.stopPropagation()}
-           className={`bg-panel border border-edge rounded-xl shadow-panel w-full ${wide ? "max-w-2xl" : "max-w-lg"} max-h-[88vh] overflow-auto`}>
-        <div className="flex items-center justify-between px-5 py-3 border-b border-edge sticky top-0 bg-panel">
+           className={`bg-panel border border-edge rounded-xl shadow-panel w-full ${width} max-h-[88vh] flex flex-col`}>
+        <div className="flex items-center justify-between px-5 py-3 border-b border-edge shrink-0">
           <div className="font-medium">{title}</div>
           <button onClick={onClose} className="p-1 rounded-md text-muted hover:text-ink hover:bg-panel2">
             <X className="w-4 h-4" />
           </button>
         </div>
-        <div className="p-5 space-y-4">{children}</div>
+        <div className="p-5 space-y-4 overflow-auto">{children}</div>
       </div>
     </div>
   );
