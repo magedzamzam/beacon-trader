@@ -113,6 +113,10 @@ class BrokerPosition:
     opened_at: Optional[Any] = None
     currency: Optional[str] = None
     direction: Direction = Direction.LONG
+    # The working order this position was created from. Capital.com exposes it as
+    # `workingOrderId` on the position, and it equals the dealId we captured when
+    # we placed the working order — the reliable key to link a fill to its leg.
+    working_order_ref: Optional[str] = None
     raw: Dict[str, Any] = field(default_factory=dict)
 
 

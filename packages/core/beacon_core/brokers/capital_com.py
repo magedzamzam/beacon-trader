@@ -276,6 +276,7 @@ class CapitalComAdapter(BrokerAdapter):
                 opened_at=opened_at,
                 currency=pos.get("currency") or mkt.get("currency"),
                 direction=Direction.LONG if direction == "BUY" else Direction.SHORT,
+                working_order_ref=str(pos.get("workingOrderId") or "") or None,
                 raw=p,
             ))
         return out
@@ -589,10 +590,18 @@ class CapitalComAdapter(BrokerAdapter):
                                to_ts: Optional[str] = None) -> List[dict]:
         """Recent account transactions (closed deals) with realized P&L.
 
-        GET /api/v1/history/transactions. Returns normalized dicts carrying the
-        actual close level, size, currency and realized P&L (in the ACCOUNT
-        currency) — the source of truth for what a closed position really made,
-        instead of inferring it from the live price at poll time.
+        GET /api/v1/history/transactions — the source of truth for what a closed
+        position actually made, in the ACCOUNT currency.
+
+        Field mapping (as returned by the current Capital.com API):
+          - `dealId`          -> deal_id  (equals the position's dealId, so a
+                                 close can be matched to its exact leg)
+          - `size`            -> pl       (the realized P&L amount in account
+                                 currency; NOT a lot size on this endpoint)
+          - `note`            -> note     ("Trade closed" marks a close)
+          - `transactionType` -> type     (e.g. TRADE)
+        `profitAndLoss`/`closeLevel` are preferred when a deployment provides
+        them, but this API puts the money in `size`.
         """
         params: Dict[str, str] = {}
         if from_ts:
@@ -604,15 +613,21 @@ class CapitalComAdapter(BrokerAdapter):
         data = await self._request("GET", "/api/v1/history/transactions", params=params)
         out: List[dict] = []
         for t in (data.get("transactions") or []):
+            # Prefer an explicit profitAndLoss; else the money is in `size`.
+            pl = self._parse_money(t.get("profitAndLoss"))
+            if pl is None:
+                pl = self._parse_money(t.get("size"))
             out.append({
+                "deal_id": str(t.get("dealId") or ""),
                 "instrument": t.get("instrumentName"),
                 "type": (t.get("transactionType") or "").upper(),
+                "note": t.get("note"),
                 "open_level": to_dec(t.get("openLevel")),
                 "close_level": to_dec(t.get("closeLevel")),
-                "size": to_dec(t.get("size")),
+                "pl": pl,
                 "currency": t.get("currency"),
-                "pl": self._parse_money(t.get("profitAndLoss")),
                 "reference": t.get("reference"),
+                "date": t.get("dateUtc") or t.get("date"),
                 "raw": t,
             })
         return out
