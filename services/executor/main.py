@@ -144,6 +144,13 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             risk_pct = (float(planned_risk) / float(equity) * 100.0) if equity else None
             plan_dict = {
                 "account_currency": account_ccy, "equity": str(equity),
+                # Currency/sizing context so the AI reasons in the right units and
+                # doesn't mistake a correctly-sized position for a leverage error:
+                # equity/risk are in ACCOUNT currency; value_per_point is in the
+                # INSTRUMENT currency; fx_factor converts account -> instrument.
+                "instrument_currency": instrument_ccy,
+                "value_per_point": str(smap.value_per_point),
+                "fx_factor": str(fx_factor),
                 "planned_risk": str(planned_risk),
                 "risk_pct": round(risk_pct, 3) if risk_pct is not None else None,
                 "legs": [{"tp_index": l.tp_index, "entry": str(l.entry),

@@ -185,17 +185,35 @@ async def review_execution(cfg: AiConfig, signal: dict, plan: dict) -> dict:
         f"sl {l.get('sl')} lot {l.get('lot')}"
         for l in plan.get("legs", [])
     ) or "  (no legs)"
+    acct_ccy = plan.get("account_currency")
+    instr_ccy = plan.get("instrument_currency")
+    vpp = plan.get("value_per_point")
+    fx = plan.get("fx_factor")
     user = (
         "A validated signal is about to be executed on a broker account. "
         "Sanity-check the sized plan before it is placed.\n\n"
         f"Symbol: {signal.get('symbol')}  Direction: {signal.get('direction')}\n"
-        f"Account currency: {plan.get('account_currency')}  "
-        f"Equity: {plan.get('equity')}\n"
-        f"Planned total risk: {plan.get('planned_risk')} "
+        f"Account currency: {acct_ccy}   Equity: {plan.get('equity')} {acct_ccy}\n"
+        f"Instrument quote currency: {instr_ccy}\n"
+        f"value_per_point: {vpp} {instr_ccy} — money gained/lost per 1.0 price move "
+        "per 1.0 lot. THIS defines the contract size; do NOT assume a standard "
+        "100-unit/oz lot.\n"
+        f"FX factor (account -> instrument): {fx}\n"
+        f"Planned total risk: {plan.get('planned_risk')} {acct_ccy} "
         f"({plan.get('risk_pct')}% of equity)\n"
         f"Legs:\n{legs_txt}\n\n"
-        "Consider: is total risk sane for the equity? Are lot sizes plausible? "
-        "Any leg whose stop distance or size looks wrong? Return a verdict "
+        "How sizing works — verify against this, do not reinvent it:\n"
+        "  risk_in_instrument_ccy = |entry - sl| * lot * value_per_point\n"
+        "  risk_in_account_ccy    = risk_in_instrument_ccy / fx_factor\n"
+        "Equity and the planned risk shown above are ALREADY in account currency. "
+        "Notional and exposure must be judged using value_per_point and the FX "
+        "factor — do NOT assume the instrument is priced in the account currency, "
+        "and do NOT assume 1 lot equals 100 units. A large lot count can be "
+        "perfectly correct when value_per_point is small.\n\n"
+        "Given that, consider: is total risk sane for the equity (account "
+        "currency)? Are the lot sizes consistent with the stated risk, the stop "
+        "distances and value_per_point? Only flag a problem if the numbers are "
+        "genuinely inconsistent with the formula above. Return a verdict "
         "(approve/caution/reject), confidence 0-1, and specific concerns."
     )
     data = await structured_call(cfg, system=_SYSTEM, user=user, schema=_EXEC_SCHEMA)
