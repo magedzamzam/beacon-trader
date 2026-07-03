@@ -86,6 +86,23 @@ class CapitalComAdapter(BrokerAdapter):
         async with self._session_lock:
             if self._cst and self._sec_token:
                 return
+
+            # Credentials come from the DB (entered in the portal, stored
+            # encrypted) — never from .env. Fail clearly if this broker has none,
+            # instead of letting Capital.com return a cryptic error.null.password.
+            missing = [name for name, key in (
+                ("API key", "api_key"),
+                ("username", "account_username"),
+                ("password", "account_password"),
+            ) if not self.credentials.get(key)]
+            if missing:
+                raise AuthError(
+                    "Capital.com credentials are not configured for this broker "
+                    f"(missing: {', '.join(missing)}). Enter them in the portal "
+                    "(Configuration → Brokers) — they are stored encrypted in the "
+                    "DB and are no longer read from .env."
+                )
+
             client = await self._get_client()
 
             last_rate_limit: Optional[RateLimitError] = None

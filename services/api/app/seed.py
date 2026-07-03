@@ -1,9 +1,13 @@
-"""Idempotent seed: a demo Capital.com broker (credentials via .env), one
-account with a default risk config, an XAUUSD symbol map, and two sample
-sources (a telegram channel + a manual desk) wired with SL
-rules, and per-TP risk. Safe to run repeatedly.
+"""Idempotent seed: a demo Capital.com broker (credentials entered later in the
+portal — never from .env), one account with a default risk config, an XAUUSD
+symbol map, and two sample sources (a telegram channel + a manual desk) wired
+with SL rules, and per-TP risk. Safe to run repeatedly.
 
     docker compose run --rm api python -m app.seed
+
+The seeded broker is created disabled and WITHOUT credentials: add its API
+key / username / password in the portal (Configuration -> Brokers) so they are
+stored encrypted in the DB.
 """
 import asyncio
 from decimal import Decimal
@@ -26,16 +30,13 @@ async def _get_or_create(session, model, defaults=None, **keys):
 async def main():
     await init_models()
     async with Session()() as s:
+        # Created disabled and WITHOUT credentials — secrets are entered in the
+        # portal and stored encrypted, never read from .env.
         broker, _ = await _get_or_create(
             s, Broker, name="Capital Demo",
             defaults=dict(
-                type="capital.com", is_demo=True, enabled=True,
-                credentials_ref={
-                    "api_key_env": "CAP_API_KEY",
-                    "account_username_env": "CAP_USERNAME",
-                    "account_password_env": "CAP_PASSWORD",
-                    "is_demo": True,
-                }))
+                type="capital.com", is_demo=True, enabled=False,
+                credentials_ref={"is_demo": True}))
 
         account, _ = await _get_or_create(
             s, Account, broker_id=broker.id, broker_account_id="DEMO-1",

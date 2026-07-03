@@ -27,28 +27,41 @@ def get_adapter(broker_type: str, credentials: Dict,
 def resolve_credentials(ref: dict) -> dict:
     """Turn a stored credentials_ref into live credentials.
 
-    Three key conventions, so a broker can be configured either way:
-      * `<name>_env`  -> read `<name>` from the environment (secret stays in .env)
-      * `<name>_enc`  -> Fernet-decrypt `<name>` (secret entered from the UI,
-                          stored encrypted in the DB via beacon_core.crypto)
+    Broker secrets come ONLY from the database — entered in the portal and
+    stored Fernet-encrypted. We deliberately do NOT read broker credentials
+    from the environment/.env:
+      * `<name>_enc`  -> Fernet-decrypt `<name>` (the supported way to store a
+                          secret; see beacon_core.crypto)
+      * `<name>_env`  -> IGNORED (legacy). The secret is NOT read from the
+                          environment; re-enter it in the portal so it is stored
+                          encrypted in the DB.
       * anything else -> passed through literally (e.g. `is_demo`)
 
-    Example refs:
-        {"api_key_env": "CAP_API_KEY", "account_username_env": "CAP_USERNAME",
-         "account_password_env": "CAP_PASSWORD", "is_demo": true}
+    Example ref (the only supported shape now):
         {"api_key_enc": "enc:v1:...", "account_username_enc": "enc:v1:...",
          "account_password_enc": "enc:v1:...", "is_demo": false}
     """
-    import os
-
     from ..crypto import decrypt
+    from ..logging import get_logger
 
     out: dict = {}
+    legacy_env_keys: list[str] = []
     for k, v in (ref or {}).items():
         if k.endswith("_env"):
-            out[k[:-4]] = os.getenv(str(v), "")
-        elif k.endswith("_enc"):
+            # Legacy .env reference — no longer honoured. Skip it so no secret
+            # is ever pulled from the environment.
+            legacy_env_keys.append(k)
+            continue
+        if k.endswith("_enc"):
             out[k[:-4]] = decrypt(v) or ""
         else:
             out[k] = v
+
+    if legacy_env_keys:
+        get_logger("brokers").warning(
+            "Broker credentials_ref uses legacy .env references %s which are no "
+            "longer read from the environment — enter the credentials in the "
+            "portal so they are stored encrypted in the DB.",
+            legacy_env_keys,
+        )
     return out
