@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (AsyncSession, async_sessionmaker,
                                      create_async_engine)
 from sqlalchemy.orm import DeclarativeBase
@@ -9,6 +10,19 @@ from ..config import get_settings
 
 class Base(DeclarativeBase):
     pass
+
+
+# Additive, nullable columns that create_all cannot add to a pre-existing table.
+# Applied idempotently on every startup (ADD COLUMN IF NOT EXISTS is safe and
+# non-destructive), so a schema bump can't leave the ORM mapping columns the
+# table lacks. Keep in sync with the model definitions.
+_ADDITIVE_COLUMNS = [
+    ("signals", "provider_ts", "TIMESTAMPTZ"),
+    ("signals", "received_ts", "TIMESTAMPTZ"),
+    ("signals", "published_ts", "TIMESTAMPTZ"),
+    ("legs", "submitted_ts", "TIMESTAMPTZ"),
+    ("legs", "broker_ack_ts", "TIMESTAMPTZ"),
+]
 
 
 _engine = None
@@ -42,3 +56,7 @@ async def init_models() -> None:
 
     async with engine().begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Add nullable columns create_all won't add to existing tables.
+        for table, column, coltype in _ADDITIVE_COLUMNS:
+            await conn.execute(text(
+                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {coltype}"))
