@@ -186,27 +186,6 @@ the key (env `ANTHROPIC_API_KEY`, or entered encrypted from the **AI** page).
 
 ---
 
-## Alpha Layer (in progress, branch `alpha-layer`)
-
-A measurement + research layer being built on a branch so the live bot on `main`
-keeps running untouched. It puts Telegram signal providers and internal
-strategies on one statistical, cost-net leaderboard.
-
-**Phase 0 — Data Foundation (implemented).** A new `collector` service captures
-top-of-book **ticks** per active SymbolMap every `COLLECT_INTERVAL` seconds,
-derives **1m candles** (backfilled from the broker on boot), snapshots crypto
-**microstructure** (funding, perp-spot basis, order-book imbalance, a
-liquidation proxy) for crypto symbols, ingests a swappable economic **calendar**,
-and rebuilds spread **cost profiles** (median/p90/vol per symbol × session)
-nightly. All GMT, all Decimal. Sessions: ASIA 00–07, LONDON 07–12, OVERLAP
-12–16, NY 16–21, LATE 21–24 (GMT). Signals/legs gained latency stamps
-(`provider_ts`/`received_ts`/`published_ts`, `submitted_ts`/`broker_ack_ts`) for
-alpha-decay analysis. External feeds are isolated behind
-`beacon_core/alpha/{calendar,crypto_micro}.py` so a flaky source is swappable.
-
-Phases 1–5 (backtest engine · regime gate · scorecard/allocator · internal
-strategies · validation) are planned; see `CHANGELOG.md`.
-
 ## Repo layout
 
 ```
@@ -217,14 +196,12 @@ packages/core/beacon_core/   shared library (installed into each image)
   risk/       position sizing
   strategy/   SL-rule engine
   ai/         provider + assessments + orchestration (signals/exec/outcome)
-  alpha/      swappable external feeds (econ calendar, crypto microstructure)
-  marketsessions.py · instruments.py   session tagging + asset classification
   crypto.py   Fernet encryption for secrets at rest
   settings_store.py  DB-backed runtime settings
   db/         async engine + schema
-services/     api · telegram · executor · monitor · collector  (each: Dockerfile + code)
+services/     api · telegram · executor · monitor  (each: Dockerfile + code)
 frontend/     React + Vite + nginx  (Messages · Activity · AI · Brokers · …)
-scripts/      init_db.py · migrate_001.py
+scripts/      init_db.py
 ```
 
 See **INSTALL.md** for the deployment runbook.

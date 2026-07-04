@@ -5,8 +5,8 @@ from __future__ import annotations
 import datetime as dt
 from decimal import Decimal
 
-from sqlalchemy import (JSON, Boolean, DateTime, ForeignKey, Index, Integer,
-                        Numeric, String, Text, UniqueConstraint)
+from sqlalchemy import (JSON, Boolean, DateTime, ForeignKey, Integer, Numeric,
+                        String, Text, UniqueConstraint)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base
@@ -89,11 +89,6 @@ class Signal(Base):
     raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     market_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)   # price/spread at signal time
     dedupe_hash: Mapped[str] = mapped_column(String(64), index=True)
-    # Latency stamps (Alpha Layer, Phase 0e) — raw material for alpha-decay and
-    # execution analysis. Nullable; added to existing DBs via scripts/migrate_001.py.
-    provider_ts: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)   # message time at source
-    received_ts: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)   # when we ingested it
-    published_ts: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # when handed to executor
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
     trades: Mapped[list["Trade"]] = relationship(back_populates="signal")
 
@@ -135,10 +130,6 @@ class Leg(Base):
     close_price: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)
     realized_pl: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)
     sl_moved: Mapped[bool] = mapped_column(Boolean, default=False)
-    # Execution latency stamps (Alpha Layer, Phase 0e). Nullable; added to
-    # existing DBs via scripts/migrate_001.py.
-    submitted_ts: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)   # order sent to broker
-    broker_ack_ts: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # broker confirm received
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
     closed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     trade: Mapped["Trade"] = relationship(back_populates="legs")
@@ -250,79 +241,3 @@ class AiAssessment(Base):
     rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
     payload: Mapped[dict] = mapped_column(JSON, default=dict)                # full structured result
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
-
-
-# ---------------------------------------------------------------------------
-# Alpha Layer — Phase 0 data foundation. All GMT/UTC, Decimal money/prices.
-# ---------------------------------------------------------------------------
-class Tick(Base):
-    """Raw top-of-book capture per symbol, on the COLLECT_INTERVAL cadence."""
-    __tablename__ = "ticks"
-    __table_args__ = (Index("ix_ticks_symbol_ts", "symbol", "ts"),)
-    id: Mapped[int] = mapped_column(primary_key=True)
-    symbol: Mapped[str] = mapped_column(String(16), index=True)   # internal symbol (XAUUSD…)
-    ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), index=True)
-    bid: Mapped[Decimal] = mapped_column(NUM)
-    offer: Mapped[Decimal] = mapped_column(NUM)
-    spread: Mapped[Decimal] = mapped_column(NUM)
-    mid: Mapped[Decimal] = mapped_column(NUM)
-    session: Mapped[str] = mapped_column(String(8))              # ASIA|LONDON|OVERLAP|NY|LATE
-
-
-class Candle(Base):
-    """OHLC bars derived from ticks (1m) and backfilled from the broker."""
-    __tablename__ = "candles"
-    __table_args__ = (UniqueConstraint("symbol", "resolution", "ts", name="uq_candle"),
-                      Index("ix_candles_symbol_ts", "symbol", "ts"))
-    id: Mapped[int] = mapped_column(primary_key=True)
-    symbol: Mapped[str] = mapped_column(String(16), index=True)
-    resolution: Mapped[str] = mapped_column(String(8), default="1m")
-    ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), index=True)  # bar OPEN, GMT
-    o: Mapped[Decimal] = mapped_column(NUM)
-    h: Mapped[Decimal] = mapped_column(NUM)
-    l: Mapped[Decimal] = mapped_column(NUM)
-    c: Mapped[Decimal] = mapped_column(NUM)
-    volume: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)
-    session: Mapped[str | None] = mapped_column(String(8), nullable=True)
-
-
-class CostProfile(Base):
-    """Per symbol × session spread statistics — feeds the backtester and the
-    live cost gate. Rebuilt nightly from `ticks`."""
-    __tablename__ = "cost_profiles"
-    __table_args__ = (UniqueConstraint("symbol", "session", name="uq_cost_profile"),)
-    id: Mapped[int] = mapped_column(primary_key=True)
-    symbol: Mapped[str] = mapped_column(String(16), index=True)
-    session: Mapped[str] = mapped_column(String(8))
-    median_spread: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)
-    p90_spread: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)
-    spread_vol: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)   # stddev of spread
-    samples: Mapped[int] = mapped_column(Integer, default=0)
-    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
-
-
-class EconEvent(Base):
-    """Economic-calendar events (GMT). High-impact events drive news blackouts."""
-    __tablename__ = "econ_events"
-    __table_args__ = (UniqueConstraint("ts", "ccy", "title", name="uq_econ_event"),)
-    id: Mapped[int] = mapped_column(primary_key=True)
-    ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), index=True)  # -> ix_econ_events_ts
-    ccy: Mapped[str | None] = mapped_column(String(8), nullable=True)
-    impact: Mapped[str | None] = mapped_column(String(16), nullable=True)   # high|medium|low|holiday
-    title: Mapped[str | None] = mapped_column(String(256), nullable=True)
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
-
-
-class CryptoMicro(Base):
-    """Crypto microstructure snapshot (funding, perp-spot basis, order-book
-    imbalance, liquidation proxy) — crypto symbols only, once a minute."""
-    __tablename__ = "crypto_micro"
-    __table_args__ = (Index("ix_crypto_micro_symbol_ts", "symbol", "ts"),)
-    id: Mapped[int] = mapped_column(primary_key=True)
-    symbol: Mapped[str] = mapped_column(String(16), index=True)
-    ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), index=True)
-    funding: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)
-    funding_predicted: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)
-    basis: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)          # mark - index
-    ob_imbalance: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)   # sum(bidQty)/sum(askQty), top 20
-    liquidation_proxy: Mapped[bool] = mapped_column(Boolean, default=False)

@@ -36,17 +36,6 @@ class Settings:
         # Monitor reconcile cadence (seconds).
         self.monitor_interval: float = float(os.getenv("MONITOR_INTERVAL", "5"))
 
-        # --- Alpha Layer / collector (Phase 0) ---
-        self.collect_interval: float = float(os.getenv("COLLECT_INTERVAL", "5"))       # tick capture cadence (s)
-        self.candle_backfill_bars: int = int(os.getenv("CANDLE_BACKFILL_BARS", "1000"))# 1m bars to backfill on boot
-        self.crypto_micro_interval: float = float(os.getenv("CRYPTO_MICRO_INTERVAL", "60"))
-        self.calendar_refresh_interval: float = float(os.getenv("CALENDAR_REFRESH_INTERVAL", "3600"))
-        self.cost_profile_interval: float = float(os.getenv("COST_PROFILE_INTERVAL", "21600"))  # 6h
-        # Swappable data sources (isolated behind beacon_core.alpha.*).
-        self.econ_calendar_url: str = os.getenv(
-            "ECON_CALENDAR_URL", "https://nfs.faireconomy.media/ff_calendar_thisweek.json")
-        self.binance_fapi: str = os.getenv("BINANCE_FAPI", "https://fapi.binance.com")
-
         self.log_level: str = os.getenv("LOG_LEVEL", "INFO")
 
 
