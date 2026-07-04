@@ -64,6 +64,8 @@ export const api = {
   taCatalog: () => req("/ta/catalog"),
   taConfig: () => req("/ta/config"),
   saveTaConfig: (c) => req("/ta/config", { method: "PUT", body: JSON.stringify(c) }),
+  // Bayesian correlation of captured features with outcomes
+  bayesAnalysis: (minN = 5) => req(`/analysis/bayes?min_n=${minN}`),
   // brokers
   createBroker: (b) => post("/brokers", b),
   updateBroker: (id, b) => patch(`/brokers/${id}`, b),
