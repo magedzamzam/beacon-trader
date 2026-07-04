@@ -25,6 +25,25 @@ const shortId = (id) => id ? `…${String(id).slice(-8)}` : "—";
 const when = (s) => (s || "").slice(0, 19).replace("T", " ");
 const TF_ORDER = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"];
 const num = (v, nd = 2) => (v == null ? "—" : Number(v).toFixed(nd));
+const fv = (v) => (typeof v === "boolean" ? (v ? "yes" : "no")
+  : typeof v === "number" ? (Math.abs(v) >= 1000 ? v.toFixed(0) : v.toFixed(2)) : (v ?? "—"));
+
+/** Summarize any indicator output dict into a short, generic token. */
+function summ(o) {
+  if (o == null || typeof o !== "object") return fv(o);
+  if ("value" in o) return fv(o.value) + ("above" in o ? (o.above ? " ↑" : " ↓") : "");
+  if ("cross" in o) return o.cross || (o.hist != null ? fv(o.hist) : "—");
+  if ("nearest" in o) return `${o.nearest} (${fv(o.dist_pct)}%)`;
+  if ("adx" in o) return `${fv(o.adx)}${o.trending ? " ✓" : ""}`;
+  if ("k" in o && "d" in o) return `K ${fv(o.k)}${o.overbought ? " OB" : o.oversold ? " OS" : ""}`;
+  if ("pct_b" in o) return `%b ${fv(o.pct_b)}${o.above_upper ? " ▲" : o.below_lower ? " ▼" : ""}`;
+  if ("dist_support_pct" in o || "dist_resistance_pct" in o)
+    return `S ${fv(o.dist_support_pct)}% / R ${fv(o.dist_resistance_pct)}%`;
+  if ("up" in o && "down" in o) return `↑${fv(o.up)} ↓${fv(o.down)}`;
+  if ("upper" in o && "lower" in o) return `${fv(o.lower)}–${fv(o.upper)}`;
+  const k = Object.keys(o)[0];
+  return k ? `${k} ${fv(o[k])}` : "—";
+}
 
 function Section({ title, children }) {
   return (
@@ -135,33 +154,23 @@ export default function TradeDetail({ tradeId, onClose }) {
             <Section title={`Signal TA snapshot${t.features.session ? " · " + t.features.session : ""}`
               + (t.features.utc_hour != null ? ` · ${String(t.features.utc_hour).padStart(2, "0")}:00 GMT` : "")}>
               {!Object.keys(t.features.timeframes || {}).length ? <Empty>No features captured.</Empty> : (
-                <table className="w-full">
-                  <thead><tr>
-                    <Th>TF</Th><Th right>RSI</Th><Th>MACD</Th><Th>vs EMA200</Th>
-                    <Th right>ATR%</Th><Th right>→Sup</Th><Th right>→Res</Th><Th>Fib</Th>
-                  </tr></thead>
-                  <tbody>
-                    {TF_ORDER.filter(tf => t.features.timeframes[tf]).map(tf => {
-                      const f = t.features.timeframes[tf];
-                      return (
-                        <tr key={tf} className="border-b border-edge/50">
-                          <Td mono>{tf}</Td>
-                          <Td right mono>{num(f.rsi14)}</Td>
-                          <Td>{f.macd?.cross
-                            ? <Badge tone={f.macd.cross === "up" ? "long" : "short"}>{f.macd.cross}</Badge>
-                            : <span className="text-xs text-muted">{f.macd?.hist != null ? num(f.macd.hist, 3) : "—"}</span>}</Td>
-                          <Td>{f.above_ema200 == null ? <span className="text-muted text-xs">—</span>
-                            : <span className={`text-xs text-${f.above_ema200 ? "long" : "short"}`}>{f.above_ema200 ? "above" : "below"}</span>}</Td>
-                          <Td right mono>{num(f.atr_pct, 3)}</Td>
-                          <Td right mono>{f.dist_support_pct != null ? `${num(f.dist_support_pct)}%` : "—"}</Td>
-                          <Td right mono>{f.dist_resistance_pct != null ? `${num(f.dist_resistance_pct)}%` : "—"}</Td>
-                          <Td><span className="text-xs text-muted">{f.fib_nearest
-                            ? `${f.fib_nearest.level} (${num(f.fib_nearest.dist_pct)}%)` : "—"}</span></Td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                <div className="p-3 space-y-1">
+                  {TF_ORDER.filter(tf => t.features.timeframes[tf]).map(tf => {
+                    const f = t.features.timeframes[tf];
+                    const keys = Object.keys(f).filter(k => !k.startsWith("_"));
+                    return (
+                      <div key={tf} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-edge/40 py-1.5">
+                        <span className="num text-xs font-semibold w-9 shrink-0 text-beacon">{tf}</span>
+                        {keys.map(k => (
+                          <span key={k} className="text-[11px] whitespace-nowrap">
+                            <span className="text-muted">{k}</span>{" "}
+                            <span className="num text-ink/90">{summ(f[k])}</span>
+                          </span>
+                        ))}
+                      </div>
+                    );
+                  })}
+                </div>
               )}
             </Section>
           )}

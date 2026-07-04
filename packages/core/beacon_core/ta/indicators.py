@@ -145,3 +145,191 @@ def nearest_fib(price: float, fib: Optional[dict]) -> Optional[dict]:
         if best is None or d < best["dist_pct"]:
             best = {"level": name, "price": lvl, "dist_pct": d}
     return best
+
+
+# --- extended library ------------------------------------------------------
+def wma(values: List[float], period: int) -> Optional[float]:
+    if len(values) < period:
+        return None
+    w = list(range(1, period + 1))
+    return sum(v * k for v, k in zip(values[-period:], w)) / sum(w)
+
+
+def stddev(values: List[float], period: int) -> Optional[float]:
+    if len(values) < period:
+        return None
+    seg = values[-period:]
+    m = sum(seg) / period
+    return (sum((x - m) ** 2 for x in seg) / period) ** 0.5
+
+
+def bollinger(closes: List[float], period: int = 20, mult: float = 2.0) -> Optional[dict]:
+    if len(closes) < period:
+        return None
+    m = sum(closes[-period:]) / period
+    sd = stddev(closes, period)
+    if sd is None:
+        return None
+    upper, lower, price = m + mult * sd, m - mult * sd, closes[-1]
+    return {"middle": m, "upper": upper, "lower": lower,
+            "width": (upper - lower) / m if m else None,
+            "pct_b": (price - lower) / (upper - lower) if upper != lower else None,
+            "above_upper": price > upper, "below_lower": price < lower}
+
+
+def stochastic(highs, lows, closes, k: int = 14, d: int = 3) -> Optional[dict]:
+    if len(closes) < k + d:
+        return None
+    ks = []
+    for i in range(k - 1, len(closes)):
+        hh, ll = max(highs[i - k + 1:i + 1]), min(lows[i - k + 1:i + 1])
+        ks.append(100 * (closes[i] - ll) / (hh - ll) if hh != ll else 50.0)
+    kval = ks[-1]
+    dval = sum(ks[-d:]) / d if len(ks) >= d else None
+    return {"k": kval, "d": dval, "overbought": kval > 80, "oversold": kval < 20}
+
+
+def stoch_rsi(closes, rsi_period: int = 14, k: int = 14) -> Optional[dict]:
+    rs = []
+    for i in range(rsi_period + 1, len(closes) + 1):
+        r = rsi(closes[:i], rsi_period)
+        if r is not None:
+            rs.append(r)
+    if len(rs) < k:
+        return None
+    seg = rs[-k:]
+    hh, ll = max(seg), min(seg)
+    val = 100 * (rs[-1] - ll) / (hh - ll) if hh != ll else 50.0
+    return {"value": val, "overbought": val > 80, "oversold": val < 20}
+
+
+def cci(highs, lows, closes, period: int = 20) -> Optional[float]:
+    if len(closes) < period:
+        return None
+    tp = [(highs[i] + lows[i] + closes[i]) / 3 for i in range(len(closes))]
+    seg = tp[-period:]
+    m = sum(seg) / period
+    md = sum(abs(x - m) for x in seg) / period
+    return (tp[-1] - m) / (0.015 * md) if md else None
+
+
+def williams_r(highs, lows, closes, period: int = 14) -> Optional[float]:
+    if len(closes) < period:
+        return None
+    hh, ll = max(highs[-period:]), min(lows[-period:])
+    return -100 * (hh - closes[-1]) / (hh - ll) if hh != ll else None
+
+
+def roc(closes: List[float], period: int = 12) -> Optional[float]:
+    if len(closes) < period + 1:
+        return None
+    prev = closes[-period - 1]
+    return 100 * (closes[-1] - prev) / prev if prev else None
+
+
+def momentum(closes: List[float], period: int = 10) -> Optional[float]:
+    if len(closes) < period + 1:
+        return None
+    return closes[-1] - closes[-period - 1]
+
+
+def adx(highs, lows, closes, period: int = 14) -> Optional[dict]:
+    n = len(closes)
+    if n < 2 * period + 1:
+        return None
+    plus_dm, minus_dm, trs = [], [], []
+    for i in range(1, n):
+        up, dn = highs[i] - highs[i - 1], lows[i - 1] - lows[i]
+        plus_dm.append(up if (up > dn and up > 0) else 0.0)
+        minus_dm.append(dn if (dn > up and dn > 0) else 0.0)
+        trs.append(max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]),
+                       abs(lows[i] - closes[i - 1])))
+
+    def _smooth(x):
+        s = sum(x[:period])
+        out = [s]
+        for i in range(period, len(x)):
+            s = s - s / period + x[i]
+            out.append(s)
+        return out
+
+    tr_s, pdm_s, mdm_s = _smooth(trs), _smooth(plus_dm), _smooth(minus_dm)
+    dxs = []
+    for i in range(len(tr_s)):
+        tr = tr_s[i]
+        if tr == 0:
+            dxs.append(0.0); continue
+        pdi, mdi = 100 * pdm_s[i] / tr, 100 * mdm_s[i] / tr
+        dxs.append(100 * abs(pdi - mdi) / (pdi + mdi) if (pdi + mdi) else 0.0)
+    if len(dxs) < period:
+        return None
+    a = sum(dxs[:period]) / period
+    for i in range(period, len(dxs)):
+        a = (a * (period - 1) + dxs[i]) / period
+    tr = tr_s[-1]
+    return {"adx": a, "plus_di": 100 * pdm_s[-1] / tr if tr else 0.0,
+            "minus_di": 100 * mdm_s[-1] / tr if tr else 0.0, "trending": a > 25}
+
+
+def aroon(highs, lows, period: int = 25) -> Optional[dict]:
+    if len(highs) < period + 1:
+        return None
+    sh, sl = highs[-(period + 1):], lows[-(period + 1):]
+    up = 100 * sh.index(max(sh)) / period
+    down = 100 * sl.index(min(sl)) / period
+    return {"up": up, "down": down, "osc": up - down}
+
+
+def donchian(highs, lows, period: int = 20) -> Optional[dict]:
+    if len(highs) < period:
+        return None
+    up, low = max(highs[-period:]), min(lows[-period:])
+    return {"upper": up, "lower": low, "middle": (up + low) / 2}
+
+
+def keltner(highs, lows, closes, period: int = 20, mult: float = 2.0) -> Optional[dict]:
+    e, a = ema(closes, period), atr(highs, lows, closes, period)
+    if e is None or a is None:
+        return None
+    return {"middle": e, "upper": e + mult * a, "lower": e - mult * a}
+
+
+def obv(closes, volumes) -> Optional[float]:
+    if not volumes or all(v is None for v in volumes):
+        return None
+    o = 0.0
+    for i in range(1, len(closes)):
+        v = volumes[i] or 0
+        if closes[i] > closes[i - 1]:
+            o += v
+        elif closes[i] < closes[i - 1]:
+            o -= v
+    return o
+
+
+def vwap(highs, lows, closes, volumes) -> Optional[float]:
+    if not volumes or all(v is None for v in volumes):
+        return None
+    num = den = 0.0
+    for i in range(len(closes)):
+        v = volumes[i] or 0
+        num += (highs[i] + lows[i] + closes[i]) / 3 * v
+        den += v
+    return num / den if den else None
+
+
+def pivots(prev_high: float, prev_low: float, prev_close: float) -> dict:
+    p = (prev_high + prev_low + prev_close) / 3
+    return {"p": p, "r1": 2 * p - prev_low, "s1": 2 * p - prev_high,
+            "r2": p + (prev_high - prev_low), "s2": p - (prev_high - prev_low)}
+
+
+def hist_vol(closes: List[float], period: int = 20) -> Optional[float]:
+    if len(closes) < period + 1:
+        return None
+    rets = [closes[i] / closes[i - 1] - 1
+            for i in range(len(closes) - period, len(closes)) if closes[i - 1]]
+    if len(rets) < 2:
+        return None
+    m = sum(rets) / len(rets)
+    return (sum((r - m) ** 2 for r in rets) / len(rets)) ** 0.5 * (252 ** 0.5)

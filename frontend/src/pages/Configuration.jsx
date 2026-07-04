@@ -2,7 +2,7 @@ import { useState } from "react";
 import {
   Building2, Rss, Coins, ShieldCheck, DollarSign, GitBranch, Clock,
   Sparkles, Bell, Settings, Users, KeyRound, FileCheck, Database,
-  CreditCard, Activity, Plug,
+  CreditCard, Activity, Plug, LineChart,
 } from "lucide-react";
 
 import Brokers from "./Brokers";
@@ -10,6 +10,7 @@ import Sources from "./Sources";
 import Symbols from "./Symbols";
 import Risk from "./Risk";
 import AI from "./AI";
+import Indicators from "./Indicators";
 import Currency from "./settings/Currency";
 import Placeholder from "../components/Placeholder";
 
@@ -79,6 +80,7 @@ const GROUPS = [
     title: "Intelligence",
     tabs: [
       { id: "ai", label: "AI Validation", icon: Sparkles, render: () => <AI /> },
+      { id: "indicators", label: "Indicators", icon: LineChart, render: () => <Indicators /> },
       {
         id: "notifications", label: "Notifications", icon: Bell, render: () => (
           <Placeholder icon={Bell} title="Notifications & Alerts"

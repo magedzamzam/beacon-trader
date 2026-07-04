@@ -60,6 +60,10 @@ export const api = {
   aiAssessments: (q = "") => req(`/ai/assessments${q}`),
   aiAssessSignal: (id) => post(`/ai/signals/${id}/assess`, {}),
   aiAssessTrade: (id) => post(`/ai/trades/${id}/assess`, {}),
+  // technical-analysis indicator config (per-signal capture)
+  taCatalog: () => req("/ta/catalog"),
+  taConfig: () => req("/ta/config"),
+  saveTaConfig: (c) => req("/ta/config", { method: "PUT", body: JSON.stringify(c) }),
   // brokers
   createBroker: (b) => post("/brokers", b),
   updateBroker: (id, b) => patch(`/brokers/${id}`, b),

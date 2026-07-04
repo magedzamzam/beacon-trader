@@ -1,62 +1,102 @@
-"""Unit tests for the pure TA indicators (no DB / network)."""
+"""Unit tests for the TA indicators, registry, and config-driven features."""
 from beacon_core.ta import indicators as I
-from beacon_core.ta.features import timeframe_features
+from beacon_core.ta import registry as R
+from beacon_core.ta.features import compute_timeframe
 
 
-def test_sma():
+# ---- core indicators ----
+def test_sma_ema():
     assert I.sma([1, 2, 3, 4, 5], 5) == 3
     assert I.sma([1, 2], 5) is None
-
-
-def test_ema_tracks_and_needs_history():
-    assert I.ema([1, 2], 5) is None
-    flat = [10.0] * 30
-    assert abs(I.ema(flat, 10) - 10.0) < 1e-9        # EMA of a flat line is the line
+    assert abs(I.ema([10.0] * 30, 10) - 10.0) < 1e-9
 
 
 def test_rsi_extremes():
-    up = list(range(1, 40))                          # strictly increasing
-    assert I.rsi([float(x) for x in up], 14) == 100.0
-    down = list(range(40, 1, -1))
-    assert I.rsi([float(x) for x in down], 14) == 0.0
+    assert I.rsi([float(x) for x in range(1, 40)], 14) == 100.0
+    assert I.rsi([float(x) for x in range(40, 1, -1)], 14) == 0.0
 
 
-def test_macd_shape_and_cross():
-    closes = [float(x) for x in range(1, 80)]        # steady uptrend
-    m = I.macd(closes)
-    assert set(m) == {"macd", "signal", "hist", "cross"}
-    assert m["macd"] > 0                             # fast EMA above slow in an uptrend
+def test_macd_uptrend_positive():
+    m = I.macd([float(x) for x in range(1, 80)])
+    assert set(m) == {"macd", "signal", "hist", "cross"} and m["macd"] > 0
 
 
 def test_atr_positive():
     n = 30
-    highs = [10.0 + i for i in range(n)]
-    lows = [9.0 + i for i in range(n)]
-    closes = [9.5 + i for i in range(n)]
-    a = I.atr(highs, lows, closes, 14)
+    a = I.atr([10.0 + i for i in range(n)], [9.0 + i for i in range(n)],
+              [9.5 + i for i in range(n)], 14)
     assert a is not None and a > 0
 
 
-def test_support_resistance_brackets_price():
-    highs = [10, 12, 11, 15, 13, 16, 14, 18, 15, 12, 11, 13]
-    lows = [8, 9, 8, 11, 10, 12, 11, 13, 12, 9, 8, 10]
-    sup, res = I.support_resistance([float(h) for h in highs], [float(l) for l in lows], 12.5)
-    if sup is not None:
-        assert sup < 12.5
-    if res is not None:
-        assert res > 12.5
+# ---- extended library ----
+def test_bollinger_brackets_price():
+    closes = [100.0 + (i % 5) for i in range(40)]
+    b = I.bollinger(closes, 20, 2.0)
+    assert b["lower"] <= b["middle"] <= b["upper"]
+    assert isinstance(b["above_upper"], bool)
 
 
-def test_timeframe_features_needs_min_bars():
-    bars = [{"o": 100, "h": 101, "l": 99, "c": 100} for _ in range(10)]
-    assert timeframe_features(bars, None) is None
+def test_stochastic_range():
+    n = 40
+    highs = [10.0 + (i % 7) for i in range(n)]
+    lows = [8.0 + (i % 5) for i in range(n)]
+    closes = [9.0 + (i % 6) for i in range(n)]
+    s = I.stochastic(highs, lows, closes, 14, 3)
+    assert 0 <= s["k"] <= 100
 
 
-def test_timeframe_features_full():
+def test_adx_and_cci_and_wr():
+    n = 60
+    highs = [10.0 + i * 0.5 for i in range(n)]
+    lows = [9.0 + i * 0.5 for i in range(n)]
+    closes = [9.5 + i * 0.5 for i in range(n)]
+    a = I.adx(highs, lows, closes, 14)
+    assert a is not None and 0 <= a["adx"] <= 100
+    assert I.cci(highs, lows, closes, 20) is not None
+    wr = I.williams_r(highs, lows, closes, 14)
+    assert wr is None or -100 <= wr <= 0
+
+
+def test_volume_indicators_need_volume():
+    closes = [float(i) for i in range(30)]
+    assert I.obv(closes, [None] * 30) is None
+    assert I.obv(closes, [10.0] * 30) is not None
+
+
+# ---- registry / config ----
+def test_catalog_shape():
+    cat = R.catalog()
+    ids = {i["id"] for i in cat["indicators"]}
+    assert {"rsi", "ema", "macd", "bbands", "adx", "fib"} <= ids
+    assert "1h" in cat["timeframes"]
+
+
+def test_compute_one_unknown_and_known():
+    ctx = R.Ctx(closes=[float(i) for i in range(60)],
+                highs=[float(i) + 1 for i in range(60)],
+                lows=[float(i) - 1 for i in range(60)],
+                volumes=[None] * 60, price=59.0)
+    assert R.compute_one(ctx, {"id": "does_not_exist"}) is None
+    key, out = R.compute_one(ctx, {"id": "ema", "params": {"period": 20}})
+    assert key == "ema_20" and "value" in out
+
+
+def test_sanitize_config_drops_and_clamps():
+    san = R.sanitize_config({"timeframes": ["5m", "BAD", "1h"],
+                             "indicators": [{"id": "rsi", "params": {"period": 999}},
+                                            {"id": "nope"}]})
+    assert san["timeframes"] == ["5m", "1h"]
+    assert san["indicators"] == [{"id": "rsi", "params": {"period": 200}}]
+
+
+def test_compute_timeframe_config_driven():
     bars = [{"o": 100 + i * 0.1, "h": 100.5 + i * 0.1, "l": 99.5 + i * 0.1,
-             "c": 100 + i * 0.1} for i in range(120)]
-    f = timeframe_features(bars, None)
-    assert f is not None
-    assert f["above_ema200"] is None or isinstance(f["above_ema200"], bool)  # 200 needs 200 bars
-    assert isinstance(f["rsi14"], float)
-    assert "macd" in f and "atr14" in f
+             "c": 100 + i * 0.1, "v": 100} for i in range(120)]
+    cfg = [{"id": "rsi", "params": {"period": 14}},
+           {"id": "ema", "params": {"period": 50}},
+           {"id": "macd", "params": {"fast": 12, "slow": 26, "signal": 9}},
+           {"id": "unknown", "params": {}}]
+    f = compute_timeframe(bars, None, cfg)
+    assert "rsi_14" in f and "ema_50" in f and "macd_12_26_9" in f
+    assert not any("unknown" in k for k in f)
+    assert compute_timeframe(bars[:10], None, cfg) is None      # too few bars

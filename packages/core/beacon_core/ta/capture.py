@@ -1,28 +1,24 @@
-"""Capture a signal-time TA snapshot across timeframes and persist it.
-
-Best-effort: any timeframe (or the whole capture) that fails just logs and is
-skipped — this never affects trading. Called off the hot path (after orders are
-placed) so it adds no execution latency.
+"""Capture a signal-time TA snapshot across the configured timeframes and
+indicators, and persist it. Best-effort: any timeframe (or the whole capture)
+that fails just logs and is skipped — never affects trading. Called off the hot
+path (after orders are placed) so it adds no execution latency.
 """
 from __future__ import annotations
 
 import datetime as dt
 from decimal import Decimal
-from typing import Optional
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from ..db.models import SignalFeature
 from ..logging import get_logger
-from .features import timeframe_features
+from ..settings_store import get_setting
+from .features import compute_timeframe
+from .registry import DEFAULT_CONFIG, TF_RESOLUTION, sanitize_config
 
 log = get_logger("ta.capture")
 
-# (label stored in JSON, broker resolution). Matches Capital.com get_bars.
-TIMEFRAMES = [
-    ("1m", "MINUTE"), ("5m", "MINUTE_5"), ("15m", "MINUTE_15"),
-    ("30m", "MINUTE_30"), ("1h", "HOUR"), ("4h", "HOUR_4"), ("1d", "DAY"),
-]
+TA_SETTING_KEY = "ta"
 MAX_BARS = 250
 
 
@@ -39,9 +35,18 @@ def _session_tag(ts: dt.datetime) -> str:
     return "LATE"
 
 
+async def load_config(session) -> dict:
+    stored = await get_setting(session, TA_SETTING_KEY, None)
+    return sanitize_config(stored) if stored else dict(DEFAULT_CONFIG)
+
+
 async def capture_for_signal(session, sig, adapter, smap, *, max_bars: int = MAX_BARS):
-    """Fetch bars per timeframe from `adapter`, compute features, upsert one
-    SignalFeature row for `sig`. Returns the features dict (or None)."""
+    """Fetch bars for each configured timeframe, compute the configured
+    indicators, and upsert one SignalFeature row for `sig`."""
+    cfg = await load_config(session)
+    timeframes = cfg.get("timeframes") or DEFAULT_CONFIG["timeframes"]
+    indicators = cfg.get("indicators") or DEFAULT_CONFIG["indicators"]
+
     # Reference price (live mid) for above/below + distance features.
     price = None
     try:
@@ -52,13 +57,16 @@ async def capture_for_signal(session, sig, adapter, smap, *, max_bars: int = MAX
         log.info("quote for TA capture failed (%s): %s", smap.broker_epic, exc)
 
     tf_features: dict = {}
-    for label, resolution in TIMEFRAMES:
+    for label in timeframes:
+        resolution = TF_RESOLUTION.get(label)
+        if not resolution:
+            continue
         try:
             bars = await adapter.get_bars(smap.broker_epic, resolution, max_bars=max_bars)
         except Exception as exc:
             log.info("bars %s/%s failed: %s", smap.broker_epic, resolution, exc)
             continue
-        f = timeframe_features(bars, price)
+        f = compute_timeframe(bars, price, indicators)
         if f is not None:
             tf_features[label] = f
 
@@ -74,5 +82,6 @@ async def capture_for_signal(session, sig, adapter, smap, *, max_bars: int = MAX
         features=tf_features, captured_at=now,
     ).on_conflict_do_nothing(constraint="uq_signal_feature")
     await session.execute(stmt)
-    log.info("captured TA features for signal %s (%s timeframes)", sig.id, len(tf_features))
+    log.info("captured TA features for signal %s (%s timeframes, %s indicators)",
+             sig.id, len(tf_features), len(indicators))
     return tf_features
