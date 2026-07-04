@@ -70,6 +70,7 @@ function SourceModal({ source, accounts, onClose, onSaved }) {
   const [name, setName] = useState(s.name || "");
   const [externalId, setExternalId] = useState(s.external_id || "");
   const [ttl, setTtl] = useState(strat.entry_ttl_minutes ?? 60);
+  const [cancelPending, setCancelPending] = useState(strat.cancel_pending_on_stop !== false);
   const [trusted, setTrusted] = useState(s.is_trusted || false);
   const [enabled, setEnabled] = useState(s.enabled_for_trading || false);
   const [accountMap, setAccountMap] = useState(s.account_map || []);
@@ -85,7 +86,8 @@ function SourceModal({ source, accounts, onClose, onSaved }) {
     const payload = {
       kind, name, external_id: externalId || null,
       is_trusted: trusted, enabled_for_trading: enabled,
-      strategy: { entry_ttl_minutes: +ttl, sl_rules: slRules },
+      strategy: { entry_ttl_minutes: +ttl, sl_rules: slRules,
+                  cancel_pending_on_stop: cancelPending },
       risk_config: useRisk ? risk : {},
       account_map: accountMap,
     };
@@ -119,6 +121,10 @@ function SourceModal({ source, accounts, onClose, onSaved }) {
         <Field label="Entry TTL (min)"
           hint="orders rest as LIMIT; a leg is auto-MARKET if the candle already crossed its entry. Cancels an unfilled limit after N min (0 = never).">
           <Input type="number" value={ttl} onChange={e => setTtl(e.target.value)} />
+        </Field>
+        <Field label="Cancel pending on stop"
+          hint="once a TP is hit or a stop rule ratchets the SL, cancel this trade's still-unfilled limit entries">
+          <Toggle checked={cancelPending} onChange={setCancelPending} label={cancelPending ? "on" : "off"} />
         </Field>
       </div>
 

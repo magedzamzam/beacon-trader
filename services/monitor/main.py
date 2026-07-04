@@ -522,6 +522,31 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                 except Exception as exc:
                     log.warning("SL move failed (leg %s): %s", leg.id, exc)
 
+        # --- cancel stale limit entries once the trade has progressed ---
+        # If a TP has been hit or a stop rule has ratcheted the SL, the remaining
+        # unfilled LIMIT entries of THIS trade are stale — price moved the intended
+        # way without them (e.g. a 4025-4020 buy where 4025 filled and hit TP1
+        # while 4020 never triggered). Cancel them so we don't enter late.
+        # Only cancels orders the broker confirms are still cancellable, so an
+        # order that just filled is never mislabelled. Configurable per source.
+        progressed = bool(effective_tps_hit) or any(l.sl_moved for l in legs)
+        if progressed and strat.get("cancel_pending_on_stop", True):
+            for leg in legs:
+                if leg.status != "working" or leg.broker_order_ref not in orders:
+                    continue
+                ok = False
+                try:
+                    ok = await adapter.cancel_order(leg.broker_order_ref)
+                except Exception as exc:
+                    log.warning("rule-cancel failed (leg %s): %s", leg.id, exc)
+                if ok:
+                    leg.status = "cancelled"
+                    leg.outcome = "cancelled"
+                    leg.closed_at = _utcnow()
+                    session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="cancelled_by_rule",
+                                      payload={"reason": "trade progressed (TP hit / SL ratcheted); stale limit entry"}))
+                    log.info("trade %s leg %s cancelled — stale limit after progress", trade.id, leg.id)
+
         # Persist the broker activity audit for this trade (best-effort).
         try:
             await _audit_activities()
