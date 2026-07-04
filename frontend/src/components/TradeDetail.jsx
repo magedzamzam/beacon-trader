@@ -23,6 +23,8 @@ const outcomeTone = (o) => o === "tp_hit" ? "long" : o === "sl_hit" ? "short"
   : o === "breakeven" ? "warn" : "muted";
 const shortId = (id) => id ? `…${String(id).slice(-8)}` : "—";
 const when = (s) => (s || "").slice(0, 19).replace("T", " ");
+const TF_ORDER = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"];
+const num = (v, nd = 2) => (v == null ? "—" : Number(v).toFixed(nd));
 
 function Section({ title, children }) {
   return (
@@ -128,6 +130,41 @@ export default function TradeDetail({ tradeId, onClose }) {
               </tbody>
             </table>
           </Section>
+
+          {t.features && (
+            <Section title={`Signal TA snapshot${t.features.session ? " · " + t.features.session : ""}`
+              + (t.features.utc_hour != null ? ` · ${String(t.features.utc_hour).padStart(2, "0")}:00 GMT` : "")}>
+              {!Object.keys(t.features.timeframes || {}).length ? <Empty>No features captured.</Empty> : (
+                <table className="w-full">
+                  <thead><tr>
+                    <Th>TF</Th><Th right>RSI</Th><Th>MACD</Th><Th>vs EMA200</Th>
+                    <Th right>ATR%</Th><Th right>→Sup</Th><Th right>→Res</Th><Th>Fib</Th>
+                  </tr></thead>
+                  <tbody>
+                    {TF_ORDER.filter(tf => t.features.timeframes[tf]).map(tf => {
+                      const f = t.features.timeframes[tf];
+                      return (
+                        <tr key={tf} className="border-b border-edge/50">
+                          <Td mono>{tf}</Td>
+                          <Td right mono>{num(f.rsi14)}</Td>
+                          <Td>{f.macd?.cross
+                            ? <Badge tone={f.macd.cross === "up" ? "long" : "short"}>{f.macd.cross}</Badge>
+                            : <span className="text-xs text-muted">{f.macd?.hist != null ? num(f.macd.hist, 3) : "—"}</span>}</Td>
+                          <Td>{f.above_ema200 == null ? <span className="text-muted text-xs">—</span>
+                            : <span className={`text-xs text-${f.above_ema200 ? "long" : "short"}`}>{f.above_ema200 ? "above" : "below"}</span>}</Td>
+                          <Td right mono>{num(f.atr_pct, 3)}</Td>
+                          <Td right mono>{f.dist_support_pct != null ? `${num(f.dist_support_pct)}%` : "—"}</Td>
+                          <Td right mono>{f.dist_resistance_pct != null ? `${num(f.dist_resistance_pct)}%` : "—"}</Td>
+                          <Td><span className="text-xs text-muted">{f.fib_nearest
+                            ? `${f.fib_nearest.level} (${num(f.fib_nearest.dist_pct)}%)` : "—"}</span></Td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </Section>
+          )}
 
           <Section title="Broker activity — truth">
             {!t.activities?.length ? <Empty>No broker activity recorded yet.</Empty> : (

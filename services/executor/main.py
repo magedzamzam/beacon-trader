@@ -27,10 +27,12 @@ from beacon_core.brokers.types import (OrderSide, OrderStatus, OrderType, PlaceO
 from beacon_core.parsing.models import ParsedSignal
 from beacon_core.execution.planner import build_plan
 from beacon_core.risk.sizing import RiskConfig, InstrumentSpec, size_legs, plan_total_risk
+from beacon_core.ta import capture as ta_capture
 
 log = get_logger("executor")
 settings = get_settings()
 bus = Bus()
+_BG_TASKS: set = set()          # strong refs to fire-and-forget background tasks
 
 
 def _to_parsed(sig: Signal) -> ParsedSignal:
@@ -79,6 +81,37 @@ async def handle_signal(signal_id: int) -> None:
             await _execute_on_account(session, sig, parsed, source, acct, ai_cfg)
         sig.status = "executed"
         await session.commit()
+
+    # TA snapshot for later analysis — fired in the background AFTER placement so
+    # it adds zero execution latency. One row per signal (own DB session).
+    task = asyncio.create_task(_capture_features_bg(signal_id, accounts[0].id))
+    _BG_TASKS.add(task)                     # keep a ref so it isn't GC'd mid-run
+    task.add_done_callback(_BG_TASKS.discard)
+
+
+async def _capture_features_bg(signal_id: int, account_id: int) -> None:
+    """Best-effort: capture the signal-time multi-timeframe TA snapshot."""
+    try:
+        async with Session()() as session:
+            sig = await session.get(Signal, signal_id)
+            acct = await session.get(Account, account_id)
+            if not sig or not acct:
+                return
+            broker = await session.get(Broker, acct.broker_id)
+            smap = await _symbol_map(session, broker.id, sig.symbol) if broker else None
+            if not broker or not smap:
+                return
+            creds = resolve_credentials(broker.credentials_ref)
+            creds.setdefault("is_demo", broker.is_demo)
+            creds["account_id"] = acct.broker_account_id
+            adapter = get_adapter(broker.type, creds)
+            try:
+                await ta_capture.capture_for_signal(session, sig, adapter, smap)
+                await session.commit()
+            finally:
+                await adapter.aclose()
+    except Exception as exc:                       # never let capture affect the worker
+        log.warning("TA feature capture failed (signal %s): %s", signal_id, exc)
 
 
 async def _execute_on_account(session, sig, parsed, source, acct,

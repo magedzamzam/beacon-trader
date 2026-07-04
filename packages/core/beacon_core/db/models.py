@@ -241,3 +241,23 @@ class AiAssessment(Base):
     rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
     payload: Mapped[dict] = mapped_column(JSON, default=dict)                # full structured result
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class SignalFeature(Base):
+    """Technical-analysis snapshot captured at signal time — one row per signal.
+
+    A multi-timeframe indicator context (RSI, MACD, EMA/SMA, ATR, swing
+    support/resistance, Fibonacci) plus session/time, stored so trade outcomes
+    can LATER be correlated with the TA conditions the signal fired under. SMC is
+    intentionally deferred; add it to `features` when its rules are pinned down."""
+    __tablename__ = "signal_features"
+    __table_args__ = (UniqueConstraint("signal_id", name="uq_signal_feature"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    signal_id: Mapped[int] = mapped_column(ForeignKey("signals.id"))
+    symbol: Mapped[str] = mapped_column(String(16))
+    direction: Mapped[str | None] = mapped_column(String(4), nullable=True)
+    price: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)          # reference price at capture
+    session: Mapped[str | None] = mapped_column(String(8), nullable=True)      # ASIA|LONDON|OVERLAP|NY|LATE
+    utc_hour: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    features: Mapped[dict] = mapped_column(JSON, default=dict)                 # {timeframe: {indicator: value}}
+    captured_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)

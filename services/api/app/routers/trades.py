@@ -2,7 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from beacon_core.db.models import AiAssessment, Event, Leg, PositionActivity, Trade
+from beacon_core.db.models import (AiAssessment, Event, Leg, PositionActivity,
+                                   SignalFeature, Trade)
 from ..deps import get_db
 from ..auth import require_token
 
@@ -43,6 +44,8 @@ async def trade_detail(trade_id: int, db: AsyncSession = Depends(get_db)):
     acts = (await db.execute(select(PositionActivity).where(PositionActivity.trade_id == t.id)
                              .order_by(PositionActivity.activity_at.desc(),
                                        PositionActivity.id.desc()))).scalars().all()
+    feat = (await db.execute(select(SignalFeature).where(
+        SignalFeature.signal_id == t.signal_id))).scalars().first()
     return {
         "id": t.id, "signal_id": t.signal_id, "account_id": t.account_id,
         "symbol": t.symbol, "direction": t.direction, "status": t.status,
@@ -71,4 +74,8 @@ async def trade_detail(trade_id: int, db: AsyncSession = Depends(get_db)):
                         "currency": p.currency,
                         "at": p.activity_at.isoformat() if p.activity_at else None}
                        for p in acts],
+        "features": ({"session": feat.session, "utc_hour": feat.utc_hour,
+                      "price": float(feat.price) if feat.price is not None else None,
+                      "captured_at": feat.captured_at.isoformat() if feat.captured_at else None,
+                      "timeframes": feat.features or {}} if feat else None),
     }
