@@ -1,0 +1,2 @@
+# beacon_core (installed from packages/core) already brings sqlalchemy, asyncpg,
+# httpx, redis and aiohttp. No extra deps for the collector.

@@ -56,6 +56,18 @@ services:
       redis:
         condition: service_healthy
 
+  # Alpha Layer (Phase 0): market/tick capture, 1m candles, crypto micro,
+  # econ calendar, spread cost profiles.
+  collector:
+    build:
+      context: .
+      dockerfile: services/collector/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
+
   frontend:
     build:
       context: ./frontend
