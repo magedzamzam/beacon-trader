@@ -2,6 +2,7 @@ import { TrendingUp, Target, Layers, Activity, Gauge, CheckCheck,
          ArrowRight, Wallet, Scale, Percent, Coins } from "lucide-react";
 import { Card, KPI, Table, Th, Td, Badge, Empty } from "../components/ui";
 import LineChart from "../components/LineChart";
+import SessionStrip from "../components/SessionStrip";
 import { api } from "../lib/api";
 import { useData, money, tone } from "./_useData";
 
@@ -41,6 +42,8 @@ export default function Dashboard({ setView, account }) {
 
   return (
     <div className="space-y-6">
+      <SessionStrip />
+
       {/* Account overview — only when a specific account is filtered */}
       {acct && acctPerf && (
         <Card className="p-4">

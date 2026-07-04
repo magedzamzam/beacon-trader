@@ -66,6 +66,11 @@ export const api = {
   saveTaConfig: (c) => req("/ta/config", { method: "PUT", body: JSON.stringify(c) }),
   // Bayesian correlation of captured features with outcomes
   bayesAnalysis: (minN = 5) => req(`/analysis/bayes?min_n=${minN}`),
+  // trading hours: sessions / news blackout / holidays
+  tradingHoursStatus: () => req("/trading-hours/status"),
+  tradingHoursConfig: () => req("/trading-hours/config"),
+  saveTradingHoursConfig: (c) => req("/trading-hours/config", { method: "PUT", body: JSON.stringify(c) }),
+  refreshCalendar: () => post("/trading-hours/calendar/refresh", {}),
   // brokers
   createBroker: (b) => post("/brokers", b),
   updateBroker: (id, b) => patch(`/brokers/${id}`, b),

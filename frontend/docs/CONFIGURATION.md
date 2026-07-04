@@ -64,10 +64,32 @@ Named strategy templates (scalp/swing/DCA/grid), partial-TP ladders, trailing-st
 break-even presets, per-source assignment, backtest against history.
 **Backend:** `strategies` table + CRUD, link to `sources.strategy`, backtest runner.
 
-### Trading → Trading Hours
-Per-market session windows, news blackout windows, holiday calendar, daily max-trades /
-cool-down, timezone-aware scheduling.
-**Backend:** schedule model + a gate in the execution path that checks the calendar.
+### Trading → Trading Hours  ✅ built (intelligence layer)
+**Implemented (read-only status + config):**
+- **Session windows** (Asian/London/New York) — configured in each market's local time,
+  DST handled via `zoneinfo`; computed live (no external data). Active sessions + next
+  open/close boundary are exposed. `beacon_core/trading_hours/sessions.py`.
+- **News blackout** — high-impact economic calendar fetched from a free feed (ForexFactory
+  mirror, swappable via `TRADING_HOURS_CALENDAR_URL`), persisted to `econ_events`, refreshed
+  when stale. `blackout_status` gives `in_blackout` + next event.
+  `beacon_core/trading_hours/{calendar,service}.py`.
+- **Weekend & US holidays** — computed live (NYSE rules incl. Good Friday via Easter,
+  observed shifts). `beacon_core/trading_hours/holidays.py`.
+- Config stored in the `trading_hours` setting; status at `GET /trading-hours/status`;
+  shown on the Trading Hours tab and a Dashboard strip. **Nothing gates trades yet.**
+
+**Deferred — to implement later (the operator asked to document these):**
+- **Enforcement / gating**: honour `sessions[].enabled`, `news.enabled`, `holidays.block_*`
+  in the executor before placing (skip / queue / halve). A `Source.strategy` or account-level
+  policy chooses the action, mirroring `regime_policy` from the reverted plan.
+- **Daily max-trades**: per account/source cap on trades opened per UTC day → halt for the
+  day once hit (Event `daily_cap`). Needs a per-day counter keyed on account/source.
+- **Cool-down between entries**: minimum minutes between opening trades on the same
+  symbol/source; drop or queue signals inside the window. Store `last_entry_ts` per key.
+- **Timezone-aware scheduling**: arbitrary allow/deny windows beyond the 3 default sessions
+  (e.g. custom "no Fridays after 20:00 UTC"), and per-source schedule overrides.
+**Backend for enforcement:** a small gate in `services/executor` reading
+`trading_hours.status()` + the counters, writing a skip Event with the reason.
 
 ### Intelligence → Notifications
 Channels (email, Telegram, Slack, Discord, SMS, webhook), per-event routing, severity

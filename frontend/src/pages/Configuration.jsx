@@ -12,6 +12,7 @@ import Risk from "./Risk";
 import AI from "./AI";
 import Indicators from "./Indicators";
 import Analysis from "./Analysis";
+import TradingHours from "./TradingHours";
 import Currency from "./settings/Currency";
 import Placeholder from "../components/Placeholder";
 
@@ -62,19 +63,7 @@ const GROUPS = [
             ]} />
         ),
       },
-      {
-        id: "hours", label: "Trading Hours", icon: Clock, render: () => (
-          <Placeholder icon={Clock} title="Trading Hours & Sessions"
-            description="Control when the bot is allowed to open positions and when it should stand down."
-            planned={[
-              "Per-market session windows (London / New York / Asia)",
-              "News blackout windows (high-impact economic events)",
-              "Weekend and holiday calendar",
-              "Daily max-trades and cool-down between entries",
-              "Timezone-aware scheduling",
-            ]} />
-        ),
-      },
+      { id: "hours", label: "Trading Hours", icon: Clock, render: () => <TradingHours /> },
     ],
   },
   {
