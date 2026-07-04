@@ -1,12 +1,11 @@
 import { useEffect, useState } from "react";
-import { Clock, RefreshCw } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 import { Card, Empty } from "../components/ui";
 import { Button, Toggle, ErrorNote } from "../components/form";
+import SessionTimeline from "../components/SessionTimeline";
+import NewsCard from "../components/NewsCard";
 import { api } from "../lib/api";
 
-const fmtMin = (m) => (m == null ? "—" : m < 60 ? `${m}m`
-  : `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}`);
-const box = "bg-panel2 border border-edge rounded-lg p-3";
 const smallInput = "bg-panel border border-edge rounded px-2 py-1 num outline-none focus:border-beacon";
 
 /**
@@ -40,49 +39,15 @@ export default function TradingHours() {
   const save = async () => { try { const r = await api.saveTradingHoursConfig(cfg); setCfg(r); setSaved(true); load(); } catch (e) { setErr(e.message); } };
   const refresh = async () => { setBusy(true); try { await api.refreshCalendar(); await load(); } catch (e) { setErr(e.message); } finally { setBusy(false); } };
 
-  const n = status.news, h = status.holiday;
   return (
     <div className="space-y-4">
-      <Card>
-        <div className="px-4 py-3 border-b border-edge flex items-center justify-between">
-          <div className="text-sm font-medium flex items-center gap-2"><Clock className="w-4 h-4 text-beacon" /> Live status</div>
-          <span className="text-[11px] text-muted num">{(status.now_utc || "").slice(11, 16)} UTC</span>
-        </div>
-        <div className="p-4 grid sm:grid-cols-3 gap-3">
-          <div className={box}>
-            <div className="text-[10px] uppercase tracking-wider text-muted mb-2">Sessions</div>
-            <div className="flex flex-wrap gap-1.5">
-              {status.sessions.windows.map(w => (
-                <span key={w.id} title={w.tz}
-                  className={`px-2 py-1 rounded text-[11px] ${w.active ? "bg-long/15 text-long" : "bg-panel text-muted"}`}>
-                  {w.label}{w.active ? ` · closes ${fmtMin(w.closes_in_min)}` : ` · opens ${fmtMin(w.opens_in_min)}`}
-                </span>
-              ))}
-            </div>
-          </div>
-          <div className={box}>
-            <div className="text-[10px] uppercase tracking-wider text-muted mb-2">News</div>
-            {n.in_blackout
-              ? <div className="text-sm text-short">⛔ Blackout — {n.active?.title} ({n.active?.ccy})</div>
-              : n.next
-                ? <div className="text-sm">Next: <span className="text-ink">{n.next.title}</span>{" "}
-                    <span className="text-muted">({n.next.ccy}, {n.next.impact})</span> in {fmtMin(n.next.in_min)}</div>
-                : <div className="text-sm text-muted">No upcoming high-impact events.</div>}
-          </div>
-          <div className={box}>
-            <div className="text-[10px] uppercase tracking-wider text-muted mb-2">Holiday / Weekend</div>
-            {h.is_holiday
-              ? <div className="text-sm text-warn">US holiday — {h.holiday_name}</div>
-              : h.is_weekend
-                ? <div className="text-sm text-warn">Weekend</div>
-                : <div className="text-sm text-long">Markets open{h.next_holiday
-                    ? <span className="text-muted"> · next {h.next_holiday.name} in {h.next_holiday.in_days}d</span> : ""}</div>}
-          </div>
-        </div>
-        <div className="px-4 py-2 text-[11px] text-warn border-t border-edge">
-          Read-only intelligence for now — configure it here; gating trades on session/news/holiday is a documented follow-up.
-        </div>
-      </Card>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div className="lg:col-span-2"><SessionTimeline status={status} /></div>
+        <NewsCard status={status} />
+      </div>
+      <div className="text-[11px] text-warn">
+        Read-only intelligence for now — configure it below; gating trades on session/news/holiday is a documented follow-up.
+      </div>
 
       <Card>
         <div className="px-4 py-3 border-b border-edge flex items-center justify-between">

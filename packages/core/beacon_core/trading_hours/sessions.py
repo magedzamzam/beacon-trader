@@ -65,6 +65,18 @@ def session_status(sess: dict, now_utc: dt.datetime) -> dict:
     def _utc(x):
         return None if x is None else x.astimezone(dt.timezone.utc).isoformat()
 
+    # This session's window on the CURRENT UTC day, as fractional hours from UTC
+    # midnight (may be < 0 or > 24 for windows that straddle the day) — used to
+    # draw the timeline bar. DST-correct because we go through the session tz.
+    utc = dt.timezone.utc
+    open_local = local.replace(hour=sh, minute=sm, second=0, microsecond=0)
+    close_local = local.replace(hour=eh, minute=em, second=0, microsecond=0)
+    if (eh, em) <= (sh, sm):
+        close_local = close_local + dt.timedelta(days=1)
+    midnight = now_utc.astimezone(utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    start_h = (open_local.astimezone(utc) - midnight).total_seconds() / 3600.0
+    end_h = (close_local.astimezone(utc) - midnight).total_seconds() / 3600.0
+
     return {
         "id": sess["id"], "label": sess.get("label", sess["id"]), "tz": sess["tz"],
         "enabled": bool(sess.get("enabled", True)),
@@ -72,10 +84,13 @@ def session_status(sess: dict, now_utc: dt.datetime) -> dict:
         "active": active,
         "opens_in_min": _mins(opens_at), "closes_in_min": _mins(closes_at),
         "opens_at_utc": _utc(opens_at), "closes_at_utc": _utc(closes_at),
+        "start_hour_utc": round(start_h, 3), "end_hour_utc": round(end_h, 3),
     }
 
 
 def status(sessions: List[dict], now_utc: dt.datetime) -> dict:
     per = [session_status(s, now_utc) for s in (sessions or DEFAULT_SESSIONS)]
+    now = now_utc.astimezone(dt.timezone.utc)
     return {"active": [s["label"] for s in per if s["active"] and s["enabled"]],
+            "now_hour_utc": round(now.hour + now.minute / 60.0, 3),
             "windows": per}
