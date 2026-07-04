@@ -304,10 +304,9 @@ class CostProfile(Base):
 class EconEvent(Base):
     """Economic-calendar events (GMT). High-impact events drive news blackouts."""
     __tablename__ = "econ_events"
-    __table_args__ = (UniqueConstraint("ts", "ccy", "title", name="uq_econ_event"),
-                      Index("ix_econ_events_ts", "ts"))
+    __table_args__ = (UniqueConstraint("ts", "ccy", "title", name="uq_econ_event"),)
     id: Mapped[int] = mapped_column(primary_key=True)
-    ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), index=True)
+    ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), index=True)  # -> ix_econ_events_ts
     ccy: Mapped[str | None] = mapped_column(String(8), nullable=True)
     impact: Mapped[str | None] = mapped_column(String(16), nullable=True)   # high|medium|low|holiday
     title: Mapped[str | None] = mapped_column(String(256), nullable=True)
