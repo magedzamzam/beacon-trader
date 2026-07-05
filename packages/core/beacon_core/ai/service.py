@@ -135,8 +135,10 @@ async def apply_signal_validation(session: AsyncSession, sig: Signal,
     try:
         result = await assessments.validate_and_correct_signal(cfg, _signal_dict(sig, source))
     except AiUnavailable as exc:
-        log.info("signal %s: AI validation unavailable — executing on parser output "
-                 "(flagged): %s", sig.id, exc)
+        # warning, not info: signal validation is the first line of defense, so a
+        # systematic failure (e.g. an API 400) must be visible, not silent.
+        log.warning("signal %s: AI validation unavailable — executing UNVALIDATED "
+                    "on parser output: %s", sig.id, exc)
         _flag(sig, "unvalidated")
         await _store_row("unvalidated", None,
                          f"AI unavailable — executed on parser output. {exc}",
