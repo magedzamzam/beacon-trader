@@ -28,11 +28,26 @@ from beacon_core.parsing.models import ParsedSignal
 from beacon_core.execution.planner import build_plan
 from beacon_core.risk.sizing import RiskConfig, InstrumentSpec, size_legs, plan_total_risk
 from beacon_core.ta import capture as ta_capture
+from beacon_core import notifications as notify
 
 log = get_logger("executor")
 settings = get_settings()
 bus = Bus()
 _BG_TASKS: set = set()          # strong refs to fire-and-forget background tasks
+
+
+def _notify(event_id: str, ctx: dict) -> None:
+    """Fire-and-forget a notification with its own DB session. Best-effort — a
+    notification must never affect execution, so failures are swallowed."""
+    async def _run():
+        try:
+            async with Session()() as s:
+                await notify.notify(s, event_id, ctx)
+        except Exception as exc:                 # pragma: no cover - defensive
+            log.debug("notify %s failed: %s", event_id, exc)
+    t = asyncio.create_task(_run())
+    _BG_TASKS.add(t)
+    t.add_done_callback(_BG_TASKS.discard)
 
 
 def _to_parsed(sig: Signal) -> ParsedSignal:
@@ -73,6 +88,14 @@ async def handle_signal(signal_id: int) -> None:
         if not accounts:
             log.info("signal %s: no enabled accounts mapped", signal_id)
             return
+
+        _entry = str(sig.entry_from) if sig.entry_from is not None else None
+        if sig.entry_to is not None and sig.entry_to != sig.entry_from:
+            _entry = f"{sig.entry_from}–{sig.entry_to}"
+        _notify("new_signal", {
+            "symbol": sig.symbol, "direction": sig.direction, "entry": _entry,
+            "sl": sig.sl, "tp": ", ".join(sig.tps) if sig.tps else None,
+            "source": source.name if source else None})
 
         parsed = _to_parsed(sig)
         ai_cfg = await ai_service.load_config(session)
@@ -272,6 +295,10 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         await session.commit()
         await bus.publish(CH_TRADE_OPENED, {"trade_id": trade.id, "account_id": acct.id,
                                             "placed": placed})
+        if placed:
+            _notify("order_placed", {
+                "symbol": sig.symbol, "direction": sig.direction, "account": acct.name,
+                "detail": f"{placed}/{len(valid)} legs placed"})
         log.info("signal %s acct %s: placed %s/%s legs", sig.id, acct.id, placed, len(valid))
     finally:
         await adapter.aclose()

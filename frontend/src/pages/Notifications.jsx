@@ -8,6 +8,8 @@ const CHANNEL_ICON = {
   email: Mail, telegram: Send, whatsapp: MessageCircle,
   sms: Smartphone, webhook: Webhook, push: BellRing,
 };
+// channels whose delivery (sender) is implemented — others are config-only
+const BUILT = new Set(["email", "telegram", "sms"]);
 
 /**
  * Notifications — configure delivery channels (Email / Telegram / WhatsApp /
@@ -21,6 +23,8 @@ export default function Notifications() {
   const [secrets, setSecrets] = useState({});   // "channel.field" -> typed value
   const [err, setErr] = useState(null);
   const [saved, setSaved] = useState(false);
+  const [testing, setTesting] = useState({});   // channelId -> bool
+  const [testRes, setTestRes] = useState({});   // channelId -> {ok} | {ok:false,error}
 
   const load = async () => {
     try {
@@ -65,7 +69,23 @@ export default function Notifications() {
       }
       const res = await api.saveNotificationsConfig({ channels, routing: cfg.routing });
       setCfg(res); setSecrets({}); setSaved(true);
-    } catch (e) { setErr(e.message); }
+      return true;
+    } catch (e) { setErr(e.message); return false; }
+  };
+
+  // Save first (so freshly-typed secrets are persisted+encrypted), then test.
+  const test = async (chId) => {
+    setTestRes(r => ({ ...r, [chId]: null }));
+    setTesting(t => ({ ...t, [chId]: true }));
+    try {
+      if (!(await save())) return;
+      await api.testNotificationChannel(chId);
+      setTestRes(r => ({ ...r, [chId]: { ok: true } }));
+    } catch (e) {
+      setTestRes(r => ({ ...r, [chId]: { ok: false, error: e.message } }));
+    } finally {
+      setTesting(t => ({ ...t, [chId]: false }));
+    }
   };
 
   const field = (ch, f) => {
@@ -126,6 +146,20 @@ export default function Notifications() {
                         : <Field label={f.label}>{field(ch, f)}</Field>}
                     </div>
                   ))}
+                </div>
+                <div className="px-4 py-2.5 border-t border-edge flex items-center gap-3 min-h-[44px]">
+                  {BUILT.has(ch.id) ? (
+                    <>
+                      <Button variant="ghost" onClick={() => test(ch.id)} disabled={!c.enabled || testing[ch.id]}>
+                        {testing[ch.id] ? "Sending…" : "Save & send test"}
+                      </Button>
+                      {testRes[ch.id]?.ok && <span className="text-xs text-long">✓ Test sent</span>}
+                      {testRes[ch.id] && !testRes[ch.id].ok &&
+                        <span className="text-xs text-short truncate">✗ {testRes[ch.id].error}</span>}
+                    </>
+                  ) : (
+                    <span className="text-[11px] text-muted">Delivery for this channel isn't built yet — config is saved.</span>
+                  )}
                 </div>
               </Card>
             );

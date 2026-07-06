@@ -75,6 +75,7 @@ export const api = {
   notificationsCatalog: () => req("/notifications/catalog"),
   notificationsConfig: () => req("/notifications/config"),
   saveNotificationsConfig: (c) => req("/notifications/config", { method: "PUT", body: JSON.stringify(c) }),
+  testNotificationChannel: (id) => post(`/notifications/test/${id}`, {}),
   // brokers
   createBroker: (b) => post("/brokers", b),
   updateBroker: (id, b) => patch(`/brokers/${id}`, b),

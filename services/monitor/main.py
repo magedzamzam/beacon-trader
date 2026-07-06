@@ -29,12 +29,28 @@ from beacon_core.db.models import (Account, Broker, Event, Leg, PositionActivity
 from beacon_core.brokers import get_adapter, resolve_credentials
 from beacon_core.brokers.types import AuthError, ModifyPositionRequest
 from beacon_core.strategy.rules import PositionCtx, evaluate
+from beacon_core import notifications as notify
 
 log = get_logger("monitor")
 settings = get_settings()
 bus = Bus()
+_BG_TASKS: set = set()
 
 OPEN_LEG = ("pending", "working", "open")
+
+
+def _notify(event_id: str, ctx: dict) -> None:
+    """Fire-and-forget a notification (own DB session). Best-effort — never
+    lets a notification failure affect position monitoring."""
+    async def _run():
+        try:
+            async with Session()() as s:
+                await notify.notify(s, event_id, ctx)
+        except Exception as exc:                 # pragma: no cover - defensive
+            log.debug("notify %s failed: %s", event_id, exc)
+    t = asyncio.create_task(_run())
+    _BG_TASKS.add(t)
+    t.add_done_callback(_BG_TASKS.discard)
 
 # |realized P&L| at or below this (in the ACCOUNT currency) counts as a
 # break-even close. The primary BE signal is the SL being ratcheted to ~entry
@@ -198,6 +214,8 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
     if not legs:
         if trade.status != "closed":
             trade.status = "closed"
+            _notify("trade_closed", {"symbol": trade.symbol, "direction": trade.direction,
+                                     "pl": str(trade.realized_pl) if trade.realized_pl is not None else None})
             await _analyze_outcome(session, trade, ai_cfg)
         return
 
@@ -397,6 +415,11 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                               payload={"outcome": outcome, "pl": str(realized_pl), "source": src}))
             await bus.publish(CH_TRADE_EVENT, {"trade_id": trade.id, "leg_id": leg.id,
                                                "outcome": outcome})
+            _ev = {"tp_hit": "tp_hit", "sl_hit": "sl_hit", "breakeven": "sl_hit"}.get(outcome)
+            if _ev:
+                _notify(_ev, {"symbol": trade.symbol, "direction": trade.direction,
+                              "price": str(close_px) if close_px is not None else None,
+                              "pl": str(realized_pl), "detail": f"TP{leg.tp_index} — {outcome}"})
             return True
 
         async def _audit_activities():
@@ -481,6 +504,10 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                     via = "workingOrderId" if pos.working_order_ref == leg.broker_order_ref else "heuristic"
                     session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="filled",
                                       payload={"position": pos.broker_position_ref, "via": via}))
+                    _notify("order_filled", {
+                        "symbol": trade.symbol, "direction": trade.direction,
+                        "price": str(leg.fill_price) if leg.fill_price is not None else None,
+                        "detail": f"TP{leg.tp_index} entry filled"})
                 elif not await _close_leg(leg, await _transactions(), require_txn=True):
                     leg.status = "cancelled"
                     leg.outcome = "cancelled"
@@ -518,6 +545,8 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                     leg.sl_moved = True
                     session.add(Event(trade_id=trade.id, leg_id=leg.id,
                                       kind="sl_moved", payload={"new_sl": str(new_sl)}))
+                    _notify("sl_moved", {"symbol": trade.symbol, "direction": trade.direction,
+                                         "sl": str(new_sl), "detail": f"TP{leg.tp_index} stop moved"})
                     log.info("trade %s leg %s SL -> %s", trade.id, leg.id, new_sl)
                 except Exception as exc:
                     log.warning("SL move failed (leg %s): %s", leg.id, exc)
@@ -545,6 +574,9 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                     leg.closed_at = _utcnow()
                     session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="cancelled_by_rule",
                                       payload={"reason": "trade progressed (TP hit / SL ratcheted); stale limit entry"}))
+                    _notify("order_cancelled", {
+                        "symbol": trade.symbol, "direction": trade.direction,
+                        "detail": f"TP{leg.tp_index} limit cancelled — trade progressed"})
                     log.info("trade %s leg %s cancelled — stale limit after progress", trade.id, leg.id)
 
         # Persist the broker activity audit for this trade (best-effort).
@@ -564,6 +596,8 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
             was_closed = trade.status == "closed"
             trade.status = "closed"
             if not was_closed:
+                _notify("trade_closed", {"symbol": trade.symbol, "direction": trade.direction,
+                                         "pl": str(trade.realized_pl) if trade.realized_pl is not None else None})
                 await _analyze_outcome(session, trade, ai_cfg)
         elif closed:
             trade.status = "partial"

@@ -63,3 +63,14 @@ async def put_config(body: dict, db: AsyncSession = Depends(get_db)):
     out = notif.public_config(clean)
     out["has_secret_key"] = has_key()
     return out
+
+
+@router.post("/test/{channel_id}")
+async def test_channel(channel_id: str, db: AsyncSession = Depends(get_db)):
+    """Send a one-off test message to a channel using its SAVED config."""
+    if channel_id not in notif.CHANNEL_IDS:
+        raise HTTPException(404, "unknown channel")
+    res = await notif.send_test(db, channel_id)
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error") or "send failed")
+    return res

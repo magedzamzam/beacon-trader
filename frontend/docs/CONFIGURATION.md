@@ -102,13 +102,20 @@ break-even presets, per-source assignment, backtest against history.
 - Config stored in the `notifications` setting; `GET /notifications/catalog`,
   `GET/PUT /notifications/config`. UI: Configuration → Notifications.
 
-**Deferred — to implement later:**
-- **Delivery/dispatch**: an event bus + per-channel senders that read `routing` and fan a
-  fired event out to the enabled channels (Email/Telegram/Twilio/HTTP). Nothing sends yet.
-- **Severity thresholds and quiet hours**; **daily/weekly digest scheduling**;
-  **escalation when a broker connection drops**.
-**Backend for delivery:** a `notify(event, context)` dispatcher in core + a small worker (or
-inline emit from executor/monitor) that resolves `routing[event]` → enabled channels → send.
+**Delivery (Phase 2) — ✅ live for Email / Telegram / SMS:**
+- `beacon_core/notifications/{senders,dispatch}.py`: `notify(session, event, ctx)` resolves
+  `routing[event]` → enabled channels → sends, best-effort (a channel failure never affects
+  trading). Senders: Email (SMTP, off-thread), Telegram (Bot API), SMS (Twilio). WhatsApp /
+  webhook / push are config-only until their senders are added to `SENDERS`.
+- **Send-test button** per built channel (`POST /notifications/test/{channel}`) — saves then
+  sends a test message so you can validate credentials from the UI.
+- **Events wired**: executor emits `new_signal`, `order_placed`; monitor emits `order_filled`,
+  `tp_hit`, `sl_hit`, `sl_moved`, `order_cancelled`, `trade_closed`. Not yet emitted:
+  `signal_validated`, `signal_rejected`, `broker_error`, `daily_summary`.
+
+**Still deferred:** WhatsApp/webhook/push senders; the remaining event emitters above;
+**severity thresholds / quiet hours**; **daily/weekly digest scheduling**; **broker-drop
+escalation**.
 
 ### Platform → General
 Platform name/logo/brand color, default timezone/locale, default theme, number/date
