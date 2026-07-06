@@ -16,13 +16,17 @@ export default function History() {
       <div className="px-4 py-3 border-b border-edge text-sm font-medium">Closed legs</div>
       <table className="w-full">
         <thead><tr className="border-b border-edge">
-          <Th>Trade</Th><Th>Symbol</Th><Th>Side</Th><Th right>TP#</Th>
+          <Th>Trade</Th><Th>Symbol</Th><Th>Channel</Th><Th>Side</Th><Th right>TP#</Th>
           <Th right>Entry</Th><Th right>Close</Th><Th>Outcome</Th><Th right>P&L</Th>
         </tr></thead>
         <tbody>
           {rows.map(({ t, l }) => (
             <tr key={l.id} className="border-b border-edge/60">
               <Td mono><button className="text-beacon hover:underline" onClick={() => setDetail(t.id)}>{t.id}</button></Td><Td>{t.symbol}</Td>
+              <Td>
+                <span className="truncate">{t.source_name || "—"}</span>
+                {t.source_kind && <span className="text-[10px] text-muted ml-1">{t.source_kind}</span>}
+              </Td>
               <Td><Badge tone={t.direction === "BUY" ? "long" : "short"}>{t.direction}</Badge></Td>
               <Td right mono>{l.tp_index}</Td>
               <Td right mono>{Number(l.entry).toFixed(2)}</Td>

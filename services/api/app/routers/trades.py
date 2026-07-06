@@ -3,7 +3,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from beacon_core.db.models import (AiAssessment, Event, Leg, PositionActivity,
-                                   SignalFeature, Trade)
+                                   Signal, SignalFeature, Source, Trade)
 from ..deps import get_db
 from ..auth import require_token
 
@@ -11,13 +11,22 @@ router = APIRouter(prefix="/trades", tags=["trades"], dependencies=[Depends(requ
 
 
 @router.get("")
-async def list_trades(db: AsyncSession = Depends(get_db), limit: int = 100):
-    rows = (await db.execute(select(Trade).order_by(Trade.id.desc()).limit(limit))).scalars().all()
+async def list_trades(db: AsyncSession = Depends(get_db), limit: int = 100,
+                      source_id: int | None = None):
+    # Join Trade -> Signal -> Source so each trade carries its originating channel.
+    q = (select(Trade, Signal.source_id, Source.name, Source.kind)
+         .outerjoin(Signal, Signal.id == Trade.signal_id)
+         .outerjoin(Source, Source.id == Signal.source_id)
+         .order_by(Trade.id.desc()).limit(limit))
+    if source_id is not None:
+        q = q.where(Signal.source_id == source_id)
+    rows = (await db.execute(q)).all()
     out = []
-    for t in rows:
+    for (t, src_id, sname, skind) in rows:
         legs = (await db.execute(select(Leg).where(Leg.trade_id == t.id))).scalars().all()
         out.append({
             "id": t.id, "signal_id": t.signal_id, "account_id": t.account_id,
+            "source_id": src_id, "source_name": sname, "source_kind": skind,
             "symbol": t.symbol, "direction": t.direction, "status": t.status,
             "planned_risk": float(t.planned_risk) if t.planned_risk else None,
             "realized_pl": float(t.realized_pl),
@@ -46,8 +55,16 @@ async def trade_detail(trade_id: int, db: AsyncSession = Depends(get_db)):
                                        PositionActivity.id.desc()))).scalars().all()
     feat = (await db.execute(select(SignalFeature).where(
         SignalFeature.signal_id == t.signal_id))).scalars().first()
+    sig = await db.get(Signal, t.signal_id) if t.signal_id else None
+    src = await db.get(Source, sig.source_id) if sig and sig.source_id else None
     return {
         "id": t.id, "signal_id": t.signal_id, "account_id": t.account_id,
+        "source_id": (sig.source_id if sig else None),
+        "source_name": (src.name if src else None),
+        "source_kind": (src.kind if src else None),
+        "signal": ({"id": sig.id, "raw_text": sig.raw_text,
+                    "created_at": sig.created_at.isoformat() if sig.created_at else None}
+                   if sig else None),
         "symbol": t.symbol, "direction": t.direction, "status": t.status,
         "planned_risk": float(t.planned_risk) if t.planned_risk else None,
         "realized_pl": float(t.realized_pl),

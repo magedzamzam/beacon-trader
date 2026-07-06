@@ -113,6 +113,25 @@ export default function TradeDetail({ tradeId, onClose }) {
             </span>
           </div>
 
+          {(t.signal || t.source_name) && (
+            <div className="text-xs text-muted flex flex-wrap items-center gap-x-2 gap-y-1">
+              {t.signal?.id != null && <span>Signal <span className="num text-ink">#{t.signal.id}</span></span>}
+              {t.source_name && <>
+                <span>·</span>
+                <span className="text-ink">{t.source_name}</span>
+                {t.source_kind && <Badge tone="muted">{t.source_kind}</Badge>}
+              </>}
+              {t.signal?.created_at && <><span>·</span><span className="num">{when(t.signal.created_at)}</span></>}
+            </div>
+          )}
+
+          {t.signal?.raw_text && (
+            <div className="bg-panel2 border border-edge rounded-lg px-3 py-2">
+              <div className="text-[10px] uppercase tracking-wider text-muted mb-1">Signal message</div>
+              <div className="text-xs whitespace-pre-wrap break-words text-ink/90">{t.signal.raw_text}</div>
+            </div>
+          )}
+
           {(() => {
             const s = summarize(t.legs);
             return (

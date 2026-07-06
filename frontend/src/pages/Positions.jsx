@@ -65,7 +65,7 @@ export default function Positions() {
           <Table>
             <thead><tr>
               <Th><input type="checkbox" checked={!!allSelected} onChange={toggleAll} /></Th>
-              <Th>Trade</Th><Th>Symbol</Th><Th>Side</Th><Th>Type</Th><Th right>TP#</Th>
+              <Th>Trade</Th><Th>Symbol</Th><Th>Channel</Th><Th>Side</Th><Th>Type</Th><Th right>TP#</Th>
               <Th right>Entry</Th><Th right>SL</Th><Th right>TP</Th><Th right>Lot</Th>
               <Th>State</Th><Th right>Actions</Th>
             </tr></thead>
@@ -74,6 +74,10 @@ export default function Positions() {
                 <tr key={l.id} className="row-hover">
                   <Td><input type="checkbox" checked={sel.has(l.id)} onChange={() => toggle(l.id)} /></Td>
                   <Td mono><button className="text-beacon hover:underline" onClick={() => setDetail(t.id)}>{t.id}</button></Td><Td>{t.symbol}</Td>
+                  <Td>
+                    <span className="truncate">{t.source_name || "—"}</span>
+                    {t.source_kind && <span className="text-[10px] text-muted ml-1">{t.source_kind}</span>}
+                  </Td>
                   <Td><Badge dot tone={t.direction === "BUY" ? "long" : "short"}>{t.direction}</Badge></Td>
                   <Td>{l.order_type}</Td><Td right mono>{l.tp_index}</Td>
                   <Td right mono>{Number(l.entry).toFixed(2)}</Td>
