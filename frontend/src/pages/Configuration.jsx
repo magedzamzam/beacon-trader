@@ -13,6 +13,7 @@ import AI from "./AI";
 import Indicators from "./Indicators";
 import Analysis from "./Analysis";
 import TradingHours from "./TradingHours";
+import Notifications from "./Notifications";
 import Currency from "./settings/Currency";
 import Placeholder from "../components/Placeholder";
 
@@ -73,17 +74,8 @@ const GROUPS = [
       { id: "indicators", label: "Indicators", icon: LineChart, render: () => <Indicators /> },
       { id: "analysis", label: "Bayesian Analysis", icon: Sigma, render: () => <Analysis /> },
       {
-        id: "notifications", label: "Notifications", icon: Bell, render: () => (
-          <Placeholder icon={Bell} title="Notifications & Alerts"
-            description="Decide who gets told what, where, and how urgently when the bot acts."
-            planned={[
-              "Channels: email, Telegram, Slack, Discord, SMS, webhook",
-              "Per-event routing (fill, SL hit, TP hit, error, AI reject)",
-              "Severity thresholds and quiet hours",
-              "Daily / weekly performance digest scheduling",
-              "Escalation when a broker connection drops",
-            ]} />
-        ),
+        id: "notifications", label: "Notifications", icon: Bell,
+        render: () => <Notifications />,
       },
     ],
   },

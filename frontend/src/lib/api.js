@@ -71,6 +71,10 @@ export const api = {
   tradingHoursConfig: () => req("/trading-hours/config"),
   saveTradingHoursConfig: (c) => req("/trading-hours/config", { method: "PUT", body: JSON.stringify(c) }),
   refreshCalendar: () => post("/trading-hours/calendar/refresh", {}),
+  // notifications: channels + per-event routing
+  notificationsCatalog: () => req("/notifications/catalog"),
+  notificationsConfig: () => req("/notifications/config"),
+  saveNotificationsConfig: (c) => req("/notifications/config", { method: "PUT", body: JSON.stringify(c) }),
   // brokers
   createBroker: (b) => post("/brokers", b),
   updateBroker: (id, b) => patch(`/brokers/${id}`, b),

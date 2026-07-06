@@ -91,10 +91,24 @@ break-even presets, per-source assignment, backtest against history.
 **Backend for enforcement:** a small gate in `services/executor` reading
 `trading_hours.status()` + the counters, writing a skip Event with the reason.
 
-### Intelligence → Notifications
-Channels (email, Telegram, Slack, Discord, SMS, webhook), per-event routing, severity
-thresholds, quiet hours, digest scheduling, broker-drop escalation.
-**Backend:** `notification_channels` + `notification_rules`, an event bus, senders.
+### Notifications  ✅ config built (channels + routing)
+**Implemented (configuration only — no delivery yet):**
+- **Channels**: Email (SMTP), Telegram, WhatsApp (Twilio), SMS (Twilio), Webhook, and Push
+  API. Registry-driven fields (`beacon_core/notifications/config.py`); secrets encrypted at
+  rest (`<field>_enc`, same scheme as the AI key) and never returned to the UI.
+- **Per-event routing matrix**: 12 event types (new_signal, tp_hit, sl_hit, sl_moved,
+  order_placed/filled/cancelled, trade_closed, signal_validated/rejected, broker_error,
+  daily_summary) × channel — tick which channels each event goes to.
+- Config stored in the `notifications` setting; `GET /notifications/catalog`,
+  `GET/PUT /notifications/config`. UI: Configuration → Notifications.
+
+**Deferred — to implement later:**
+- **Delivery/dispatch**: an event bus + per-channel senders that read `routing` and fan a
+  fired event out to the enabled channels (Email/Telegram/Twilio/HTTP). Nothing sends yet.
+- **Severity thresholds and quiet hours**; **daily/weekly digest scheduling**;
+  **escalation when a broker connection drops**.
+**Backend for delivery:** a `notify(event, context)` dispatcher in core + a small worker (or
+inline emit from executor/monitor) that resolves `routing[event]` → enabled channels → send.
 
 ### Platform → General
 Platform name/logo/brand color, default timezone/locale, default theme, number/date
