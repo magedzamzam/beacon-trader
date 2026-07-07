@@ -8,9 +8,10 @@ crash never loses track of real money.
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from beacon_core.ai import service as ai_service
 from beacon_core.bus import Bus
@@ -26,6 +27,7 @@ from beacon_core.brokers import fx
 from beacon_core.brokers.types import (OrderSide, OrderStatus, OrderType, PlaceOrderRequest)
 from beacon_core.parsing.models import ParsedSignal
 from beacon_core.execution.planner import build_plan
+from beacon_core.execution.guard import should_auto_execute, risk_limit_reason
 from beacon_core.risk.sizing import RiskConfig, InstrumentSpec, size_legs, plan_total_risk
 from beacon_core.ta import capture as ta_capture
 from beacon_core import notifications as notify
@@ -79,9 +81,31 @@ async def handle_signal(signal_id: int) -> None:
         sig = await session.get(Signal, signal_id)
         if not sig:
             return
+        # Idempotency: never re-place a signal that already executed (re-delivery
+        # or internal retry must not double-place real orders).
+        if sig.status == "executed":
+            log.info("signal %s already executed; skipping re-delivery", signal_id)
+            return
         source = await session.get(Source, sig.source_id) if sig.source_id else None
         if not source or not source.enabled_for_trading:
             log.info("signal %s: source not enabled for trading; skipping", signal_id)
+            return
+
+        # Trust gate: untrusted / blocklisted sources do not auto-place live orders
+        # (override per-source via strategy.allow_untrusted_live).
+        allow_untrusted = bool((source.strategy or {}).get("allow_untrusted_live"))
+        ok, block = should_auto_execute(
+            enabled_for_trading=source.enabled_for_trading, is_trusted=source.is_trusted,
+            name=source.name, allow_untrusted=allow_untrusted)
+        if not ok:
+            log.warning("signal %s: NOT auto-executing — %s (source '%s')",
+                        signal_id, block, source.name)
+            sig.status = "blocked"
+            sig.reject_reason = (block or "blocked")[:128]
+            session.add(Event(kind="blocked_untrusted",
+                              payload={"signal_id": sig.id, "source_id": source.id,
+                                       "reason": block}))
+            await session.commit()
             return
 
         accounts = await _accounts_for(session, source)
@@ -139,6 +163,14 @@ async def _capture_features_bg(signal_id: int, account_id: int) -> None:
 
 async def _execute_on_account(session, sig, parsed, source, acct,
                               ai_cfg=None) -> None:
+    # Idempotency: one trade per (signal, account). If one already exists this
+    # signal was already placed here — skip rather than double-place.
+    dup = (await session.execute(select(Trade.id).where(
+        Trade.signal_id == sig.id, Trade.account_id == acct.id))).first()
+    if dup:
+        log.info("signal %s acct %s already has trade %s; skipping", sig.id, acct.id, dup[0])
+        return
+
     broker = await session.get(Broker, acct.broker_id)
     smap = await _symbol_map(session, broker.id, parsed.symbol)
     if not smap:
@@ -185,10 +217,15 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                               payload={"account_id": acct.id, "error": str(exc)}))
             return
 
+        planner_cfg = await get_setting(session, "planner", {}) or {}
+        # Default 0.5 (50%): catches parse-artifact TPs (e.g. tp=1530 vs gold ~4180,
+        # ~60% away) while never tripping a real target. Tune via the `planner` setting.
+        max_tp_pct = Decimal(str(planner_cfg.get("max_tp_distance_pct", "0.5")))
         plan = build_plan(
             parsed, current_price=current,
             candle_high=candle_high, candle_low=candle_low,
             min_stop_distance=smap.min_stop_distance,
+            max_tp_distance_pct=max_tp_pct if max_tp_pct > 0 else None,
         )
         risk = RiskConfig.from_dict(source.risk_config or acct.risk_config or {})
         instrument = InstrumentSpec(
@@ -203,9 +240,38 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             log.info("signal %s acct %s: no legs survived sizing", sig.id, acct.id)
             return
 
+        planned_risk = plan_total_risk(plan.legs)   # worst-case loss, account ccy
+
+        # --- Risk-limit enforcement (independent of the AI gate) ---
+        rl_cfg = await get_setting(session, "risk_limits", {}) or {}
+        if rl_cfg.get("enabled"):
+            day_start = dt.datetime.now(dt.timezone.utc).replace(
+                hour=0, minute=0, second=0, microsecond=0)
+            day_realized = (await session.execute(select(
+                func.coalesce(func.sum(Trade.realized_pl), 0)).where(
+                Trade.account_id == acct.id, Trade.created_at >= day_start))).scalar()
+            open_sym = (await session.execute(select(
+                func.coalesce(func.sum(Trade.planned_risk), 0)).where(
+                Trade.account_id == acct.id, Trade.symbol == parsed.symbol,
+                Trade.status.in_(("open", "partial"))))).scalar()
+            open_acct = (await session.execute(select(
+                func.coalesce(func.sum(Trade.planned_risk), 0)).where(
+                Trade.account_id == acct.id,
+                Trade.status.in_(("open", "partial"))))).scalar()
+            reason = risk_limit_reason(
+                planned_risk=planned_risk, day_realized=day_realized,
+                open_risk_symbol=open_sym, open_risk_account=open_acct, cfg=rl_cfg)
+            if reason:
+                session.add(Event(kind="risk_blocked",
+                                  payload={"signal_id": sig.id, "account_id": acct.id,
+                                           "planned_risk": str(planned_risk), "reason": reason}))
+                await session.commit()
+                log.warning("signal %s acct %s: RISK-LIMIT BLOCK — %s",
+                            sig.id, acct.id, reason)
+                return
+
         # --- AI execution review (best-effort; optional hard gate) ---
         if ai_cfg is not None and ai_cfg.ready and ai_cfg.review_execution:
-            planned_risk = plan_total_risk(plan.legs)
             risk_pct = (float(planned_risk) / float(equity) * 100.0) if equity else None
             plan_dict = {
                 "account_currency": account_ccy, "equity": str(equity),
@@ -241,7 +307,7 @@ async def _execute_on_account(session, sig, parsed, source, acct,
 
         trade = Trade(signal_id=sig.id, account_id=acct.id, symbol=parsed.symbol,
                       direction=parsed.direction, status="open",
-                      planned_risk=plan_total_risk(plan.legs))
+                      planned_risk=planned_risk)
         session.add(trade)
         await session.flush()
 

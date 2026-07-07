@@ -82,7 +82,8 @@ def _sl_protective(direction: str, sl: Decimal, entry: Decimal) -> bool:
 def build_plan(sig: ParsedSignal, *, current_price: Decimal,
                candle_high: Optional[Decimal] = None,
                candle_low: Optional[Decimal] = None,
-               min_stop_distance: Optional[Decimal] = None) -> FanoutPlan:
+               min_stop_distance: Optional[Decimal] = None,
+               max_tp_distance_pct: Optional[Decimal] = None) -> FanoutPlan:
     """Sources are LIMIT-only, but per leg: if the current candle has already
     crossed an entry level, that leg is opened MARKET now (the price already
     touched the level and may not rebound) at the live price; otherwise it rests
@@ -124,5 +125,12 @@ def build_plan(sig: ParsedSignal, *, current_price: Decimal,
             elif min_stop_distance is not None and abs(tp - leg_entry) < min_stop_distance:
                 leg.valid = False
                 leg.skip_reason = "tp within broker min distance"
+            elif (max_tp_distance_pct is not None and leg_entry
+                  and abs(tp - leg_entry) / abs(leg_entry) > max_tp_distance_pct):
+                # A TP an implausible distance from entry (e.g. tp=1530 for gold
+                # near 4180) is a parse artifact, not a real target — skip it.
+                leg.valid = False
+                pct = int(abs(tp - leg_entry) / abs(leg_entry) * 100)
+                leg.skip_reason = f"tp implausibly far ({pct}% from entry)"
             plan.legs.append(leg)
     return plan
