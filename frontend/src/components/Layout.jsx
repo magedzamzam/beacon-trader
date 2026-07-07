@@ -85,7 +85,8 @@ export default function Layout({ view, setView, children, accounts = [], account
 
       <aside className={`fixed inset-y-0 left-0 z-40 w-60 shrink-0 border-r border-edge bg-panel2
           flex flex-col transition-all duration-200 ease-out
-          md:static md:z-auto md:translate-x-0 ${collapsed ? "md:w-16" : "md:w-60"}
+          md:sticky md:top-0 md:h-screen md:self-start md:z-auto md:translate-x-0
+          ${collapsed ? "md:w-16" : "md:w-60"}
           ${navOpen ? "translate-x-0" : "-translate-x-full"}`}>
         <div className={`px-5 py-5 flex items-center gap-2.5 border-b border-edge ${collapsed ? "md:px-0 md:justify-center" : ""}`}>
           <Radar className="w-5 h-5 text-beacon shrink-0" />
