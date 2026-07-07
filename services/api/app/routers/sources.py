@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from beacon_core.db.models import Source
+from beacon_core.db.models import Signal, Source, TelegramMessage
 from ..deps import get_db
 from ..auth import require_token
 from ..schemas import SourceIn
@@ -44,5 +44,14 @@ async def update_source(source_id: int, body: dict, db: AsyncSession = Depends(g
 async def delete_source(source_id: int, db: AsyncSession = Depends(get_db)):
     s = await db.get(Source, source_id)
     if s:
-        await db.delete(s); await db.commit()
+        # Detach dependents first — signals and telegram messages FK-reference the
+        # source, so a hard delete would otherwise fail. Both columns are nullable,
+        # so this preserves the history (and the trades behind those signals) while
+        # letting the source be removed.
+        await db.execute(update(Signal).where(Signal.source_id == source_id)
+                         .values(source_id=None))
+        await db.execute(update(TelegramMessage).where(TelegramMessage.source_id == source_id)
+                         .values(source_id=None))
+        await db.delete(s)
+        await db.commit()
     return {"ok": True}

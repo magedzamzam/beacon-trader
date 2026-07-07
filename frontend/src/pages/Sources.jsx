@@ -22,6 +22,13 @@ export default function Sources() {
   };
   useEffect(() => { load(); }, []);
 
+  const remove = async (s) => {
+    if (!window.confirm(`Delete source “${s.name}”? Its signals and messages are kept but detached from it.`)) return;
+    setErr(null);
+    try { await api.deleteSource(s.id); await load(); }
+    catch (e) { setErr(e.message); }
+  };
+
   return (
     <div className="space-y-6">
       <ErrorNote>{err}</ErrorNote>
@@ -48,7 +55,7 @@ export default function Sources() {
                   <Td right>
                     <div className="flex items-center gap-1 justify-end">
                       <Button variant="ghost" onClick={() => setEditing(s)}><Pencil className="w-4 h-4" /></Button>
-                      <Button variant="danger" onClick={async () => { await api.deleteSource(s.id); load(); }}><Trash2 className="w-4 h-4" /></Button>
+                      <Button variant="danger" onClick={() => remove(s)}><Trash2 className="w-4 h-4" /></Button>
                     </div>
                   </Td>
                 </tr>
