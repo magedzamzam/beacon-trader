@@ -26,6 +26,16 @@ const post = (p, body) => req(p, { method: "POST", body: JSON.stringify(body) })
 const patch = (p, body) => req(p, { method: "PATCH", body: JSON.stringify(body) });
 const del = (p) => req(p, { method: "DELETE" });
 
+// Build the ?account_id/&date_from/&date_to query string for /performance/*
+function _perfQs(accountId, { from, to } = {}) {
+  const p = new URLSearchParams();
+  if (accountId) p.set("account_id", accountId);
+  if (from) p.set("date_from", from);
+  if (to) p.set("date_to", to);
+  const s = p.toString();
+  return s ? `?${s}` : "";
+}
+
 export const api = {
   // auth
   authStatus: () => req("/auth/status"),
@@ -42,9 +52,9 @@ export const api = {
   accounts: () => req("/accounts"),
   accountPerformance: (id) => req(`/accounts/${id}/performance`),
   symbols: () => req("/symbols"),
-  perfSummary: (accountId = "") => req(`/performance/summary${accountId ? `?account_id=${accountId}` : ""}`),
-  perfBySource: (accountId = "") => req(`/performance/by_source${accountId ? `?account_id=${accountId}` : ""}`),
-  equityCurve: (accountId = "") => req(`/performance/equity_curve${accountId ? `?account_id=${accountId}` : ""}`),
+  perfSummary: (accountId = "", range = {}) => req(`/performance/summary${_perfQs(accountId, range)}`),
+  perfBySource: (accountId = "", range = {}) => req(`/performance/by_source${_perfQs(accountId, range)}`),
+  equityCurve: (accountId = "", range = {}) => req(`/performance/equity_curve${_perfQs(accountId, range)}`),
   brokerHealth: (id) => req(`/brokers/${id}/health`),
   brokerLiveAccounts: (id) => req(`/brokers/${id}/accounts`),
   // messages (telegram history)

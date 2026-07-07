@@ -1,3 +1,5 @@
+import datetime as dt
+
 from fastapi import APIRouter, Depends
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,11 +13,34 @@ router = APIRouter(prefix="/performance", tags=["performance"],
                    dependencies=[Depends(require_token)])
 
 
+def _parse_dt(s: str | None):
+    """ISO date/datetime -> tz-aware UTC datetime (naive is treated as UTC)."""
+    if not s:
+        return None
+    try:
+        d = dt.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+        return d if d.tzinfo else d.replace(tzinfo=dt.timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def _leg_dates(q, frm, to):
+    """Filter a query by the leg CLOSE time — the realized-in-period anchor."""
+    if frm is not None:
+        q = q.where(Leg.closed_at >= frm)
+    if to is not None:
+        q = q.where(Leg.closed_at < to)
+    return q
+
+
 @router.get("/summary")
-async def summary(account_id: int | None = None, db: AsyncSession = Depends(get_db)):
+async def summary(account_id: int | None = None, date_from: str | None = None,
+                  date_to: str | None = None, db: AsyncSession = Depends(get_db)):
+    frm, to = _parse_dt(date_from), _parse_dt(date_to)
     q = select(Leg).where(Leg.status == "closed")
     if account_id is not None:
         q = q.join(Trade, Trade.id == Leg.trade_id).where(Trade.account_id == account_id)
+    q = _leg_dates(q, frm, to)
     closed = (await db.execute(q)).scalars().all()
     wins = [l for l in closed if l.outcome == "tp_hit"]
     losses = [l for l in closed if l.outcome == "sl_hit"]
@@ -31,10 +56,12 @@ async def summary(account_id: int | None = None, db: AsyncSession = Depends(get_
 
 @router.get("/by_source")
 async def by_source(account_id: int | None = None, min_significant: int = 30,
+                    date_from: str | None = None, date_to: str | None = None,
                     db: AsyncSession = Depends(get_db)):
     """Per-source: realized P&L and per-TP hit counts, plus a TRADE-level
     significance read (N vs threshold + a Beta-Binomial credible interval on the
     win rate) so a 2/2 source isn't mistaken for a real edge."""
+    frm, to = _parse_dt(date_from), _parse_dt(date_to)
     q = (select(Source.id, Source.name,
                 Leg.tp_index, Leg.outcome,
                 func.count(Leg.id), func.coalesce(func.sum(Leg.realized_pl), 0))
@@ -46,6 +73,7 @@ async def by_source(account_id: int | None = None, min_significant: int = 30,
          .group_by(Source.id, Source.name, Leg.tp_index, Leg.outcome))
     if account_id is not None:
         q = q.where(Trade.account_id == account_id)
+    q = _leg_dates(q, frm, to)
     rows = (await db.execute(q)).all()
     agg: dict = {}
     for sid, sname, tp_index, outcome, cnt, pl in rows:
@@ -67,6 +95,10 @@ async def by_source(account_id: int | None = None, min_significant: int = 30,
           .group_by(Source.id, Source.name))
     if account_id is not None:
         tq = tq.where(Trade.account_id == account_id)
+    if frm is not None or to is not None:
+        # a trade counts for the period if any of its legs closed in it
+        cids = _leg_dates(select(Leg.trade_id).where(Leg.status == "closed"), frm, to)
+        tq = tq.where(Trade.id.in_(cids))
     trows = (await db.execute(tq)).all()
 
     total_n = sum(int(n) for _, _, n, _ in trows)
@@ -99,17 +131,20 @@ async def by_source(account_id: int | None = None, min_significant: int = 30,
 
 
 @router.get("/equity_curve")
-async def equity_curve(account_id: int | None = None, db: AsyncSession = Depends(get_db)):
+async def equity_curve(account_id: int | None = None, date_from: str | None = None,
+                       date_to: str | None = None, db: AsyncSession = Depends(get_db)):
     """Cumulative realized P&L over time, one point per closed leg (in close
     order). This is the 'is my account growing?' curve. No stored balance
     history exists yet, so this is derived from realized results — scope it to
     one account with account_id, or omit for the whole book."""
+    frm, to = _parse_dt(date_from), _parse_dt(date_to)
     q = (select(Leg.closed_at, Leg.realized_pl)
          .join(Trade, Trade.id == Leg.trade_id)
          .where(Leg.status == "closed", Leg.closed_at.isnot(None))
          .order_by(Leg.closed_at.asc()))
     if account_id is not None:
         q = q.where(Trade.account_id == account_id)
+    q = _leg_dates(q, frm, to)
     rows = (await db.execute(q)).all()
     cum = 0.0
     out = []
