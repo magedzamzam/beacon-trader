@@ -57,11 +57,20 @@ export default function App() {
   if (checking) return null;
   if (!authed) return <Login onAuthed={() => setAuthed(true)} />;
 
-  const Page = PAGES[view] || Dashboard;
+  // "cfg:<tab>" deep-links into a Configuration tab; the key forces a remount so
+  // initialTab re-applies when switching between Settings sub-items.
+  let content;
+  if (view.startsWith("cfg:")) {
+    content = <Configuration key={view} initialTab={view.slice(4)} setView={setView} />;
+  } else {
+    const Page = PAGES[view] || Dashboard;
+    content = <Page setView={setView} account={account} />;
+  }
+
   return (
     <Layout view={view} setView={setView}
       accounts={accounts} account={account} setAccount={chooseAccount}>
-      <Page setView={setView} account={account} />
+      {content}
     </Layout>
   );
 }

@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { Activity, Radio, Radar, ListChecks, CandlestickChart,
          MessageSquare, GitBranch, Moon, Sun, KeyRound, LogOut,
-         Menu, X, SlidersHorizontal } from "lucide-react";
+         Menu, X, SlidersHorizontal, BarChart3, Building2, Rss,
+         Coins, ShieldCheck, Sparkles } from "lucide-react";
 import { api, getToken, setToken, clearToken } from "../lib/api";
 import { toggleTheme } from "../lib/theme";
 
-// Consolidated navigation: a lean Overview + Live monitoring set, with every
-// broker/account/risk/source/symbol/AI/currency setting folded into Configuration.
+// Overview + Live monitoring, then a Settings group whose sub-items deep-link
+// into the consolidated Configuration page's tabs ("cfg:<tab>").
 const NAV = [
   { title: "Overview", items: [
     { id: "dashboard", label: "Dashboard", icon: Activity },
@@ -18,11 +19,24 @@ const NAV = [
     { id: "messages", label: "Messages", icon: MessageSquare },
     { id: "activity", label: "Activity", icon: GitBranch },
     { id: "history", label: "History", icon: ListChecks },
+    { id: "performance", label: "Performance", icon: BarChart3 },
   ]},
   { title: "Settings", items: [
-    { id: "configuration", label: "Configuration", icon: SlidersHorizontal },
+    { id: "configuration", label: "All Settings", icon: SlidersHorizontal },
+    { id: "cfg:brokers", label: "Brokers", icon: Building2 },
+    { id: "cfg:sources", label: "Sources", icon: Rss },
+    { id: "cfg:symbols", label: "Symbols", icon: Coins },
+    { id: "cfg:risk", label: "Risk & Limits", icon: ShieldCheck },
+    { id: "cfg:ai", label: "AI", icon: Sparkles },
   ]},
 ];
+
+// Human-readable header label for a view id (cfg:risk -> "Risk & Limits").
+function viewLabel(view) {
+  if (view === "configuration") return "Settings";
+  const item = NAV.flatMap(g => g.items).find(i => i.id === view);
+  return item ? item.label : view;
+}
 
 function HealthPulse() {
   const [ok, setOk] = useState(null);
@@ -109,7 +123,7 @@ export default function Layout({ view, setView, children, accounts = [], account
               title="Menu" aria-label="Open menu">
               <Menu className="w-5 h-5" />
             </button>
-            <div className="text-sm font-medium capitalize truncate">{view}</div>
+            <div className="text-sm font-medium capitalize truncate">{viewLabel(view)}</div>
           </div>
           <div className="flex items-center gap-2">
             {setAccount && (

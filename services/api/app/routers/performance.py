@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from beacon_core.analysis.bayes import posterior
 from beacon_core.db.models import Leg, Signal, Source, Trade
 from ..deps import get_db
 from ..auth import require_token
@@ -29,9 +30,11 @@ async def summary(account_id: int | None = None, db: AsyncSession = Depends(get_
 
 
 @router.get("/by_source")
-async def by_source(account_id: int | None = None, db: AsyncSession = Depends(get_db)):
-    """Per-source: realized P&L and per-TP hit counts — the table that tells you
-    which channel reaches TP1 reliably vs stalls before TP3."""
+async def by_source(account_id: int | None = None, min_significant: int = 30,
+                    db: AsyncSession = Depends(get_db)):
+    """Per-source: realized P&L and per-TP hit counts, plus a TRADE-level
+    significance read (N vs threshold + a Beta-Binomial credible interval on the
+    win rate) so a 2/2 source isn't mistaken for a real edge."""
     q = (select(Source.id, Source.name,
                 Leg.tp_index, Leg.outcome,
                 func.count(Leg.id), func.coalesce(func.sum(Leg.realized_pl), 0))
@@ -53,6 +56,45 @@ async def by_source(account_id: int | None = None, db: AsyncSession = Depends(ge
             s["tp_hits"][tp_index] = s["tp_hits"].get(tp_index, 0) + cnt
         elif outcome == "sl_hit":
             s["sl_hits"] += cnt
+
+    # Trade-level N and wins per source (win = realized P&L > 0), for significance.
+    tq = (select(Source.id, Source.name, func.count(Trade.id),
+                 func.coalesce(func.sum(case((Trade.realized_pl > 0, 1), else_=0)), 0))
+          .select_from(Trade)
+          .join(Signal, Signal.id == Trade.signal_id)
+          .join(Source, Source.id == Signal.source_id)
+          .where(Trade.status == "closed")
+          .group_by(Source.id, Source.name))
+    if account_id is not None:
+        tq = tq.where(Trade.account_id == account_id)
+    trows = (await db.execute(tq)).all()
+
+    total_n = sum(int(n) for _, _, n, _ in trows)
+    total_w = sum(int(w) for _, _, _, w in trows)
+    base_rate = (total_w / total_n) if total_n else 0.5
+
+    for sid, sname, n, w in trows:
+        n, w = int(n), int(w)
+        s = agg.setdefault(sid, {"source_id": sid, "name": sname, "pl": 0.0,
+                                 "tp_hits": {}, "sl_hits": 0})
+        post = posterior(w, n, base_rate) if n else None
+        s["n_trades"] = n
+        s["wins"] = w
+        s["win_rate"] = round(w / n * 100.0, 1) if n else None
+        s["significant"] = n >= min_significant
+        s["min_trades"] = min_significant
+        s["ci"] = ({"low": round(post["ci_low"] * 100, 1),
+                    "mean": round(post["mean"] * 100, 1),
+                    "high": round(post["ci_high"] * 100, 1)} if post else None)
+
+    # Sources with closed legs but no closed trades yet: fill defaults.
+    for s in agg.values():
+        s.setdefault("n_trades", 0)
+        s.setdefault("wins", 0)
+        s.setdefault("win_rate", None)
+        s.setdefault("significant", False)
+        s.setdefault("min_trades", min_significant)
+        s.setdefault("ci", None)
     return list(agg.values())
 
 
