@@ -1,13 +1,12 @@
 import { useEffect, useState } from "react";
 import { Activity, Radio, Radar, ListChecks, CandlestickChart,
          MessageSquare, GitBranch, Moon, Sun, KeyRound, LogOut,
-         Menu, X, SlidersHorizontal, BarChart3, Building2, Rss,
-         Coins, ShieldCheck, Sparkles } from "lucide-react";
+         Menu, X, SlidersHorizontal, BarChart3 } from "lucide-react";
 import { api, getToken, setToken, clearToken } from "../lib/api";
 import { toggleTheme } from "../lib/theme";
 
-// Overview + Live monitoring, then a Settings group whose sub-items deep-link
-// into the consolidated Configuration page's tabs ("cfg:<tab>").
+// Overview + Live monitoring, then a single Settings entry — every
+// broker/account/risk/source/symbol/AI setting lives inside Configuration's tabs.
 const NAV = [
   { title: "Overview", items: [
     { id: "dashboard", label: "Dashboard", icon: Activity },
@@ -22,18 +21,12 @@ const NAV = [
     { id: "performance", label: "Performance", icon: BarChart3 },
   ]},
   { title: "Settings", items: [
-    { id: "configuration", label: "All Settings", icon: SlidersHorizontal },
-    { id: "cfg:brokers", label: "Brokers", icon: Building2 },
-    { id: "cfg:sources", label: "Sources", icon: Rss },
-    { id: "cfg:symbols", label: "Symbols", icon: Coins },
-    { id: "cfg:risk", label: "Risk & Limits", icon: ShieldCheck },
-    { id: "cfg:ai", label: "AI", icon: Sparkles },
+    { id: "configuration", label: "Configuration", icon: SlidersHorizontal },
   ]},
 ];
 
-// Human-readable header label for a view id (cfg:risk -> "Risk & Limits").
+// Human-readable header label for a view id.
 function viewLabel(view) {
-  if (view === "configuration") return "Settings";
   const item = NAV.flatMap(g => g.items).find(i => i.id === view);
   return item ? item.label : view;
 }
