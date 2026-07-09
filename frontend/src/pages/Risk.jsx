@@ -29,6 +29,7 @@ export default function Risk() {
   return (
     <div className="space-y-6">
       <ErrorNote>{err}</ErrorNote>
+      <RiskLimitsCard />
       <Card>
         <div className="px-4 py-3 border-b border-edge text-sm font-medium">Account limits</div>
         {!accounts.length ? <Empty>No accounts. Add one under Brokers.</Empty> : (
@@ -70,6 +71,53 @@ export default function Risk() {
 
       {edit && <RiskModal account={edit} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); load(); }} />}
     </div>
+  );
+}
+
+function RiskLimitsCard() {
+  const [cfg, setCfg] = useState(null);
+  const [saved, setSaved] = useState(false);
+  const [err, setErr] = useState(null);
+  useEffect(() => { api.riskLimits().then(setCfg).catch(e => setErr(e.message)); }, []);
+  if (!cfg) return null;
+  const set = (k, v) => { setCfg(c => ({ ...c, [k]: v })); setSaved(false); };
+  const num = (k, v) => set(k, v === "" ? "" : Number(v));
+  const save = async () => {
+    try { setCfg(await api.saveRiskLimits(cfg)); setSaved(true); } catch (e) { setErr(e.message); }
+  };
+  return (
+    <Card>
+      <div className="px-4 py-3 border-b border-edge flex items-center justify-between">
+        <div className="text-sm font-medium">Risk limits &amp; kill switch</div>
+        <div className="flex items-center gap-2">
+          {!cfg.enabled && <Badge tone="short">limits off</Badge>}
+          {cfg.trading_halted && <Badge tone="warn">trading halted</Badge>}
+          {saved && <span className="text-xs text-long">Saved</span>}
+        </div>
+      </div>
+      <div className="p-4 space-y-4">
+        <ErrorNote>{err}</ErrorNote>
+        <div className="flex flex-wrap gap-x-8 gap-y-3">
+          <label className="flex items-center gap-2 text-sm">Enforce limits
+            <Toggle checked={!!cfg.enabled} onChange={v => set("enabled", v)} /></label>
+          <label className="flex items-center gap-2 text-sm">
+            <span className={cfg.trading_halted ? "text-warn font-medium" : ""}>Kill switch — halt all new trades</span>
+            <Toggle checked={!!cfg.trading_halted} onChange={v => set("trading_halted", v)} /></label>
+        </div>
+        <div className={`grid grid-cols-1 sm:grid-cols-2 gap-3 ${cfg.enabled ? "" : "opacity-60"}`}>
+          <Field label="Daily loss limit (account ccy)">
+            <Input type="number" value={cfg.daily_loss_limit} onChange={e => num("daily_loss_limit", e.target.value)} /></Field>
+          <Field label="Per-signal ceiling (× daily limit)" hint="0.5 = one trade may risk ≤ 50% of the daily cap">
+            <Input type="number" step="0.05" value={cfg.per_signal_max_pct_of_daily}
+              onChange={e => num("per_signal_max_pct_of_daily", e.target.value)} /></Field>
+          <Field label="Max open risk / account">
+            <Input type="number" value={cfg.max_open_risk_per_account} onChange={e => num("max_open_risk_per_account", e.target.value)} /></Field>
+          <Field label="Max open risk / symbol">
+            <Input type="number" value={cfg.max_open_risk_per_symbol} onChange={e => num("max_open_risk_per_symbol", e.target.value)} /></Field>
+        </div>
+        <div className="flex justify-end"><Button onClick={save}>Save risk limits</Button></div>
+      </div>
+    </Card>
   );
 }
 

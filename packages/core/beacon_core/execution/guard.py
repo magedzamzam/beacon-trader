@@ -11,6 +11,18 @@ from typing import Optional, Tuple
 # Source names containing any of these never auto-execute live orders.
 EXECUTION_NAME_BLOCKLIST = ("test", "sample", "demo")
 
+# Fail-safe defaults used when the `risk_limits` setting is missing entirely, so
+# an un-configured install never trades with no brakes (see #19). Values are in
+# the account currency.
+DEFAULT_RISK_LIMITS = {
+    "enabled": True,
+    "trading_halted": False,
+    "daily_loss_limit": 500,
+    "per_signal_max_pct_of_daily": 0.5,
+    "max_open_risk_per_account": 2500,
+    "max_open_risk_per_symbol": 2500,
+}
+
 
 def should_auto_execute(*, enabled_for_trading: bool, is_trusted: bool,
                         name: Optional[str],
@@ -47,6 +59,8 @@ def risk_limit_reason(*, planned_risk, day_realized, open_risk_symbol,
     """
     if not cfg or not cfg.get("enabled"):
         return None
+    if cfg.get("trading_halted"):                 # manual kill-switch
+        return "trading is halted (kill switch on)"
     pr = _dec(planned_risk)
     daily = abs(_dec(cfg.get("daily_loss_limit")))
 

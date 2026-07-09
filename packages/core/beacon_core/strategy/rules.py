@@ -23,6 +23,16 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Dict, List, Optional, Set
 
+# Default tiered ratchet applied to any source that has no sl_rules of its own:
+#   TP1 hit -> SL to entry (breakeven), then TP2 -> TP1, TP3 -> TP2, ...
+# Only ever tightens toward profit; covers up to 5 TPs. Override globally via the
+# `strategy.default_sl_rules` setting, or per-source in the strategy editor.
+DEFAULT_SL_RULES: List[dict] = [
+    {"trigger": {"type": "tp_hit", "index": 1}, "action": {"type": "move_sl_to", "target": "entry"}},
+    *[{"trigger": {"type": "tp_hit", "index": i},
+       "action": {"type": "move_sl_to", "target": "previous_tp"}} for i in range(2, 6)],
+]
+
 
 @dataclass
 class PositionCtx:

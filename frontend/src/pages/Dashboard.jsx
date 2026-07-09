@@ -24,6 +24,7 @@ function ViewMore({ onClick }) {
 export default function Dashboard({ setView, account }) {
   const acct = account || "";
   const { data: kpi, error } = useData(() => api.dashboard(acct), [acct]);
+  const { data: rl } = useData(api.riskLimits);
   const { data: perf } = useData(() => api.perfSummary(acct), [acct]);
   const { data: bySrc } = useData(() => api.perfBySource(acct), [acct]);
   const { data: curve } = useData(() => api.equityCurve(acct), [acct]);
@@ -42,6 +43,18 @@ export default function Dashboard({ setView, account }) {
 
   return (
     <div className="space-y-6">
+      {rl && rl.trading_halted && (
+        <div className="rounded-lg px-4 py-2.5 text-sm font-medium bg-warn/15 text-warn border border-warn/30">
+          ⛔ Trading is HALTED (kill switch on). No new orders will be placed — Configuration → Risk &amp; Limits.
+        </div>
+      )}
+      {rl && !rl.enabled && (
+        <div className="rounded-lg px-4 py-2.5 text-sm font-medium bg-short/15 text-short border border-short/30">
+          ⚠️ RISK LIMITS OFF — the account is trading with no daily-loss cap or per-signal ceiling.
+          Enable them in Configuration → Risk &amp; Limits.
+        </div>
+      )}
+
       <SessionStrip />
 
       {/* Account overview — only when a specific account is filtered */}

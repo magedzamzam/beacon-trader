@@ -28,7 +28,8 @@ from beacon_core.db.models import (Account, Broker, Event, Leg, PositionActivity
                                    Signal, Source, SymbolMap, Trade)
 from beacon_core.brokers import get_adapter, resolve_credentials
 from beacon_core.brokers.types import AuthError, ModifyPositionRequest
-from beacon_core.strategy.rules import PositionCtx, evaluate
+from beacon_core.strategy.rules import PositionCtx, evaluate, DEFAULT_SL_RULES
+from beacon_core.settings_store import get_setting
 from beacon_core import notifications as notify
 
 log = get_logger("monitor")
@@ -104,7 +105,11 @@ async def _rules_for(session, trade) -> tuple[list, dict, int]:
     sig = await session.get(Signal, trade.signal_id)
     source = await session.get(Source, sig.source_id) if sig and sig.source_id else None
     strat = (source.strategy if source else {}) or {}
-    return strat.get("sl_rules", []), strat, strat.get("entry_ttl_minutes", 60)
+    rules = strat.get("sl_rules")
+    if not rules:                       # no per-source rules -> global default ladder
+        cfg = await get_setting(session, "strategy", {}) or {}
+        rules = cfg.get("default_sl_rules") or DEFAULT_SL_RULES
+    return rules, strat, strat.get("entry_ttl_minutes", 60)
 
 
 # Persistent broker sessions, reused across ticks. Re-logging in (and switching

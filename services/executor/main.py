@@ -27,7 +27,8 @@ from beacon_core.brokers import fx
 from beacon_core.brokers.types import (OrderSide, OrderStatus, OrderType, PlaceOrderRequest)
 from beacon_core.parsing.models import ParsedSignal
 from beacon_core.execution.planner import build_plan
-from beacon_core.execution.guard import should_auto_execute, risk_limit_reason
+from beacon_core.execution.guard import (should_auto_execute, risk_limit_reason,
+                                          DEFAULT_RISK_LIMITS)
 from beacon_core.risk.sizing import RiskConfig, InstrumentSpec, size_legs, plan_total_risk
 from beacon_core.ta import capture as ta_capture
 from beacon_core import notifications as notify
@@ -261,7 +262,11 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         planned_risk = plan_total_risk(plan.legs)   # worst-case loss, account ccy
 
         # --- Risk-limit enforcement (independent of the AI gate) ---
-        rl_cfg = await get_setting(session, "risk_limits", {}) or {}
+        rl_cfg = await get_setting(session, "risk_limits", None)
+        if not rl_cfg:                              # never configured -> fail SAFE, not open
+            rl_cfg = dict(DEFAULT_RISK_LIMITS)
+            log.warning("RISK-LIMITS-DEFAULTED: no risk_limits setting; applying "
+                        "conservative defaults (%s)", rl_cfg)
         if rl_cfg.get("enabled"):
             day_start = dt.datetime.now(dt.timezone.utc).replace(
                 hour=0, minute=0, second=0, microsecond=0)

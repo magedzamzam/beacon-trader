@@ -16,6 +16,9 @@ from sqlalchemy import select
 
 from beacon_core.db.base import Session, init_models
 from beacon_core.db.models import Account, Broker, Source, SymbolMap
+from beacon_core.execution.guard import DEFAULT_RISK_LIMITS
+from beacon_core.strategy.rules import DEFAULT_SL_RULES
+from beacon_core.settings_store import get_setting, set_setting
 
 
 async def _get_or_create(session, model, defaults=None, **keys):
@@ -83,6 +86,16 @@ async def main():
                 risk_config={"basis": "capital_percent", "value": "1.0",
                              "allocation": "even"},
                 account_map=[account.id]))
+
+        # Seed the risk-limit brakes ON by default (never trade with no caps),
+        # and the global default SL ratchet ladder. Only if not already set, so
+        # re-running never clobbers operator tuning.
+        if not (await get_setting(s, "risk_limits", None)):
+            await set_setting(s, "risk_limits", dict(DEFAULT_RISK_LIMITS))
+        strat_cfg = dict(await get_setting(s, "strategy", {}) or {})
+        strat_cfg.setdefault("default_sl_rules", DEFAULT_SL_RULES)
+        await set_setting(s, "strategy", strat_cfg)
+
         await s.commit()
     print("seed complete.")
 
