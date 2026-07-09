@@ -1,14 +1,75 @@
+import datetime as dt
+
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from beacon_core.analysis import bayes as B
-from beacon_core.db.models import SignalFeature, Trade
+from beacon_core.db.models import AiAssessment, Event, Signal, SignalFeature, Trade
 from ..deps import get_db
 from ..auth import require_token
 
 router = APIRouter(prefix="/analysis", tags=["analysis"],
                    dependencies=[Depends(require_token)])
+
+
+def _parse_dt(s):
+    if not s:
+        return None
+    try:
+        d = dt.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+        return d if d.tzinfo else d.replace(tzinfo=dt.timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def _stats(xs):
+    xs = sorted(x for x in xs if x is not None and x >= 0)
+    if not xs:
+        return None
+    n = len(xs)
+    def pct(p):
+        return xs[min(n - 1, int(p * n))]
+    return {"n": n, "avg": round(sum(xs) / n, 2), "median": round(pct(0.5), 2),
+            "p90": round(pct(0.9), 2), "min": round(xs[0], 2), "max": round(xs[-1], 2)}
+
+
+@router.get("/latency")
+async def latency(date_from: str = None, date_to: str = None,
+                  db: AsyncSession = Depends(get_db)):
+    """Signal -> order latency, in seconds, from existing timestamps:
+      total  = first `placed` event  -  signal.created_at
+      ai     = signal_validation assessment  -  signal.created_at (0 when AI off)
+    Use with a date range to compare before/after toggling AI validation."""
+    frm, to = _parse_dt(date_from), _parse_dt(date_to)
+    sq = select(Signal.id, Signal.created_at)
+    if frm is not None:
+        sq = sq.where(Signal.created_at >= frm)
+    if to is not None:
+        sq = sq.where(Signal.created_at < to)
+    created = {sid: c for sid, c in (await db.execute(sq)).all()}
+    if not created:
+        return {"total": None, "ai": None, "n_signals": 0, "n_placed": 0}
+
+    ids = list(created)
+    placed = dict((await db.execute(
+        select(Trade.signal_id, func.min(Event.ts))
+        .join(Event, Event.trade_id == Trade.id)
+        .where(Event.kind == "placed", Trade.signal_id.in_(ids))
+        .group_by(Trade.signal_id))).all())
+    ai_done = dict((await db.execute(
+        select(AiAssessment.signal_id, func.max(AiAssessment.created_at))
+        .where(AiAssessment.kind == "signal_validation", AiAssessment.signal_id.in_(ids))
+        .group_by(AiAssessment.signal_id))).all())
+
+    totals, ais = [], []
+    for sid, c in created.items():
+        if sid in placed and placed[sid] and c:
+            totals.append((placed[sid] - c).total_seconds())
+        if sid in ai_done and ai_done[sid] and c:
+            ais.append((ai_done[sid] - c).total_seconds())
+    return {"total": _stats(totals), "ai": _stats(ais),
+            "n_signals": len(created), "n_placed": len(placed)}
 
 
 async def _model(db: AsyncSession, min_n: int):

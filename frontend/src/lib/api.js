@@ -76,6 +76,9 @@ export const api = {
   saveTaConfig: (c) => req("/ta/config", { method: "PUT", body: JSON.stringify(c) }),
   // Bayesian correlation of captured features with outcomes
   bayesAnalysis: (minN = 5) => req(`/analysis/bayes?min_n=${minN}`),
+  // signal -> order latency (seconds); use a range for before/after AI toggle
+  execLatency: ({ from = "", to = "" } = {}) =>
+    req(`/analysis/latency${from || to ? `?${new URLSearchParams({ ...(from && { date_from: from }), ...(to && { date_to: to }) })}` : ""}`),
   // trading hours: sessions / news blackout / holidays
   tradingHoursStatus: () => req("/trading-hours/status"),
   tradingHoursConfig: () => req("/trading-hours/config"),
