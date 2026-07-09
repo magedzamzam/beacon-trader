@@ -405,8 +405,11 @@ async def _execute_on_account(session, sig, parsed, source, acct,
 async def main() -> None:
     await init_models()
     asyncio.create_task(run_health_server("executor", bus, port=8080))
-    log.info("executor listening on %s", CH_SIGNAL_VALID)
-    async for msg in bus.subscribe(CH_SIGNAL_VALID):
+    log.info("executor consuming %s (durable queue)", CH_SIGNAL_VALID)
+    # Durable at-least-once: a signal enqueued while we're mid-handle / restarting
+    # waits in Redis and is delivered on return (redelivery is safe — handle_signal
+    # short-circuits an already-executed signal). Self-heals on Redis drops.
+    async for msg in bus.consume_queue(CH_SIGNAL_VALID):
         sid = msg.get("signal_id")
         if sid is None:
             continue

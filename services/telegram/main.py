@@ -164,7 +164,7 @@ async def _handle_message(chat_key, source_id, message_id, sender, text, msg_dat
 
     # Only LIVE signals are handed to the executor. Backfilled history is not.
     if is_live and parse_status == "parsed" and signal_id is not None and not ai_rejected:
-        await bus.publish(CH_SIGNAL_VALID, {"signal_id": signal_id})
+        await bus.enqueue(CH_SIGNAL_VALID, {"signal_id": signal_id})
         log.info("signal %s published (%s %s)", signal_id, parsed.direction, parsed.symbol)
         # Non-blocking mode: fire the AI afterwards, for the record only.
         if cfg is not None and cfg.validation_mode == "background":
@@ -210,8 +210,8 @@ async def _backfill(client, sources: dict, limit: int = BACKFILL_LIMIT) -> None:
 
 
 async def _control_loop(client, sources: dict) -> None:
-    """Listen for backfill/reload requests from the API."""
-    async for msg in bus.subscribe(CH_TG_CONTROL):
+    """Listen for backfill/reload requests from the API (self-heals on drops)."""
+    async for msg in bus.subscribe_forever(CH_TG_CONTROL):
         action = (msg or {}).get("action")
         if action == "backfill":
             limit = int((msg or {}).get("limit", BACKFILL_LIMIT))

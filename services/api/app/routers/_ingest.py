@@ -67,5 +67,5 @@ async def ingest_structured(session, *, source_id, symbol, direction, entry_from
 
     await session.commit()
     if ok:
-        await bus.publish(CH_SIGNAL_VALID, {"signal_id": sig.id})
+        await bus.enqueue(CH_SIGNAL_VALID, {"signal_id": sig.id})   # durable queue
     return sig.id, ok, reason

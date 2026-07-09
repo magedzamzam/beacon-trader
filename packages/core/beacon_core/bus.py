@@ -1,13 +1,21 @@
 """Thin async Redis wrapper: pub/sub bus + a paced work queue + heartbeats."""
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import AsyncIterator, Optional
 
 import redis.asyncio as aioredis
+from redis.exceptions import RedisError
 
 from .config import HEARTBEAT_PREFIX, get_settings
+from .logging import get_logger
+
+log = get_logger("bus")
+
+# transient failures a long-lived consumer should reconnect through, not die on
+_TRANSIENT = (RedisError, OSError)
 
 
 class Bus:
@@ -36,10 +44,37 @@ class Bus:
                 except (ValueError, TypeError):
                     continue
         finally:
-            await pubsub.unsubscribe(channel)
-            await pubsub.aclose()
+            try:
+                await pubsub.unsubscribe(channel)
+                await pubsub.aclose()
+            except Exception:                       # connection may already be dead
+                pass
 
-    # --- work queue (LPUSH / BRPOP) ---
+    async def _reset(self) -> None:
+        """Drop the cached client so the next call reconnects cleanly."""
+        old, self._r = self._r, None
+        if old is not None:
+            try:
+                await old.aclose()
+            except Exception:
+                pass
+
+    async def subscribe_forever(self, channel: str) -> AsyncIterator[dict]:
+        """Pub/sub consumer that self-heals on Redis drops (at-most-once; for
+        control / non-critical channels). Never exits on a transient error."""
+        backoff = 1
+        while True:
+            try:
+                async for msg in self.subscribe(channel):
+                    backoff = 1
+                    yield msg
+            except _TRANSIENT as exc:
+                log.warning("bus subscribe %s: reconnecting in %ss (%s)", channel, backoff, exc)
+                await self._reset()
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 30)
+
+    # --- work queue (LPUSH / BRPOP) — durable, at-least-once ---
     async def enqueue(self, key: str, payload: dict) -> None:
         await self.r.lpush(key, json.dumps(payload, default=str))
 
@@ -51,6 +86,24 @@ class Bus:
             return json.loads(res[1])
         except (ValueError, TypeError):
             return None
+
+    async def consume_queue(self, key: str, timeout: int = 5) -> AsyncIterator[dict]:
+        """Durable, self-healing consumer over a BRPOP list. At-least-once: a
+        message waits in the list across consumer downtime / restarts and is
+        delivered on return; Redis blips reconnect with exponential backoff
+        instead of killing the loop. Pair with an idempotent handler."""
+        backoff = 1
+        while True:
+            try:
+                msg = await self.dequeue(key, timeout=timeout)
+                backoff = 1
+                if msg is not None:
+                    yield msg
+            except _TRANSIENT as exc:
+                log.warning("bus consume %s: reconnecting in %ss (%s)", key, backoff, exc)
+                await self._reset()
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 30)
 
     # --- heartbeats ---
     async def beat(self, service: str) -> None:
