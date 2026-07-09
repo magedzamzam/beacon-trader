@@ -563,7 +563,11 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
         # while 4020 never triggered). Cancel them so we don't enter late.
         # Only cancels orders the broker confirms are still cancellable, so an
         # order that just filled is never mislabelled. Configurable per source.
-        progressed = bool(effective_tps_hit) or any(l.sl_moved for l in legs)
+        # Only cancel the resting ladder once a leg of THIS trade actually filled
+        # (open/closed) — never on a phantom TP computed off price with zero fills
+        # (that used to tear down entries we were never in — #25).
+        any_filled = any(l.status in ("open", "closed") for l in legs)
+        progressed = any_filled and (bool(effective_tps_hit) or any(l.sl_moved for l in legs))
         if progressed and strat.get("cancel_pending_on_stop", True):
             for leg in legs:
                 if leg.status != "working" or leg.broker_order_ref not in orders:

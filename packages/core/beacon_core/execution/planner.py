@@ -83,31 +83,39 @@ def build_plan(sig: ParsedSignal, *, current_price: Decimal,
                candle_high: Optional[Decimal] = None,
                candle_low: Optional[Decimal] = None,
                min_stop_distance: Optional[Decimal] = None,
-               max_tp_distance_pct: Optional[Decimal] = None) -> FanoutPlan:
-    """Sources are LIMIT-only, but per leg: if the current candle has already
-    crossed an entry level, that leg is opened MARKET now (the price already
-    touched the level and may not rebound) at the live price; otherwise it rests
-    as a LIMIT at the signalled level. Decided per entry level, not per signal.
+               max_tp_distance_pct: Optional[Decimal] = None,
+               honor_market_hint: bool = True) -> FanoutPlan:
+    """Per leg: if the current candle has already crossed an entry level, that leg
+    is opened MARKET now (the price already touched it and may not rebound);
+    otherwise it rests as a LIMIT at the signalled level. Decided per entry level.
+
+    Exception — if the signal itself says "enter now" (`order_type_hint == MARKET`,
+    e.g. "BUY NOW") and `honor_market_hint` is set, enter MARKET at the live price
+    immediately instead of resting pullback limits that may never fill (#25).
     """
     entries = [sig.entry_from]
     if sig.entry_to != sig.entry_from:
         entries.append(sig.entry_to)
 
-    # Fold the live price into the candle range so an in-progress touch counts.
-    highs = [x for x in (candle_high, current_price) if x is not None]
-    lows = [x for x in (candle_low, current_price) if x is not None]
-    hi = max(highs) if highs else None
-    lo = min(lows) if lows else None
+    market_hint = honor_market_hint and (sig.order_type_hint or "").upper() == "MARKET"
+    if market_hint:
+        # The channel entered at market — collapse to a single market fill now.
+        order_plan = [("MARKET", current_price)]
+    else:
+        # Fold the live price into the candle range so an in-progress touch counts.
+        highs = [x for x in (candle_high, current_price) if x is not None]
+        lows = [x for x in (candle_low, current_price) if x is not None]
+        hi = max(highs) if highs else None
+        lo = min(lows) if lows else None
 
-    # Any already-crossed entry collapses into ONE market fill at the live price
-    # (two market legs at the same price would just double the size); each entry
-    # still waiting rests as its own LIMIT.
-    order_plan = []  # (order_type, leg_entry)
-    if any(_entry_crossed(sig.direction, e, hi, lo) for e in entries):
-        order_plan.append(("MARKET", current_price))
-    for e in entries:
-        if not _entry_crossed(sig.direction, e, hi, lo):
-            order_plan.append(("LIMIT", e))
+        # Any already-crossed entry collapses into ONE market fill at the live
+        # price; each entry still waiting rests as its own LIMIT.
+        order_plan = []  # (order_type, leg_entry)
+        if any(_entry_crossed(sig.direction, e, hi, lo) for e in entries):
+            order_plan.append(("MARKET", current_price))
+        for e in entries:
+            if not _entry_crossed(sig.direction, e, hi, lo):
+                order_plan.append(("LIMIT", e))
 
     plan = FanoutPlan(symbol=sig.symbol, direction=sig.direction, order_type="LIMIT")
 

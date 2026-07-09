@@ -245,6 +245,7 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             candle_high=candle_high, candle_low=candle_low,
             min_stop_distance=smap.min_stop_distance,
             max_tp_distance_pct=max_tp_pct if max_tp_pct > 0 else None,
+            honor_market_hint=bool(planner_cfg.get("honor_market_hint", True)),
         )
         risk = RiskConfig.from_dict(source.risk_config or acct.risk_config or {})
         instrument = InstrumentSpec(

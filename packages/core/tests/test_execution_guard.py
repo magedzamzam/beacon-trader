@@ -69,3 +69,27 @@ def test_implausible_tp_is_skipped():
 def test_no_bound_keeps_all():
     plan = build_plan(_sig([1530]), current_price=Decimal("4179.9"), max_tp_distance_pct=None)
     assert plan.legs[0].valid is True     # no bound -> not skipped by distance
+
+
+# ---- MARKET / "BUY NOW" entry hint (#25) ----
+def _msig(hint):
+    return ParsedSignal(symbol="XAUUSD", direction="SELL", entry_from=Decimal("4160"),
+                        entry_to=Decimal("4160"), sl=Decimal("4170"),
+                        tps=[Decimal("4150")], order_type_hint=hint)
+
+
+def test_market_hint_opens_market_now():
+    # price 4155 has NOT reached the 4160 sell entry, but the channel said enter now
+    plan = build_plan(_msig("MARKET"), current_price=Decimal("4155"), honor_market_hint=True)
+    assert plan.legs and all(l.order_type == "MARKET" for l in plan.legs)
+    assert all(l.entry == Decimal("4155") for l in plan.legs)
+
+
+def test_limit_hint_still_rests():
+    plan = build_plan(_msig("LIMIT"), current_price=Decimal("4155"), honor_market_hint=True)
+    assert all(l.order_type == "LIMIT" for l in plan.legs)
+
+
+def test_market_hint_can_be_disabled():
+    plan = build_plan(_msig("MARKET"), current_price=Decimal("4155"), honor_market_hint=False)
+    assert all(l.order_type == "LIMIT" for l in plan.legs)
