@@ -42,3 +42,13 @@ async def init_models() -> None:
 
     async with engine().begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # create_all makes new TABLES but never adds COLUMNS to existing ones —
+        # self-apply the additive columns (idempotent; Postgres IF NOT EXISTS).
+        for stmt in (
+            "ALTER TABLE telegram_messages "
+            "ADD COLUMN IF NOT EXISTS reply_to_message_id INTEGER",
+        ):
+            try:
+                await conn.exec_driver_sql(stmt)
+            except Exception:                       # non-Postgres / already applied
+                pass

@@ -60,7 +60,7 @@ async def _already_stored(session, chat_key: str, message_id) -> bool:
 
 
 async def _handle_message(chat_key, source_id, message_id, sender, text, msg_date,
-                          is_live: bool = True):
+                          is_live: bool = True, reply_to=None):
     """Persist one message; if it parses to a valid signal, store it.
 
     Only LIVE messages are published to the executor and AI-validated. Historical
@@ -114,6 +114,7 @@ async def _handle_message(chat_key, source_id, message_id, sender, text, msg_dat
             sender=sender, text=text, is_signal=is_signal,
             parse_status=parse_status, reject_reason=reject_reason,
             signal_id=signal_id, message_date=msg_date,
+            reply_to_message_id=int(reply_to) if reply_to is not None else None,
         )
         s.add(msg)
 
@@ -171,7 +172,8 @@ async def _backfill(client, sources: dict, limit: int = BACKFILL_LIMIT) -> None:
                     continue
                 await _handle_message(
                     chat_key, source_id, message.id, _sender_name(message), text,
-                    getattr(message, "date", None), is_live=False)
+                    getattr(message, "date", None), is_live=False,
+                    reply_to=getattr(message, "reply_to_msg_id", None))
                 count += 1
             log.info("backfill %s: scanned %s messages", chat_key, count)
         except Exception as exc:
@@ -210,7 +212,8 @@ async def main() -> None:
         try:
             await _handle_message(
                 chat_key, source_id, event.message.id, _sender_name(event.message),
-                event.message.message or "", getattr(event.message, "date", None))
+                event.message.message or "", getattr(event.message, "date", None),
+                reply_to=getattr(event.message, "reply_to_msg_id", None))
         except Exception as exc:
             log.warning("message handling failed: %s", exc)
 

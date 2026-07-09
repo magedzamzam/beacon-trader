@@ -86,6 +86,12 @@ export const api = {
   notificationsConfig: () => req("/notifications/config"),
   saveNotificationsConfig: (c) => req("/notifications/config", { method: "PUT", body: JSON.stringify(c) }),
   testNotificationChannel: (id) => post(`/notifications/test/${id}`, {}),
+  // reconciliation: channel-claimed outcomes vs bot execution
+  reconciliationSummary: (includeHistory = false) =>
+    req(`/reconciliation/summary?include_history=${includeHistory}`),
+  reconciliationRows: ({ includeHistory = false, category = "" } = {}) =>
+    req(`/reconciliation?include_history=${includeHistory}${category ? `&category=${category}` : ""}`),
+  reconciliationRefresh: (full = false) => post(`/reconciliation/refresh?full=${full}`, {}),
   // brokers
   createBroker: (b) => post("/brokers", b),
   updateBroker: (id, b) => patch(`/brokers/${id}`, b),

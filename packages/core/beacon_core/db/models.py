@@ -186,7 +186,27 @@ class TelegramMessage(Base):
     parse_status: Mapped[str] = mapped_column(String(16), default="none")  # none|parsed|rejected
     reject_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
     signal_id: Mapped[int | None] = mapped_column(ForeignKey("signals.id"), nullable=True)
+    reply_to_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # links a follow-up to its signal
     message_date: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class SignalClaim(Base):
+    """A channel's claimed outcome for a signal, parsed from a follow-up message
+    (e.g. 'TP2 HIT', 'SL HIT', 'all TP done'). Append-only; the reconciler
+    compares these claims against what the bot actually did. One row per
+    outcome message that resolved to a signal."""
+    __tablename__ = "signal_claims"
+    __table_args__ = (UniqueConstraint("message_id", name="uq_signal_claim_msg"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    signal_id: Mapped[int] = mapped_column(ForeignKey("signals.id"), index=True)
+    source_id: Mapped[int | None] = mapped_column(ForeignKey("sources.id"), nullable=True)
+    message_id: Mapped[int] = mapped_column(ForeignKey("telegram_messages.id"))
+    max_tp_claimed: Mapped[int] = mapped_column(Integer, default=0)
+    sl_claimed: Mapped[bool] = mapped_column(Boolean, default=False)
+    all_tp: Mapped[bool] = mapped_column(Boolean, default=False)
+    claimed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

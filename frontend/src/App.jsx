@@ -7,6 +7,7 @@ import Positions from "./pages/Positions";
 import Signals from "./pages/Signals";
 import History from "./pages/History";
 import Performance from "./pages/Performance";
+import Reconciliation from "./pages/Reconciliation";
 import Sources from "./pages/Sources";
 import Brokers from "./pages/Brokers";
 import Symbols from "./pages/Symbols";
@@ -18,9 +19,9 @@ import AI from "./pages/AI";
 import Configuration from "./pages/Configuration";
 
 const PAGES = { dashboard: Dashboard, positions: Positions, signals: Signals,
-  history: History, performance: Performance, sources: Sources, brokers: Brokers,
-  symbols: Symbols, risk: Risk, chart: Chart, messages: Messages,
-  activity: Activity, ai: AI, configuration: Configuration };
+  history: History, performance: Performance, reconciliation: Reconciliation,
+  sources: Sources, brokers: Brokers, symbols: Symbols, risk: Risk, chart: Chart,
+  messages: Messages, activity: Activity, ai: AI, configuration: Configuration };
 
 export default function App() {
   const [view, setView] = useState("dashboard");

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Activity, Radio, Radar, ListChecks, CandlestickChart,
          MessageSquare, GitBranch, Moon, Sun, KeyRound, LogOut,
-         Menu, X, SlidersHorizontal, BarChart3,
+         Menu, X, SlidersHorizontal, BarChart3, GitCompare,
          ChevronsLeft, ChevronsRight } from "lucide-react";
 import { api, getToken, setToken, clearToken } from "../lib/api";
 import { toggleTheme } from "../lib/theme";
@@ -20,6 +20,7 @@ const NAV = [
     { id: "activity", label: "Activity", icon: GitBranch },
     { id: "history", label: "History", icon: ListChecks },
     { id: "performance", label: "Performance", icon: BarChart3 },
+    { id: "reconciliation", label: "Reconciler", icon: GitCompare },
   ]},
   { title: "Settings", items: [
     { id: "configuration", label: "Configuration", icon: SlidersHorizontal },
