@@ -21,6 +21,8 @@ class AiConfigIn(BaseModel):
     model: str = "claude-opus-4-8"
     validate_signals: bool = True
     review_execution: bool = True
+    validation_mode: str = "block"      # off | block | background
+    review_mode: str = "block"          # off | block | background
     analyze_outcomes: bool = True
     gate_execution: bool = False
     min_confidence: float = 0.0

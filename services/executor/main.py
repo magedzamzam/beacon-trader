@@ -52,6 +52,24 @@ def _notify(event_id: str, ctx: dict) -> None:
     t.add_done_callback(_BG_TASKS.discard)
 
 
+def _review_bg(signal_id, account_id, source_id, plan_dict) -> None:
+    """Background (non-blocking) execution review: record the AI's opinion after
+    the order is placed, so it never adds latency to the hot path."""
+    async def _run():
+        try:
+            async with Session()() as s:
+                sig2 = await s.get(Signal, signal_id)
+                src2 = await s.get(Source, source_id) if source_id else None
+                if sig2 is not None:
+                    await ai_service.assess_execution(s, sig2, src2, plan_dict, account_id)
+                    await s.commit()
+        except Exception as exc:                     # pragma: no cover - defensive
+            log.debug("background exec review failed (signal %s): %s", signal_id, exc)
+    t = asyncio.create_task(_run())
+    _BG_TASKS.add(t)
+    t.add_done_callback(_BG_TASKS.discard)
+
+
 def _to_parsed(sig: Signal) -> ParsedSignal:
     return ParsedSignal(
         symbol=sig.symbol, direction=sig.direction,
@@ -270,8 +288,10 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                             sig.id, acct.id, reason)
                 return
 
-        # --- AI execution review (best-effort; optional hard gate) ---
-        if ai_cfg is not None and ai_cfg.ready and ai_cfg.review_execution:
+        # --- AI execution review ---
+        review_on = ai_cfg is not None and ai_cfg.ready and ai_cfg.review_execution
+        plan_dict = None
+        if review_on:
             risk_pct = (float(planned_risk) / float(equity) * 100.0) if equity else None
             plan_dict = {
                 "account_currency": account_ccy, "equity": str(equity),
@@ -288,22 +308,25 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                           "tp": str(l.tp), "sl": str(l.sl), "lot": str(l.lot)}
                          for l in valid],
             }
-            try:
-                a = await ai_service.assess_execution(session, sig, source, plan_dict,
-                                                      acct.id, cfg=ai_cfg)
-                await session.commit()
-                if (a is not None and ai_cfg.gate_execution and a.verdict == "reject"
-                        and (a.confidence is None
-                             or float(a.confidence) >= ai_cfg.min_confidence)):
-                    session.add(Event(kind="ai_blocked",
-                                      payload={"signal_id": sig.id, "account_id": acct.id,
-                                               "rationale": a.rationale}))
+            # BLOCK mode only: wait for the review (and optionally gate) before
+            # placing. background/off do not hold up the order.
+            if ai_cfg.review_mode == "block":
+                try:
+                    a = await ai_service.assess_execution(session, sig, source, plan_dict,
+                                                          acct.id, cfg=ai_cfg)
                     await session.commit()
-                    log.warning("signal %s acct %s: BLOCKED by AI: %s",
-                                sig.id, acct.id, a.rationale)
-                    return
-            except Exception as exc:                 # AI must never break execution
-                log.warning("AI execution review failed: %s", exc)
+                    if (a is not None and ai_cfg.gate_execution and a.verdict == "reject"
+                            and (a.confidence is None
+                                 or float(a.confidence) >= ai_cfg.min_confidence)):
+                        session.add(Event(kind="ai_blocked",
+                                          payload={"signal_id": sig.id, "account_id": acct.id,
+                                                   "rationale": a.rationale}))
+                        await session.commit()
+                        log.warning("signal %s acct %s: BLOCKED by AI: %s",
+                                    sig.id, acct.id, a.rationale)
+                        return
+                except Exception as exc:             # AI must never break execution
+                    log.warning("AI execution review failed: %s", exc)
 
         trade = Trade(signal_id=sig.id, account_id=acct.id, symbol=parsed.symbol,
                       direction=parsed.direction, status="open",
@@ -365,6 +388,9 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             _notify("order_placed", {
                 "symbol": sig.symbol, "direction": sig.direction, "account": acct.name,
                 "detail": f"{placed}/{len(valid)} legs placed"})
+        # Non-blocking review mode: run the AI for the record after placing.
+        if review_on and ai_cfg.review_mode == "background" and placed:
+            _review_bg(sig.id, acct.id, source.id if source else None, plan_dict)
         log.info("signal %s acct %s: placed %s/%s legs", sig.id, acct.id, placed, len(valid))
     finally:
         await adapter.aclose()

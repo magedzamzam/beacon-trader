@@ -109,7 +109,8 @@ def _corrected_parsed(c: dict, sig: Signal) -> Optional[ParsedSignal]:
 
 async def apply_signal_validation(session: AsyncSession, sig: Signal,
                                   source: Optional[Source],
-                                  cfg: Optional[AiConfig] = None) -> str:
+                                  cfg: Optional[AiConfig] = None,
+                                  record_only: bool = False) -> str:
     """Validate + correct a FREE-TEXT-parsed signal before it can trade.
 
     Mutates `sig` in place with the AI-corrected fields and records the outcome.
@@ -139,7 +140,8 @@ async def apply_signal_validation(session: AsyncSession, sig: Signal,
         # systematic failure (e.g. an API 400) must be visible, not silent.
         log.warning("signal %s: AI validation unavailable — executing UNVALIDATED "
                     "on parser output: %s", sig.id, exc)
-        _flag(sig, "unvalidated")
+        if not record_only:
+            _flag(sig, "unvalidated")
         await _store_row("unvalidated", None,
                          f"AI unavailable — executed on parser output. {exc}",
                          {"error": str(exc)})
@@ -151,9 +153,10 @@ async def apply_signal_validation(session: AsyncSession, sig: Signal,
     if not result.get("is_signal") or verdict == "reject":
         await _store_row(result.get("verdict") or "reject", result.get("confidence"),
                          result.get("rationale"), payload)
-        sig.status = "rejected"
-        sig.reject_reason = (result.get("rationale") or "AI rejected the signal")[:128]
-        _flag(sig, "rejected")
+        if not record_only:
+            sig.status = "rejected"
+            sig.reject_reason = (result.get("rationale") or "AI rejected the signal")[:128]
+            _flag(sig, "rejected")
         return "rejected"
 
     corr = _corrected_parsed(result.get("corrected") or {}, sig)
@@ -162,22 +165,25 @@ async def apply_signal_validation(session: AsyncSession, sig: Signal,
     if not ok_geom:
         await _store_row(result.get("verdict"), result.get("confidence"),
                          result.get("rationale"), payload)
-        sig.status = "rejected"
-        sig.reject_reason = (geom_reason or "AI correction not tradeable")[:128]
-        _flag(sig, "rejected")
+        if not record_only:
+            sig.status = "rejected"
+            sig.reject_reason = (geom_reason or "AI correction not tradeable")[:128]
+            _flag(sig, "rejected")
         return "rejected"
 
-    # Apply the corrected, geometry-checked signal.
-    sig.symbol = corr.symbol
-    sig.direction = corr.direction
-    sig.entry_from = corr.entry_from
-    sig.entry_to = corr.entry_to
-    sig.sl = corr.sl
-    sig.tps = [str(t) for t in corr.tps]
-    if corr.order_type_hint:
-        sig.order_type = corr.order_type_hint
-    sig.status = "validated"
-    _flag(sig, "validated", payload.get("corrections", []))
+    # Apply the corrected, geometry-checked signal (skipped in record-only /
+    # background mode — the order already went out on the parser output).
+    if not record_only:
+        sig.symbol = corr.symbol
+        sig.direction = corr.direction
+        sig.entry_from = corr.entry_from
+        sig.entry_to = corr.entry_to
+        sig.sl = corr.sl
+        sig.tps = [str(t) for t in corr.tps]
+        if corr.order_type_hint:
+            sig.order_type = corr.order_type_hint
+        sig.status = "validated"
+        _flag(sig, "validated", payload.get("corrections", []))
     await _store_row(result.get("verdict"), result.get("confidence"),
                      result.get("rationale"), payload)
     return "validated"

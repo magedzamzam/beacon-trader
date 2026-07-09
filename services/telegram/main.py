@@ -59,6 +59,27 @@ async def _already_stored(session, chat_key: str, message_id) -> bool:
         TelegramMessage.message_id == int(message_id)))).first() is not None
 
 
+_BG_TASKS: set = set()
+
+
+def _validate_bg(signal_id, source_id):
+    """Background (non-blocking) signal validation: record the AI's opinion for
+    the reconciler/analysis without waiting for it or mutating the traded signal."""
+    async def _run():
+        try:
+            async with Session()() as s2:
+                sig2 = await s2.get(Signal, signal_id)
+                src2 = await s2.get(Source, source_id) if source_id else None
+                if sig2 is not None:
+                    await ai_service.apply_signal_validation(s2, sig2, src2, record_only=True)
+                    await s2.commit()
+        except Exception as exc:                     # never affect ingestion
+            log.debug("background validation failed (signal %s): %s", signal_id, exc)
+    t = asyncio.create_task(_run())
+    _BG_TASKS.add(t)
+    t.add_done_callback(_BG_TASKS.discard)
+
+
 async def _handle_message(chat_key, source_id, message_id, sender, text, msg_date,
                           is_live: bool = True, reply_to=None):
     """Persist one message; if it parses to a valid signal, store it.
@@ -69,6 +90,7 @@ async def _handle_message(chat_key, source_id, message_id, sender, text, msg_dat
     hammer the broker's session rate limit.
     """
     ai_rejected = False
+    cfg = None
     async with Session()() as s:
         if await _already_stored(s, chat_key, message_id):
             return
@@ -125,14 +147,18 @@ async def _handle_message(chat_key, source_id, message_id, sender, text, msg_dat
         # not published.
         new_valid = (parse_status == "parsed" and signal_id is not None)
         if new_valid and is_live:
-            sig_row = await s.get(Signal, signal_id)
-            source = await s.get(Source, source_id) if source_id else None
-            try:
-                status = await ai_service.apply_signal_validation(s, sig_row, source)
-                if status == "rejected":
-                    ai_rejected = True
-            except Exception as exc:                     # never block ingestion
-                log.warning("AI signal validation failed: %s", exc)
+            cfg = await ai_service.load_config(s)
+            # Only BLOCK mode waits for the AI (and can correct/reject) before the
+            # signal is published. background/off don't hold up the order.
+            if cfg.validation_mode == "block":
+                sig_row = await s.get(Signal, signal_id)
+                source = await s.get(Source, source_id) if source_id else None
+                try:
+                    status = await ai_service.apply_signal_validation(s, sig_row, source, cfg=cfg)
+                    if status == "rejected":
+                        ai_rejected = True
+                except Exception as exc:                 # never block ingestion
+                    log.warning("AI signal validation failed: %s", exc)
 
         await s.commit()
 
@@ -140,6 +166,9 @@ async def _handle_message(chat_key, source_id, message_id, sender, text, msg_dat
     if is_live and parse_status == "parsed" and signal_id is not None and not ai_rejected:
         await bus.publish(CH_SIGNAL_VALID, {"signal_id": signal_id})
         log.info("signal %s published (%s %s)", signal_id, parsed.direction, parsed.symbol)
+        # Non-blocking mode: fire the AI afterwards, for the record only.
+        if cfg is not None and cfg.validation_mode == "background":
+            _validate_bg(signal_id, source_id)
     elif ai_rejected:
         log.info("signal %s rejected by AI validation", signal_id)
     elif parse_status == "rejected":

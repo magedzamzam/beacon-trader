@@ -70,8 +70,20 @@ export default function AI() {
             </Field>
           </div>
           <div className="flex gap-8 flex-wrap">
-            <Field label="Validate signals"><Toggle checked={cfg.validate_signals} onChange={v => set("validate_signals", v)} /></Field>
-            <Field label="Review executions"><Toggle checked={cfg.review_execution} onChange={v => set("review_execution", v)} /></Field>
+            <Field label="Signal validation" hint="block waits (adds latency) · background = record only · off">
+              <Select value={cfg.validation_mode || "block"} onChange={e => set("validation_mode", e.target.value)}>
+                <option value="off">Off</option>
+                <option value="block">Block (wait for AI)</option>
+                <option value="background">Background (non-blocking)</option>
+              </Select>
+            </Field>
+            <Field label="Execution review" hint="uses the slow model — 'background' removes the latency">
+              <Select value={cfg.review_mode || "block"} onChange={e => set("review_mode", e.target.value)}>
+                <option value="off">Off</option>
+                <option value="block">Block (wait for AI)</option>
+                <option value="background">Background (non-blocking)</option>
+              </Select>
+            </Field>
             <Field label="Analyze outcomes"><Toggle checked={cfg.analyze_outcomes} onChange={v => set("analyze_outcomes", v)} /></Field>
           </div>
 

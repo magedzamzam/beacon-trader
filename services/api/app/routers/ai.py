@@ -42,6 +42,8 @@ async def put_config(body: AiConfigIn, db: AsyncSession = Depends(get_db)):
         "enabled": body.enabled, "provider": body.provider, "model": body.model,
         "validate_signals": body.validate_signals,
         "review_execution": body.review_execution,
+        "validation_mode": body.validation_mode,
+        "review_mode": body.review_mode,
         "analyze_outcomes": body.analyze_outcomes,
         "gate_execution": body.gate_execution,
         "min_confidence": body.min_confidence,

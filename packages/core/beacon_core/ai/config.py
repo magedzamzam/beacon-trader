@@ -18,10 +18,19 @@ class AiConfig:
     enabled: bool = False               # master switch for AI assessments
     provider: str = "anthropic"
     model: str = "claude-opus-4-8"      # used for execution review + outcome analysis
-    # per-stage toggles
+    # per-stage toggles (derived from the modes below; kept for existing checks
+    # that just ask "is this stage enabled at all")
     validate_signals: bool = True       # assess signals as they arrive
     review_execution: bool = True       # sanity-check the plan before placing
     analyze_outcomes: bool = True       # post-mortem closed trades
+    # Hot-path AI modes: "off" | "block" | "background".
+    #   block      — run the AI and WAIT for it before publishing / placing (adds
+    #                 latency; can correct/gate). Today's behaviour.
+    #   background — publish / place immediately, then run the AI for the record
+    #                 only (no correction, no gate) — removes the latency.
+    #   off        — don't run it at all.
+    validation_mode: str = "block"      # signal validation (Telegram hot path)
+    review_mode: str = "block"          # execution review (executor hot path)
     # gate: if True, a `reject` verdict blocks execution
     gate_execution: bool = False
     min_confidence: float = 0.0         # gate only fires at/above this confidence
@@ -45,6 +54,8 @@ class AiConfig:
             "model": self.model,
             "validate_signals": self.validate_signals,
             "review_execution": self.review_execution,
+            "validation_mode": self.validation_mode,
+            "review_mode": self.review_mode,
             "analyze_outcomes": self.analyze_outcomes,
             "gate_execution": self.gate_execution,
             "min_confidence": self.min_confidence,
@@ -61,12 +72,25 @@ def resolve_ai_config(stored: Optional[dict]) -> AiConfig:
     settings = get_settings()
 
     _defaults = AiConfig()
+
+    def _mode(key, legacy_key):
+        m = stored.get(key)
+        if m in ("off", "block", "background"):
+            return m
+        # legacy: derive from the old boolean toggle (True -> block, False -> off)
+        return "block" if stored.get(legacy_key, True) else "off"
+
+    validation_mode = _mode("validation_mode", "validate_signals")
+    review_mode = _mode("review_mode", "review_execution")
+
     cfg = AiConfig(
         enabled=bool(stored.get("enabled", False)),
         provider=stored.get("provider", "anthropic"),
         model=stored.get("model") or settings.ai_default_model,
-        validate_signals=bool(stored.get("validate_signals", True)),
-        review_execution=bool(stored.get("review_execution", True)),
+        validation_mode=validation_mode,
+        review_mode=review_mode,
+        validate_signals=(validation_mode != "off"),
+        review_execution=(review_mode != "off"),
         analyze_outcomes=bool(stored.get("analyze_outcomes", True)),
         gate_execution=bool(stored.get("gate_execution", False)),
         min_confidence=float(stored.get("min_confidence", 0.0) or 0.0),
