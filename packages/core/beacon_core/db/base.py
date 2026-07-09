@@ -47,6 +47,8 @@ async def init_models() -> None:
         for stmt in (
             "ALTER TABLE telegram_messages "
             "ADD COLUMN IF NOT EXISTS reply_to_message_id INTEGER",
+            "ALTER TABLE sources "
+            "ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT FALSE",
         ):
             try:
                 await conn.exec_driver_sql(stmt)

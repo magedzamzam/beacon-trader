@@ -70,6 +70,7 @@ class Source(Base):
     strategy: Mapped[dict] = mapped_column(JSON, default=dict)
     risk_config: Mapped[dict] = mapped_column(JSON, default=dict)  # overrides account default
     account_map: Mapped[list] = mapped_column(JSON, default=list)  # [account_id, ...]
+    archived: Mapped[bool] = mapped_column(Boolean, default=False)  # soft-delete: hide but keep attribution
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

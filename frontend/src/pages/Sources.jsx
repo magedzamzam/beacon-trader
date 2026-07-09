@@ -15,17 +15,25 @@ export default function Sources() {
   const [accounts, setAccounts] = useState([]);
   const [err, setErr] = useState(null);
   const [editing, setEditing] = useState(null);   // source object or "new"
+  const [showArchived, setShowArchived] = useState(false);
 
   const load = async () => {
-    try { setSources(await api.sources()); setAccounts(await api.accounts()); }
+    try { setSources(await api.sources(showArchived)); setAccounts(await api.accounts()); }
     catch (e) { setErr(e.message); }
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [showArchived]);
 
   const remove = async (s) => {
-    if (!window.confirm(`Delete source “${s.name}”? Its signals and messages are kept but detached from it.`)) return;
+    if (!window.confirm(`Archive source “${s.name}”? It's removed from active lists and stops trading, `
+      + `but its trade history and per-source attribution are kept. You can restore it later.`)) return;
     setErr(null);
     try { await api.deleteSource(s.id); await load(); }
+    catch (e) { setErr(e.message); }
+  };
+
+  const restore = async (s) => {
+    setErr(null);
+    try { await api.updateSource(s.id, { archived: false }); await load(); }
     catch (e) { setErr(e.message); }
   };
 
@@ -33,9 +41,13 @@ export default function Sources() {
     <div className="space-y-6">
       <ErrorNote>{err}</ErrorNote>
       <Card>
-        <div className="px-4 py-3 border-b border-edge flex items-center justify-between">
+        <div className="px-4 py-3 border-b border-edge flex items-center justify-between gap-3 flex-wrap">
           <div className="text-sm font-medium">Signal sources</div>
-          <Button onClick={() => setEditing("new")}><Plus className="w-4 h-4 inline -mt-0.5" /> Add source</Button>
+          <div className="flex items-center gap-3">
+            <label className="flex items-center gap-2 text-xs text-muted">Show archived
+              <Toggle checked={showArchived} onChange={setShowArchived} /></label>
+            <Button onClick={() => setEditing("new")}><Plus className="w-4 h-4 inline -mt-0.5" /> Add source</Button>
+          </div>
         </div>
         {!sources.length ? <Empty>No sources. Add a Telegram channel or a webhook to start.</Empty> : (
           <table className="w-full">
@@ -45,17 +57,25 @@ export default function Sources() {
             </tr></thead>
             <tbody>
               {sources.map(s => (
-                <tr key={s.id} className="border-b border-edge/60">
-                  <Td>{s.name}</Td>
+                <tr key={s.id} className={`border-b border-edge/60 ${s.archived ? "opacity-50" : ""}`}>
+                  <Td>{s.name}{s.archived && <span className="text-[10px] text-muted ml-1">archived</span>}</Td>
                   <Td><Badge>{s.kind}</Badge></Td>
                   <Td mono>{s.external_id || "—"}</Td>
                   <Td right mono>{(s.account_map || []).length}</Td>
-                  <Td><Toggle checked={s.enabled_for_trading}
-                    onChange={async v => { await api.updateSource(s.id, { enabled_for_trading: v }); load(); }} /></Td>
+                  <Td>{s.archived
+                    ? <span className="text-xs text-muted">—</span>
+                    : <Toggle checked={s.enabled_for_trading}
+                        onChange={async v => { await api.updateSource(s.id, { enabled_for_trading: v }); load(); }} />}</Td>
                   <Td right>
                     <div className="flex items-center gap-1 justify-end">
-                      <Button variant="ghost" onClick={() => setEditing(s)}><Pencil className="w-4 h-4" /></Button>
-                      <Button variant="danger" onClick={() => remove(s)}><Trash2 className="w-4 h-4" /></Button>
+                      {s.archived ? (
+                        <Button variant="ghost" onClick={() => restore(s)}>Restore</Button>
+                      ) : (
+                        <>
+                          <Button variant="ghost" onClick={() => setEditing(s)}><Pencil className="w-4 h-4" /></Button>
+                          <Button variant="danger" onClick={() => remove(s)}><Trash2 className="w-4 h-4" /></Button>
+                        </>
+                      )}
                     </div>
                   </Td>
                 </tr>

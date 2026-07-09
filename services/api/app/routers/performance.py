@@ -68,7 +68,7 @@ async def by_source(account_id: int | None = None, min_significant: int = 30,
          .select_from(Leg)
          .join(Trade, Trade.id == Leg.trade_id)
          .join(Signal, Signal.id == Trade.signal_id)
-         .join(Source, Source.id == Signal.source_id)
+         .outerjoin(Source, Source.id == Signal.source_id)   # keep orphaned (source-deleted) trades
          .where(Leg.status == "closed")
          .group_by(Source.id, Source.name, Leg.tp_index, Leg.outcome))
     if account_id is not None:
@@ -77,7 +77,7 @@ async def by_source(account_id: int | None = None, min_significant: int = 30,
     rows = (await db.execute(q)).all()
     agg: dict = {}
     for sid, sname, tp_index, outcome, cnt, pl in rows:
-        s = agg.setdefault(sid, {"source_id": sid, "name": sname, "pl": 0.0,
+        s = agg.setdefault(sid, {"source_id": sid, "name": sname or "Unattributed", "pl": 0.0,
                                  "tp_hits": {}, "sl_hits": 0})
         s["pl"] += float(pl)
         if outcome == "tp_hit":
@@ -90,7 +90,7 @@ async def by_source(account_id: int | None = None, min_significant: int = 30,
                  func.coalesce(func.sum(case((Trade.realized_pl > 0, 1), else_=0)), 0))
           .select_from(Trade)
           .join(Signal, Signal.id == Trade.signal_id)
-          .join(Source, Source.id == Signal.source_id)
+          .outerjoin(Source, Source.id == Signal.source_id)   # include orphaned trades
           .where(Trade.status == "closed")
           .group_by(Source.id, Source.name))
     if account_id is not None:
@@ -107,7 +107,7 @@ async def by_source(account_id: int | None = None, min_significant: int = 30,
 
     for sid, sname, n, w in trows:
         n, w = int(n), int(w)
-        s = agg.setdefault(sid, {"source_id": sid, "name": sname, "pl": 0.0,
+        s = agg.setdefault(sid, {"source_id": sid, "name": sname or "Unattributed", "pl": 0.0,
                                  "tp_hits": {}, "sl_hits": 0})
         post = posterior(w, n, base_rate) if n else None
         s["n_trades"] = n
