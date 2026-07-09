@@ -14,6 +14,7 @@ import Indicators from "./Indicators";
 import Analysis from "./Analysis";
 import TradingHours from "./TradingHours";
 import Notifications from "./Notifications";
+import SystemHealth from "./SystemHealth";
 import Currency from "./settings/Currency";
 import Placeholder from "../components/Placeholder";
 
@@ -162,17 +163,8 @@ const GROUPS = [
         ),
       },
       {
-        id: "system", label: "System Health", icon: Activity, render: () => (
-          <Placeholder icon={Activity} title="System Health"
-            description="Live operational status of the services behind the bot."
-            planned={[
-              "Service status: API, worker, database, broker links",
-              "Queue depth and processing latency",
-              "Build / version info and changelog",
-              "Restart and maintenance-mode controls",
-              "Live log tail and error rate",
-            ]} />
-        ),
+        id: "system", label: "System Health", icon: Activity,
+        render: () => <SystemHealth />,
       },
     ],
   },

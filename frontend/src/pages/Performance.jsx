@@ -51,7 +51,6 @@ export default function Performance({ account = "" }) {
 
   const { data: sum } = useData(() => api.perfSummary(account, range), [account, fromIso, toIso]);
   const { data: bySrc } = useData(() => api.perfBySource(account, range), [account, fromIso, toIso]);
-  const { data: lat } = useData(() => api.execLatency({ from: fromIso, to: toIso }), [fromIso, toIso]);
 
   return (
     <div className="space-y-6">
@@ -84,22 +83,6 @@ export default function Performance({ account = "" }) {
             <KPI label="Profit factor" value={sum.profit_factor ?? "—"} sub="gross win / loss" />
             <KPI label="Closed legs" value={sum.closed_legs} />
           </div>
-
-          {lat && (
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-              <KPI label="Entry latency (median)" tone="beacon"
-                value={lat.total ? `${lat.total.median}s` : "—"}
-                sub={lat.total ? `avg ${lat.total.avg}s · p90 ${lat.total.p90}s` : "signal → order"} />
-              <KPI label="Entry latency (avg)"
-                value={lat.total ? `${lat.total.avg}s` : "—"}
-                sub={`${lat.n_placed}/${lat.n_signals} signals placed`} />
-              <KPI label="AI validation (median)" tone={lat.ai ? "warn" : "muted"}
-                value={lat.ai ? `${lat.ai.median}s` : "off / 0s"}
-                sub={lat.ai ? `avg ${lat.ai.avg}s · ${lat.ai.n} calls` : "no AI on these signals"} />
-              <KPI label="Latency range"
-                value={lat.total ? `${lat.total.min}–${lat.total.max}s` : "—"} sub="min–max signal → order" />
-            </div>
-          )}
 
           <Card>
             <div className="px-4 py-3 border-b border-edge">
