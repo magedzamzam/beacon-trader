@@ -1,20 +1,7 @@
 import { useEffect, useState } from "react";
 import { Activity } from "lucide-react";
-import { Card, KPI, Badge, Empty } from "../components/ui";
+import { Card, Badge, Empty } from "../components/ui";
 import { api } from "../lib/api";
-import { useData } from "./_useData";
-
-const LAT_PRESETS = [["all", "All time"], ["today", "Today"], ["7d", "7 days"], ["30d", "30 days"]];
-
-function latRange(id) {
-  const now = new Date();
-  const addD = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
-  const sod = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
-  if (id === "today") return [sod(now), null];
-  if (id === "7d") return [addD(now, -7), null];
-  if (id === "30d") return [addD(now, -30), null];
-  return [null, null];
-}
 
 function SvcRow({ name, s }) {
   const ok = s?.ok;
@@ -29,11 +16,9 @@ function SvcRow({ name, s }) {
   );
 }
 
-/** Configuration → System Health: live service status (from heartbeats) and the
- *  signal→order execution latency (incl. the AI-validation portion). */
+/** Configuration → System Health: live status of the services behind the bot. */
 export default function SystemHealth() {
   const [health, setHealth] = useState(null);
-  const [preset, setPreset] = useState("all");
 
   useEffect(() => {
     let alive = true;
@@ -43,11 +28,6 @@ export default function SystemHealth() {
     const t = setInterval(poll, 8000);
     return () => { alive = false; clearInterval(t); };
   }, []);
-
-  const [from, to] = latRange(preset);
-  const fromIso = from ? from.toISOString() : "";
-  const toIso = to ? to.toISOString() : "";
-  const { data: lat } = useData(() => api.execLatency({ from: fromIso, to: toIso }), [fromIso, toIso]);
 
   return (
     <div className="space-y-5">
@@ -65,36 +45,6 @@ export default function SystemHealth() {
         </div>
         <div className="px-4 py-2 text-[11px] text-muted border-t border-edge">
           Worker liveness from heartbeats (no beat &lt; 30s = down). Polls every 8s.
-        </div>
-      </Card>
-
-      <Card>
-        <div className="px-4 py-3 border-b border-edge flex items-center justify-between gap-2 flex-wrap">
-          <div className="text-sm font-medium">Signal → order latency</div>
-          <div className="flex gap-1.5">
-            {LAT_PRESETS.map(([id, label]) => (
-              <button key={id} onClick={() => setPreset(id)}
-                className={`px-2 py-0.5 rounded text-[11px] ${preset === id ? "bg-beacon/15 text-beacon" : "bg-panel2 text-muted hover:text-ink"}`}>
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-        {!lat ? <Empty>Loading…</Empty> : (
-          <div className="p-4 grid grid-cols-2 lg:grid-cols-4 gap-4">
-            <KPI label="Median" tone="beacon" value={lat.total ? `${lat.total.median}s` : "—"}
-              sub={lat.total ? `avg ${lat.total.avg}s` : "received → on broker"} />
-            <KPI label="p90" value={lat.total ? `${lat.total.p90}s` : "—"}
-              sub={`${lat.n_placed}/${lat.n_signals} signals placed`} />
-            <KPI label="AI validation (median)" tone={lat.ai ? "warn" : "muted"}
-              value={lat.ai ? `${lat.ai.median}s` : "off / 0s"}
-              sub={lat.ai ? `avg ${lat.ai.avg}s · ${lat.ai.n} calls` : "no AI on these signals"} />
-            <KPI label="Range" value={lat.total ? `${lat.total.min}–${lat.total.max}s` : "—"} sub="min–max" />
-          </div>
-        )}
-        <div className="px-4 py-2 text-[11px] text-muted border-t border-edge">
-          Total = first order placed − signal received. AI portion isolates the validation round-trip
-          (0 when AI validation is off). Pick a range to compare before/after a config change.
         </div>
       </Card>
 
