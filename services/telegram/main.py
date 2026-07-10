@@ -28,6 +28,8 @@ from beacon_core.db.base import Session, init_models
 from beacon_core.db.models import Signal, Source, TelegramMessage
 from beacon_core.parsing import parse
 from beacon_core.execution.planner import validate_signal
+from beacon_core.tasks import spawn_bg
+from beacon_core.timeutil import utcnow
 
 log = get_logger("telegram")
 settings = get_settings()
@@ -59,9 +61,6 @@ async def _already_stored(session, chat_key: str, message_id) -> bool:
         TelegramMessage.message_id == int(message_id)))).first() is not None
 
 
-_BG_TASKS: set = set()
-
-
 def _validate_bg(signal_id, source_id):
     """Background (non-blocking) signal validation: record the AI's opinion for
     the reconciler/analysis without waiting for it or mutating the traded signal."""
@@ -75,9 +74,7 @@ def _validate_bg(signal_id, source_id):
                     await s2.commit()
         except Exception as exc:                     # never affect ingestion
             log.debug("background validation failed (signal %s): %s", signal_id, exc)
-    t = asyncio.create_task(_run())
-    _BG_TASKS.add(t)
-    t.add_done_callback(_BG_TASKS.discard)
+    spawn_bg(_run())
 
 
 async def _handle_message(chat_key, source_id, message_id, sender, text, msg_date,
@@ -108,7 +105,7 @@ async def _handle_message(chat_key, source_id, message_id, sender, text, msg_dat
             dedupe = _hash(chat_key, text)
             recent = (await s.execute(select(Signal).where(
                 Signal.dedupe_hash == dedupe,
-                Signal.created_at >= dt.datetime.now(dt.timezone.utc)
+                Signal.created_at >= utcnow()
                 - dt.timedelta(minutes=DEDUPE_WINDOW_MIN)))).scalars().first()
             if recent:
                 signal_id = recent.id

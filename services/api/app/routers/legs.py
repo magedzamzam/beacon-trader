@@ -1,4 +1,3 @@
-import datetime as dt
 from decimal import Decimal
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
@@ -6,9 +5,10 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from beacon_core.db.models import Account, Broker, Event, Leg, Trade
-from beacon_core.brokers import get_adapter, resolve_credentials
+from beacon_core.db.models import Account, Event, Leg, Trade
+from beacon_core.brokers import build_adapter
 from beacon_core.brokers.types import ModifyPositionRequest
+from beacon_core.timeutil import utcnow
 from ..deps import get_db
 from ..auth import require_token
 
@@ -16,16 +16,10 @@ router = APIRouter(prefix="/legs", tags=["legs"], dependencies=[Depends(require_
 OPEN = ("open", "working", "pending")
 
 
-def _utcnow():
-    return dt.datetime.now(dt.timezone.utc)
-
-
 async def _adapter_for_account(db, account_id):
-    acct = await db.get(Account, account_id)
-    broker = await db.get(Broker, acct.broker_id)
-    creds = resolve_credentials(broker.credentials_ref); creds.setdefault("is_demo", broker.is_demo)
-    creds["account_id"] = acct.broker_account_id   # act on the mapped account
-    return get_adapter(broker.type, creds)
+    acct = await db.get(Account, account_id)      # act on the mapped account
+    _, adapter = await build_adapter(db, acct)
+    return adapter
 
 
 async def _trade_account(db, leg):
@@ -35,7 +29,7 @@ async def _trade_account(db, leg):
 
 async def _do_close(adapter, leg, db, trade):
     res = await adapter.close_position(leg.broker_position_ref)
-    leg.status = "closed"; leg.outcome = "manual"; leg.closed_at = _utcnow()
+    leg.status = "closed"; leg.outcome = "manual"; leg.closed_at = utcnow()
     if res and res.close_price is not None: leg.close_price = res.close_price
     if res and res.realized_pl is not None: leg.realized_pl = res.realized_pl
     db.add(Event(trade_id=trade.id, leg_id=leg.id, kind="closed_by_user", payload={}))
@@ -43,7 +37,7 @@ async def _do_close(adapter, leg, db, trade):
 
 async def _do_cancel(adapter, leg, db, trade):
     await adapter.cancel_order(leg.broker_order_ref)
-    leg.status = "cancelled"; leg.outcome = "manual"; leg.closed_at = _utcnow()
+    leg.status = "cancelled"; leg.outcome = "manual"; leg.closed_at = utcnow()
     db.add(Event(trade_id=trade.id, leg_id=leg.id, kind="cancelled_by_user", payload={}))
 
 

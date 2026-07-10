@@ -3,7 +3,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from beacon_core.db.models import Account, Broker, Leg, Trade
-from beacon_core.brokers import get_adapter, resolve_credentials
+from beacon_core.brokers import make_adapter
 from ..deps import get_db
 from ..auth import require_token
 from ..schemas import AccountIn
@@ -53,8 +53,7 @@ async def account_performance(account_id: int, db: AsyncSession = Depends(get_db
     try:
         b = await db.get(Broker, acct.broker_id)
         if b:
-            creds = resolve_credentials(b.credentials_ref); creds.setdefault("is_demo", b.is_demo)
-            adapter = get_adapter(b.type, creds)
+            adapter = make_adapter(b)
             try:
                 live = await adapter.list_accounts()
             finally:

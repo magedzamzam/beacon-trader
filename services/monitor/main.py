@@ -13,7 +13,6 @@ should read /history for exact P&L attribution.
 from __future__ import annotations
 
 import asyncio
-import datetime as dt
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -25,17 +24,18 @@ from beacon_core.logging import get_logger
 from beacon_core.health import run_health_server
 from beacon_core.db.base import Session, init_models
 from beacon_core.db.models import (Account, Broker, Event, Leg, PositionActivity,
-                                   Signal, Source, SymbolMap, Trade)
-from beacon_core.brokers import get_adapter, resolve_credentials
+                                   Signal, Source, Trade)
+from beacon_core.brokers import build_adapter, symbol_map
 from beacon_core.brokers.types import AuthError, ModifyPositionRequest
 from beacon_core.strategy.rules import PositionCtx, evaluate, DEFAULT_SL_RULES
 from beacon_core.settings_store import get_setting
+from beacon_core.tasks import spawn_bg
+from beacon_core.timeutil import utcnow, parse_iso_utc
 from beacon_core import notifications as notify
 
 log = get_logger("monitor")
 settings = get_settings()
 bus = Bus()
-_BG_TASKS: set = set()
 
 OPEN_LEG = ("pending", "working", "open")
 
@@ -49,18 +49,12 @@ def _notify(event_id: str, ctx: dict) -> None:
                 await notify.notify(s, event_id, ctx)
         except Exception as exc:                 # pragma: no cover - defensive
             log.debug("notify %s failed: %s", event_id, exc)
-    t = asyncio.create_task(_run())
-    _BG_TASKS.add(t)
-    t.add_done_callback(_BG_TASKS.discard)
+    spawn_bg(_run())
 
 # |realized P&L| at or below this (in the ACCOUNT currency) counts as a
 # break-even close. The primary BE signal is the SL being ratcheted to ~entry
 # and then hit; this catches a residual-near-zero close too.
 BE_MONEY_TOL = Decimal("0.05")
-
-
-def _utcnow():
-    return dt.datetime.now(dt.timezone.utc)
 
 
 def _is_close_txn(t: dict) -> bool:
@@ -70,17 +64,6 @@ def _is_close_txn(t: dict) -> bool:
     if note:
         return "clos" in note
     return (t.get("type") or "") in ("TRADE", "DEAL", "POSITION")
-
-
-def _parse_dt(v):
-    """Parse a broker ISO timestamp into a tz-aware UTC datetime (or None)."""
-    if not v:
-        return None
-    try:
-        d = dt.datetime.fromisoformat(str(v).replace("Z", "+00:00"))
-        return d if d.tzinfo else d.replace(tzinfo=dt.timezone.utc)
-    except (ValueError, AttributeError):
-        return None
 
 
 def _outcome_from_source(src) -> str | None:
@@ -123,11 +106,8 @@ async def _adapter_for(session, account_id: int):
     acct = await session.get(Account, account_id)
     broker = await session.get(Broker, acct.broker_id)
     adapter = _ADAPTERS.get(account_id)
-    if adapter is None:
-        creds = resolve_credentials(broker.credentials_ref)
-        creds.setdefault("is_demo", broker.is_demo)
-        creds["account_id"] = acct.broker_account_id   # reconcile the mapped account
-        adapter = get_adapter(broker.type, creds)
+    if adapter is None:                                # reconcile the mapped account
+        _, adapter = await build_adapter(session, acct)
         _ADAPTERS[account_id] = adapter
     return acct, broker, adapter
 
@@ -139,12 +119,6 @@ async def _evict_adapter(account_id: int) -> None:
             await adapter.aclose()
         except Exception:
             pass
-
-
-async def _symbol_map(session, broker_id, symbol):
-    return (await session.execute(select(SymbolMap).where(
-        SymbolMap.broker_id == broker_id,
-        SymbolMap.internal_symbol == symbol))).scalar_one_or_none()
 
 
 def _classify_outcome(close_px, entry_px, tp, sl, sl_moved, tol, realized_pl=None) -> str:
@@ -226,7 +200,7 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
 
     acct, broker, adapter = await _adapter_for(session, trade.account_id)
     try:
-        smap = await _symbol_map(session, broker.id, trade.symbol)
+        smap = await symbol_map(session, broker.id, trade.symbol)
         if not smap:
             return
         quote = await adapter.get_quote(smap.broker_epic)
@@ -413,7 +387,7 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
             leg.close_price = close_px
             leg.realized_pl = realized_pl
             leg.status = "closed"
-            leg.closed_at = _utcnow()
+            leg.closed_at = utcnow()
             if m is not None and m.get("deal_id") and not leg.broker_position_ref:
                 leg.broker_position_ref = str(m.get("deal_id"))
             session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="closed",
@@ -451,7 +425,7 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                 leg = leg_by_deal.get(did)
                 if leg is None:
                     continue
-                at = _parse_dt(a.get("date"))
+                at = parse_iso_utc(a.get("date"))
                 atype = a.get("type")
                 key = (did, at, atype)
                 if key in seen:
@@ -481,7 +455,7 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                 # Still resting on the book -> only TTL can act on it.
                 if leg.broker_order_ref in orders:
                     if ttl_min and ttl_min > 0:
-                        age = (_utcnow() - leg.created_at).total_seconds() / 60.0
+                        age = (utcnow() - leg.created_at).total_seconds() / 60.0
                         if age > ttl_min:
                             # Never expire something that actually filled+closed.
                             if not await _close_leg(leg, await _transactions(), require_txn=True):
@@ -491,7 +465,7 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                                     pass
                                 leg.status = "expired"
                                 leg.outcome = "expired"
-                                leg.closed_at = _utcnow()
+                                leg.closed_at = utcnow()
                                 session.add(Event(trade_id=trade.id, leg_id=leg.id,
                                                   kind="expired", payload={"age_min": age}))
                     continue
@@ -516,7 +490,7 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                 elif not await _close_leg(leg, await _transactions(), require_txn=True):
                     leg.status = "cancelled"
                     leg.outcome = "cancelled"
-                    leg.closed_at = _utcnow()
+                    leg.closed_at = utcnow()
                     session.add(Event(trade_id=trade.id, leg_id=leg.id,
                                       kind="cancelled_at_broker", payload={}))
                 continue
@@ -580,7 +554,7 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                 if ok:
                     leg.status = "cancelled"
                     leg.outcome = "cancelled"
-                    leg.closed_at = _utcnow()
+                    leg.closed_at = utcnow()
                     session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="cancelled_by_rule",
                                       payload={"reason": "trade progressed (TP hit / SL ratcheted); stale limit entry"}))
                     _notify("order_cancelled", {

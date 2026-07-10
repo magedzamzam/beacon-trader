@@ -3,7 +3,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from beacon_core.db.models import Broker
-from beacon_core.brokers import get_adapter, resolve_credentials
+from beacon_core.brokers import make_adapter
 from beacon_core.crypto import encrypt, has_key
 from ..deps import get_db
 from ..auth import require_token
@@ -60,8 +60,7 @@ async def broker_health(broker_id: int, db: AsyncSession = Depends(get_db)):
     b = await db.get(Broker, broker_id)
     if not b:
         raise HTTPException(404, "broker not found")
-    creds = resolve_credentials(b.credentials_ref); creds.setdefault("is_demo", b.is_demo)
-    adapter = get_adapter(b.type, creds)
+    adapter = make_adapter(b)
     try:
         return await adapter.healthcheck()
     finally:
@@ -74,8 +73,7 @@ async def broker_live_accounts(broker_id: int, db: AsyncSession = Depends(get_db
     b = await db.get(Broker, broker_id)
     if not b:
         raise HTTPException(404, "broker not found")
-    creds = resolve_credentials(b.credentials_ref); creds.setdefault("is_demo", b.is_demo)
-    adapter = get_adapter(b.type, creds)
+    adapter = make_adapter(b)
     try:
         return await adapter.list_accounts()
     except Exception as exc:

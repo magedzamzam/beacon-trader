@@ -11,21 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from beacon_core.analysis.claims import link_claims
 from beacon_core.analysis.reconcile import reconcile_signal
 from beacon_core.db.models import Leg, SignalClaim, Signal, Source, Trade
+from beacon_core.timeutil import parse_iso_utc as _parse_dt
 from ..deps import get_db
 from ..auth import require_token
 
 router = APIRouter(prefix="/reconciliation", tags=["reconciliation"],
                    dependencies=[Depends(require_token)])
-
-
-def _parse_dt(s):
-    if not s:
-        return None
-    try:
-        d = dt.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
-        return d if d.tzinfo else d.replace(tzinfo=dt.timezone.utc)
-    except (ValueError, TypeError):
-        return None
 
 
 async def _build_rows(db, frm, to, source_id, include_history):

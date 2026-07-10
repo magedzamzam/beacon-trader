@@ -19,7 +19,7 @@ from .types import (
     OrderStatus, OrderType, PlaceOrderRequest, RateLimitError, to_dec,
 )
 from ..logging import get_logger
-from datetime import datetime
+from ..timeutil import parse_iso_utc
 
 log = get_logger("capital")
 
@@ -270,16 +270,10 @@ class CapitalComAdapter(BrokerAdapter):
                 or pos.get("createdDate")
                 or pos.get("openDateTime")
             )
-            opened_at = None
-            if opened_raw:
-                try:
-                    # Strip trailing Z then parse — accept both with and without.
-                    opened_at = datetime.fromisoformat(opened_raw.replace("Z", "+00:00"))
-                    # We store as naive UTC for consistency with the rest of the DB.
-                    if opened_at.tzinfo is not None:
-                        opened_at = opened_at.replace(tzinfo=None)
-                except (ValueError, AttributeError):
-                    opened_at = None
+            # Parse to tz-aware UTC, then store naive UTC for consistency with
+            # the rest of the DB (parse_iso_utc handles the trailing Z / offset).
+            parsed_open = parse_iso_utc(opened_raw)
+            opened_at = parsed_open.replace(tzinfo=None) if parsed_open else None
             out.append(BrokerPosition(
                 broker_symbol=str(mkt.get("epic") or pos.get("epic") or ""),
                 broker_position_ref=str(pos.get("dealId") or ""),

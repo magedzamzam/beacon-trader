@@ -10,12 +10,9 @@ from sqlalchemy import (JSON, Boolean, DateTime, ForeignKey, Integer, Numeric,
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base
+from ..timeutil import utcnow as _now   # column default: tz-aware UTC now
 
 NUM = Numeric(18, 6)
-
-
-def _now() -> dt.datetime:
-    return dt.datetime.now(dt.timezone.utc)
 
 
 class Broker(Base):

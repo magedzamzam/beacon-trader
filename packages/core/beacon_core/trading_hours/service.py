@@ -6,7 +6,6 @@ gating on top later. Nothing here blocks trading yet.
 """
 from __future__ import annotations
 
-import asyncio
 import datetime as dt
 from typing import Optional
 
@@ -17,6 +16,8 @@ from ..db.base import Session
 from ..db.models import EconEvent
 from ..logging import get_logger
 from ..settings_store import get_setting, set_setting
+from ..tasks import spawn_bg
+from ..timeutil import utcnow, parse_iso_utc
 from . import calendar, holidays, sessions
 from .config import DEFAULT_CONFIG, sanitize_config
 
@@ -25,11 +26,6 @@ log = get_logger("trading_hours")
 SETTING_KEY = "trading_hours"
 _REFRESH_TS_KEY = "econ_refreshed_at"
 _REFRESH_STALE_SECONDS = 6 * 3600
-_TASKS: set = set()
-
-
-def _now() -> dt.datetime:
-    return dt.datetime.now(dt.timezone.utc)
 
 
 async def load_config(session) -> dict:
@@ -66,18 +62,12 @@ async def maybe_refresh(session) -> None:
     blocks the caller. Optimistically stamps the refresh time so concurrent
     callers don't all fire."""
     last = await get_setting(session, _REFRESH_TS_KEY, None)
-    stale = True
-    if last:
-        try:
-            stale = (_now() - dt.datetime.fromisoformat(last)).total_seconds() > _REFRESH_STALE_SECONDS
-        except (ValueError, TypeError):
-            stale = True
+    parsed = parse_iso_utc(last)
+    stale = parsed is None or (utcnow() - parsed).total_seconds() > _REFRESH_STALE_SECONDS
     if not stale:
         return
-    await set_setting(session, _REFRESH_TS_KEY, _now().isoformat())
-    t = asyncio.create_task(_refresh_bg())
-    _TASKS.add(t)
-    t.add_done_callback(_TASKS.discard)
+    await set_setting(session, _REFRESH_TS_KEY, utcnow().isoformat())
+    spawn_bg(_refresh_bg())
 
 
 async def refresh_now(session) -> int:
@@ -88,7 +78,7 @@ async def refresh_now(session) -> int:
     if rows:
         await session.execute(pg_insert(EconEvent).values(rows)
                               .on_conflict_do_nothing(constraint="uq_econ_event"))
-        await set_setting(session, _REFRESH_TS_KEY, _now().isoformat())
+        await set_setting(session, _REFRESH_TS_KEY, utcnow().isoformat())
         await session.commit()
     return len(rows)
 
@@ -103,7 +93,7 @@ async def _load_events(session, now):
 
 async def status(session) -> dict:
     cfg = await load_config(session)
-    now = _now()
+    now = utcnow()
     sess = sessions.status(cfg["sessions"], now)
 
     news_cfg = cfg["news"]

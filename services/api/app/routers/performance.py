@@ -1,27 +1,15 @@
-import datetime as dt
-
 from fastapi import APIRouter, Depends
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from beacon_core.analysis.bayes import posterior
 from beacon_core.db.models import Leg, Signal, Source, Trade
+from beacon_core.timeutil import parse_iso_utc as _parse_dt
 from ..deps import get_db
 from ..auth import require_token
 
 router = APIRouter(prefix="/performance", tags=["performance"],
                    dependencies=[Depends(require_token)])
-
-
-def _parse_dt(s: str | None):
-    """ISO date/datetime -> tz-aware UTC datetime (naive is treated as UTC)."""
-    if not s:
-        return None
-    try:
-        d = dt.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
-        return d if d.tzinfo else d.replace(tzinfo=dt.timezone.utc)
-    except (ValueError, TypeError):
-        return None
 
 
 def _leg_dates(q, frm, to):

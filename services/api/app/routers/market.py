@@ -2,8 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from beacon_core.db.models import Broker, SymbolMap
-from beacon_core.brokers import get_adapter, resolve_credentials
+from beacon_core.db.models import Broker
+from beacon_core.brokers import make_adapter, symbol_map
 from ..deps import get_db
 from ..auth import require_token
 
@@ -17,12 +17,10 @@ async def _resolve(db, symbol, broker_id):
         broker = (await db.execute(select(Broker).where(Broker.enabled == True))).scalars().first()
     if not broker:
         raise HTTPException(404, "no enabled broker")
-    smap = (await db.execute(select(SymbolMap).where(
-        SymbolMap.broker_id == broker.id, SymbolMap.internal_symbol == symbol))).scalar_one_or_none()
+    smap = await symbol_map(db, broker.id, symbol)
     if not smap:
         raise HTTPException(404, f"no symbol map for {symbol}")
-    creds = resolve_credentials(broker.credentials_ref); creds.setdefault("is_demo", broker.is_demo)
-    return broker, smap, get_adapter(broker.type, creds)
+    return broker, smap, make_adapter(broker)
 
 
 @router.get("/candles")

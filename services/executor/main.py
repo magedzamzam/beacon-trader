@@ -8,7 +8,6 @@ crash never loses track of real money.
 from __future__ import annotations
 
 import asyncio
-import datetime as dt
 from decimal import Decimal
 
 from sqlalchemy import func, select
@@ -20,10 +19,11 @@ from beacon_core.config import (CH_SIGNAL_VALID, CH_TRADE_OPENED, get_settings)
 from beacon_core.logging import get_logger
 from beacon_core.health import run_health_server
 from beacon_core.db.base import Session, init_models
-from beacon_core.db.models import (Account, Broker, Event, Leg, Signal,
-                                   SymbolMap, Source, Trade)
-from beacon_core.brokers import get_adapter, resolve_credentials
+from beacon_core.db.models import Account, Event, Leg, Signal, Source, Trade
+from beacon_core.brokers import build_adapter, symbol_map
 from beacon_core.brokers import fx
+from beacon_core.tasks import spawn_bg
+from beacon_core.timeutil import utcnow
 from beacon_core.brokers.types import (OrderSide, OrderStatus, OrderType, PlaceOrderRequest)
 from beacon_core.parsing.models import ParsedSignal
 from beacon_core.execution.planner import build_plan
@@ -36,7 +36,6 @@ from beacon_core import notifications as notify
 log = get_logger("executor")
 settings = get_settings()
 bus = Bus()
-_BG_TASKS: set = set()          # strong refs to fire-and-forget background tasks
 
 
 def _notify(event_id: str, ctx: dict) -> None:
@@ -48,9 +47,7 @@ def _notify(event_id: str, ctx: dict) -> None:
                 await notify.notify(s, event_id, ctx)
         except Exception as exc:                 # pragma: no cover - defensive
             log.debug("notify %s failed: %s", event_id, exc)
-    t = asyncio.create_task(_run())
-    _BG_TASKS.add(t)
-    t.add_done_callback(_BG_TASKS.discard)
+    spawn_bg(_run())
 
 
 def _review_bg(signal_id, account_id, source_id, plan_dict) -> None:
@@ -66,9 +63,7 @@ def _review_bg(signal_id, account_id, source_id, plan_dict) -> None:
                     await s.commit()
         except Exception as exc:                     # pragma: no cover - defensive
             log.debug("background exec review failed (signal %s): %s", signal_id, exc)
-    t = asyncio.create_task(_run())
-    _BG_TASKS.add(t)
-    t.add_done_callback(_BG_TASKS.discard)
+    spawn_bg(_run())
 
 
 def _to_parsed(sig: Signal) -> ParsedSignal:
@@ -87,12 +82,6 @@ async def _accounts_for(session, source: Source):
     rows = (await session.execute(
         select(Account).where(Account.id.in_(ids), Account.enabled == True))).scalars().all()
     return rows
-
-
-async def _symbol_map(session, broker_id: int, symbol: str):
-    return (await session.execute(select(SymbolMap).where(
-        SymbolMap.broker_id == broker_id,
-        SymbolMap.internal_symbol == symbol))).scalar_one_or_none()
 
 
 async def handle_signal(signal_id: int) -> None:
@@ -150,9 +139,7 @@ async def handle_signal(signal_id: int) -> None:
 
     # TA snapshot for later analysis — fired in the background AFTER placement so
     # it adds zero execution latency. One row per signal (own DB session).
-    task = asyncio.create_task(_capture_features_bg(signal_id, accounts[0].id))
-    _BG_TASKS.add(task)                     # keep a ref so it isn't GC'd mid-run
-    task.add_done_callback(_BG_TASKS.discard)
+    spawn_bg(_capture_features_bg(signal_id, accounts[0].id))
 
 
 async def _capture_features_bg(signal_id: int, account_id: int) -> None:
@@ -163,14 +150,11 @@ async def _capture_features_bg(signal_id: int, account_id: int) -> None:
             acct = await session.get(Account, account_id)
             if not sig or not acct:
                 return
-            broker = await session.get(Broker, acct.broker_id)
-            smap = await _symbol_map(session, broker.id, sig.symbol) if broker else None
+            broker, adapter = await build_adapter(session, acct)
+            smap = await symbol_map(session, broker.id, sig.symbol) if broker else None
             if not broker or not smap:
+                await adapter.aclose()
                 return
-            creds = resolve_credentials(broker.credentials_ref)
-            creds.setdefault("is_demo", broker.is_demo)
-            creds["account_id"] = acct.broker_account_id
-            adapter = get_adapter(broker.type, creds)
             try:
                 await ta_capture.capture_for_signal(session, sig, adapter, smap)
                 await session.commit()
@@ -190,16 +174,12 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         log.info("signal %s acct %s already has trade %s; skipping", sig.id, acct.id, dup[0])
         return
 
-    broker = await session.get(Broker, acct.broker_id)
-    smap = await _symbol_map(session, broker.id, parsed.symbol)
+    broker, adapter = await build_adapter(session, acct)   # trade on the mapped account
+    smap = await symbol_map(session, broker.id, parsed.symbol)
     if not smap:
         log.warning("no symbol map for %s on broker %s", parsed.symbol, broker.id)
+        await adapter.aclose()
         return
-
-    creds = resolve_credentials(broker.credentials_ref)
-    creds.setdefault("is_demo", broker.is_demo)
-    creds["account_id"] = acct.broker_account_id   # trade on the mapped account
-    adapter = get_adapter(broker.type, creds)
     try:
         info = await adapter.get_account_info()
         equity = info.balance or Decimal("0")
@@ -269,7 +249,7 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             log.warning("RISK-LIMITS-DEFAULTED: no risk_limits setting; applying "
                         "conservative defaults (%s)", rl_cfg)
         if rl_cfg.get("enabled"):
-            day_start = dt.datetime.now(dt.timezone.utc).replace(
+            day_start = utcnow().replace(
                 hour=0, minute=0, second=0, microsecond=0)
             day_realized = (await session.execute(select(
                 func.coalesce(func.sum(Trade.realized_pl), 0)).where(
