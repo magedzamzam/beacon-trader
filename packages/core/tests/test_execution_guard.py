@@ -21,6 +21,33 @@ def test_risk_limits_disabled_is_noop():
                              cfg={"enabled": False}) is None
 
 
+def test_failsafe_daily_floor_applies_when_disabled():
+    # Master switch OFF but a daily_loss_limit is set: the hard floor still fires.
+    # (Real 2026-07-10 case: risk_limits.enabled=false, daily_loss_limit=5000,
+    # account already down past the floor.)
+    cfg = {"enabled": False, "daily_loss_limit": 5000}
+    assert "daily loss limit" in risk_limit_reason(
+        planned_risk=10, day_realized=-6000, open_risk_symbol=0,
+        open_risk_account=0, cfg=cfg)
+    # not yet breached -> allowed (opt-in checks stay off)
+    assert risk_limit_reason(planned_risk=10, day_realized=-100, open_risk_symbol=0,
+                             open_risk_account=0, cfg=cfg) is None
+
+
+def test_failsafe_killswitch_applies_when_disabled():
+    cfg = {"enabled": False, "trading_halted": True, "daily_loss_limit": 5000}
+    assert "halted" in risk_limit_reason(
+        planned_risk=10, day_realized=0, open_risk_symbol=0,
+        open_risk_account=0, cfg=cfg)
+
+
+def test_disabled_without_floor_is_still_noop():
+    # No daily_loss_limit + no kill-switch + disabled -> unchanged no-op contract.
+    assert risk_limit_reason(planned_risk=99999, day_realized=-99999,
+                             open_risk_symbol=0, open_risk_account=0,
+                             cfg={"enabled": False}) is None
+
+
 def test_per_signal_ceiling():
     cfg = {"enabled": True, "daily_loss_limit": 500, "per_signal_max_pct_of_daily": 0.20}
     # ceiling = 500 * 0.20 = 100; a 5880 plan (the real #7 case) is blocked

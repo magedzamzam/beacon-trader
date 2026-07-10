@@ -248,7 +248,10 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             rl_cfg = dict(DEFAULT_RISK_LIMITS)
             log.warning("RISK-LIMITS-DEFAULTED: no risk_limits setting; applying "
                         "conservative defaults (%s)", rl_cfg)
-        if rl_cfg.get("enabled"):
+        # Always evaluate: risk_limit_reason() self-gates the opt-in checks but
+        # ALWAYS enforces the kill-switch and daily-loss floor, so a mis-set
+        # `enabled: false` cannot silently disarm capital protection (PM 2026-07-10).
+        if True:
             day_start = utcnow().replace(
                 hour=0, minute=0, second=0, microsecond=0)
             day_realized = (await session.execute(select(
