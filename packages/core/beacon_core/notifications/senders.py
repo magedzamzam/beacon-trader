@@ -9,6 +9,9 @@ the event loop).
 from __future__ import annotations
 
 import asyncio
+import html
+
+_TELEGRAM_LIMIT = 4096
 
 
 async def send_telegram(cfg: dict, subject: str, text: str) -> None:
@@ -16,11 +19,20 @@ async def send_telegram(cfg: dict, subject: str, text: str) -> None:
     token, chat = cfg.get("bot_token"), cfg.get("chat_id")
     if not token or not chat:
         raise ValueError("Telegram needs a bot_token and chat_id")
-    body = f"*{subject}*\n{text}" if subject else text
+    # HTML parse mode + escape every interpolated value: legacy Markdown 400s on
+    # ordinary content (a channel named "@Gold_Signals_VIP*" has unbalanced _ / *),
+    # which — since delivery is best-effort — silently dropped the alert (#39).
+    _head = html.escape(subject or "")
+    _detail = html.escape(text or "")
+    body = f"<b>{_head}</b>"
+    if _detail.strip():
+        body += f"\n<pre>{_detail}</pre>"          # monospace -> columns align
+    if len(body) > _TELEGRAM_LIMIT:                 # graceful degradation, not a 400 drop
+        body = body[:_TELEGRAM_LIMIT - 24] + "…\n(truncated)"
     async with httpx.AsyncClient(timeout=15.0) as c:
         r = await c.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": str(chat), "text": body, "parse_mode": "Markdown",
+            json={"chat_id": str(chat), "text": body, "parse_mode": "HTML",
                   "disable_web_page_preview": True})
         if r.status_code >= 400:
             raise RuntimeError(f"Telegram API {r.status_code}: {r.text[:200]}")

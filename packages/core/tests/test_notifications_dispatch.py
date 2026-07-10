@@ -6,11 +6,64 @@ from beacon_core.notifications import dispatch as D
 from beacon_core.notifications import senders as S
 
 
-def test_format_message():
+def test_format_message_headline_first():
+    # headline (subject): emoji + direction + symbol + label + Net P&L up front
     subj, text = D.format_message("tp_hit", {"symbol": "XAUUSD", "direction": "BUY",
                                              "pl": "12.5", "detail": "TP1 — tp_hit"})
-    assert subj == "[Beacon] Take-profit hit — XAUUSD"
-    assert "Direction: BUY" in text and "P&L: 12.5" in text and "TP1 — tp_hit" in text
+    assert subj.startswith("🎯")                       # TP triage emoji
+    for piece in ("BUY", "XAUUSD", "Take-profit hit", "P&L +12.50"):
+        assert piece in subj, (piece, subj)
+    # symbol/direction/P&L moved OUT of the detail rows into the headline
+    assert "TP1 — tp_hit" in text
+    assert "Direction:" not in text and "P&L:" not in text
+
+
+def test_format_message_negative_pl_and_aligned_rows():
+    subj, text = D.format_message("sl_hit", {"symbol": "XAUUSD", "pl": -40,
+                                             "price": "2400", "account": "Gold"})
+    assert subj.startswith("🔴") and "P&L -40.00" in subj
+    # rows are column-aligned (the colon+pad makes "Price:" and "Account:" line up)
+    assert "\n" in text and "Price:" in text and "Account:" in text
+
+
+class _FakeResp:
+    status_code = 200
+    text = "ok"
+
+
+class _FakeClient:
+    last = None
+
+    def __init__(self, *a, **k):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def post(self, url, json=None):
+        _FakeClient.last = json
+        return _FakeResp()
+
+
+def test_send_telegram_escapes_and_uses_html():
+    import httpx
+    orig = httpx.AsyncClient
+    httpx.AsyncClient = _FakeClient
+    try:
+        # injection-y content that legacy Markdown would 400 on
+        subj = "🎯 BUY XAUUSD — Take-profit hit"
+        text = "Source: @Gold_Signals_VIP*\ndetail <x> & y"
+        asyncio.run(S.send_telegram({"bot_token": "t", "chat_id": "1"}, subj, text))
+        body = _FakeClient.last
+    finally:
+        httpx.AsyncClient = orig
+    assert body["parse_mode"] == "HTML"
+    assert "<b>" in body["text"]                        # headline bolded
+    assert "&lt;x&gt; &amp; y" in body["text"]          # <, >, & escaped
+    assert "@Gold_Signals_VIP*" in body["text"]         # _ and * pass through literally (no 400)
 
 
 def test_notify_routes_enabled_and_gates_rest():

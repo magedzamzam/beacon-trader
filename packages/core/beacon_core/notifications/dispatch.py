@@ -17,6 +17,15 @@ log = get_logger("notifications")
 _CHANNEL_BY_ID = {c["id"]: c for c in C.CHANNELS}
 EVENT_LABEL = {e["id"]: e["label"] for g in C.EVENT_GROUPS for e in g["events"]}
 
+# Per-event triage emoji so TP (money) reads differently from a routine placement.
+_EMOJI = {
+    "new_signal": "📡", "signal_validated": "✅", "signal_rejected": "🚫",
+    "order_placed": "📤", "order_filled": "🟢", "order_cancelled": "⚪",
+    "tp_hit": "🎯", "sl_hit": "🔴", "sl_moved": "🛡️", "trade_closed": "🏁",
+    "broker_error": "⚠️", "daily_summary": "📊",
+}
+_DIR_EMOJI = {"BUY": "🔼", "SELL": "🔽"}
+
 
 def resolve_channel(channel_id: str, stored: dict) -> dict:
     """A channel's config with secrets decrypted to plaintext (for a sender)."""
@@ -39,30 +48,49 @@ def resolve_channel(channel_id: str, stored: dict) -> dict:
 
 
 def format_message(event_id: str, ctx: Optional[dict]) -> tuple[str, str]:
-    """(subject, text) for an event. `ctx` carries plain values, all optional."""
+    """(subject, text). `subject` is the at-a-glance headline (emoji + ACTION +
+    ASSET + Net P&L) for <1s comprehension; `text` is the aligned detail block.
+    Channel-agnostic and plain text — the Telegram sender does the escaping. All
+    `ctx` values are optional (#39)."""
     ctx = ctx or {}
-    label = EVENT_LABEL.get(event_id, event_id)
-    sym = ctx.get("symbol") or ""
-    subject = f"[Beacon] {label}" + (f" — {sym}" if sym else "")
+    _label = EVENT_LABEL.get(event_id, event_id)
+    _emoji = _EMOJI.get(event_id, "🔔")
+    _sym = ctx.get("symbol") or ""
+    _dir = (ctx.get("direction") or "").upper()
+    _pl = ctx.get("pl")
 
-    lines = []
+    _head = _emoji
+    if _dir:
+        _head += f" {_DIR_EMOJI.get(_dir, '')} {_dir}".rstrip()
+    if _sym:
+        _head += f" {_sym}"
+    _head += f" — {_label}"
+    if _pl not in (None, ""):
+        try:
+            _plf = float(_pl)
+            _head += f"  |  P&L {'+' if _plf >= 0 else ''}{_plf:,.2f}"
+        except (TypeError, ValueError):
+            _head += f"  |  P&L {_pl}"
+
+    _rows = []
 
     def add(k, v):
         if v not in (None, "", []):
-            lines.append(f"{k}: {v}")
+            _rows.append((k, str(v)))
 
-    add("Symbol", sym)
-    add("Direction", ctx.get("direction"))
     add("Entry", ctx.get("entry"))
     add("Price", ctx.get("price"))
     add("TP", ctx.get("tp"))
     add("SL", ctx.get("sl"))
-    add("P&L", ctx.get("pl"))
     add("Account", ctx.get("account"))
     add("Source", ctx.get("source"))
+
+    _w = max((len(k) for k, _ in _rows), default=0)
+    _body = "\n".join(f"{(k + ':').ljust(_w + 1)} {v}" for k, v in _rows)
     if ctx.get("detail"):
-        lines.append(str(ctx["detail"]))
-    return subject, ("\n".join(lines) if lines else label)
+        _body = (_body + "\n" if _body else "") + str(ctx["detail"])
+
+    return _head, _body
 
 
 async def _load(session) -> dict:
