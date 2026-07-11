@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import time
 from decimal import Decimal
 from typing import Dict, List, Optional
 
@@ -208,10 +209,12 @@ class CapitalComAdapter(BrokerAdapter):
             return resp.text
 
     async def healthcheck(self) -> dict:
+        _t0 = time.monotonic()
         try:
             info = await self.get_account_info()
+            _latency_ms = round((time.monotonic() - _t0) * 1000)
             return {"ok": True, "message": f"connected as {info.account_id}",
-                    "currency": info.currency,
+                    "currency": info.currency, "latency_ms": _latency_ms,
                     "balance": str(info.balance) if info.balance is not None else None}
         except AuthError as e:
             return {"ok": False, "message": f"auth failed: {e}"}

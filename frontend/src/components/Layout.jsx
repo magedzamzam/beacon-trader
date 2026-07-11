@@ -56,6 +56,40 @@ function HealthPulse({ collapsed }) {
   );
 }
 
+// Always-visible broker connectivity + latency (#45). The single most
+// operationally critical signal for a live-money bot; a spike/outage should
+// jump out. Tone: beacon = ok, warn = high latency, short = down.
+function BrokerChip() {
+  const [brokers, setBrokers] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    const poll = async () => {
+      try { const h = await api.health(); if (alive) setBrokers(h.brokers || {}); }
+      catch { if (alive) setBrokers({}); }
+    };
+    poll(); const t = setInterval(poll, 8000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
+  if (!brokers) return null;
+  const entries = Object.entries(brokers);
+  if (entries.length === 0) return null;
+  const anyDown = entries.some(([, s]) => !s?.ok);
+  const worstMs = entries.reduce((m, [, s]) => Math.max(m, s?.latency_ms ?? 0), 0);
+  const color = anyDown ? "var(--short)" : worstMs >= 1500 ? "var(--warn)" : "var(--beacon)";
+  const label = anyDown ? "broker down"
+    : entries.length === 1 ? `${worstMs}ms`
+    : `${entries.length} brokers · ${worstMs}ms`;
+  const title = entries.map(([n, s]) =>
+    `${n}: ${s?.ok ? (s.latency_ms + "ms") : (s?.message || "down")}`).join("\n");
+  return (
+    <div title={title}
+      className="hidden sm:flex items-center gap-1.5 text-xs text-muted border border-edge rounded-lg px-2.5 py-1.5">
+      <span className="inline-block w-2 h-2 rounded-full shrink-0" style={{ background: color }} />
+      <span className="num">{label}</span>
+    </div>
+  );
+}
+
 export default function Layout({ view, setView, children, accounts = [], account = "", setAccount }) {
   const [dark, setDark] = useState(document.documentElement.classList.contains("dark"));
   const [tokenOpen, setTokenOpen] = useState(!getToken());
@@ -141,6 +175,7 @@ export default function Layout({ view, setView, children, accounts = [], account
             <div className="text-sm font-medium capitalize truncate">{viewLabel(view)}</div>
           </div>
           <div className="flex items-center gap-2">
+            <BrokerChip />
             {setAccount && (
               <select value={account} onChange={e => setAccount(e.target.value)}
                 title="Filter the whole app by account"

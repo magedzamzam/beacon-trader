@@ -16,6 +16,29 @@ function SvcRow({ name, s }) {
   );
 }
 
+// Latency tone bands (ms): fast -> long, sluggish -> warn (matches the header chip).
+function latencyTone(ms) {
+  if (ms == null) return "muted";
+  return ms < 400 ? "long" : ms < 1500 ? "warn" : "short";
+}
+
+function BrokerRow({ name, s }) {
+  const ok = s?.ok;
+  const ms = s?.latency_ms;
+  return (
+    <div className="flex items-center justify-between px-3 py-2 border border-edge rounded-lg bg-panel2">
+      <span className="flex flex-col">
+        <span className="text-sm">{name}</span>
+        {s?.message && <span className="text-[11px] text-muted truncate max-w-[240px]">{s.message}</span>}
+      </span>
+      <span className="flex items-center gap-2">
+        {ok && ms != null && <Badge tone={latencyTone(ms)}><span className="num">{ms}ms</span></Badge>}
+        <Badge tone={ok ? "long" : "short"}>{ok ? "connected" : "down"}</Badge>
+      </span>
+    </div>
+  );
+}
+
 /** Configuration → System Health: live status of the services behind the bot. */
 export default function SystemHealth() {
   const [health, setHealth] = useState(null);
@@ -45,6 +68,24 @@ export default function SystemHealth() {
         </div>
         <div className="px-4 py-2 text-[11px] text-muted border-t border-edge">
           Worker liveness from heartbeats (no beat &lt; 30s = down). Polls every 8s.
+        </div>
+      </Card>
+
+      <Card>
+        <div className="px-4 py-3 border-b border-edge flex items-center justify-between">
+          <div className="text-sm font-medium flex items-center gap-2">
+            <Activity className="w-4 h-4 text-beacon" /> Brokers
+          </div>
+        </div>
+        <div className="p-4 grid grid-cols-1 sm:grid-cols-2 gap-2">
+          {!health ? <Empty>Checking…</Empty>
+            : Object.keys(health.brokers || {}).length === 0
+              ? <Empty>No enabled brokers.</Empty>
+              : Object.entries(health.brokers).map(([name, s]) => <BrokerRow key={name} name={name} s={s} />)}
+        </div>
+        <div className="px-4 py-2 text-[11px] text-muted border-t border-edge">
+          Connectivity + round-trip latency, reported independently of overall status
+          (a broker being down does not flag the system degraded).
         </div>
       </Card>
 
