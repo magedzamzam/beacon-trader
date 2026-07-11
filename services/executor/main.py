@@ -99,6 +99,8 @@ async def handle_signal(signal_id: int) -> None:
         source = await session.get(Source, sig.source_id) if sig.source_id else None
         if not source or not source.enabled_for_trading:
             log.info("signal %s: source not enabled for trading; skipping", signal_id)
+            sig.status = "skipped"          # terminal: not the re-drive sweep's job (#38)
+            await session.commit()
             return
 
         # Trust gate: untrusted / blocklisted sources do not auto-place live orders
@@ -121,6 +123,8 @@ async def handle_signal(signal_id: int) -> None:
         accounts = await _accounts_for(session, source)
         if not accounts:
             log.info("signal %s: no enabled accounts mapped", signal_id)
+            sig.status = "skipped"          # terminal: nothing to re-drive (#38)
+            await session.commit()
             return
 
         _entry = str(sig.entry_from) if sig.entry_from is not None else None
@@ -395,9 +399,43 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         await adapter.aclose()
 
 
+# --- stranded-signal re-drive (backstop for the in-flight at-most-once gap, #38)
+_REDRIVE_GRACE_SEC = 60        # older than a normal handle -> not still in flight
+_REDRIVE_INTERVAL_SEC = 30     # one sweep per N seconds (never storms the queue)
+_REDRIVE_BATCH = 50            # cap per pass
+
+
+async def _redrive_stranded_signals() -> None:
+    """Re-enqueue live signals that were validated but never became trades — the
+    residual crash/redeploy window between BRPOP and commit that #34's durable
+    queue can't cover (the message was already popped). Redelivery is safe:
+    handle_signal short-circuits an executed signal and the per-(signal,account)
+    guard prevents a double-place. Un-executable signals are marked 'skipped'
+    (not 'validated') so they never re-drive."""
+    while True:
+        try:
+            await asyncio.sleep(_REDRIVE_INTERVAL_SEC)
+            _cutoff = utcnow() - timedelta(seconds=_REDRIVE_GRACE_SEC)
+            async with Session()() as session:
+                _stranded = (await session.execute(
+                    select(Signal.id).where(
+                        Signal.status == "validated",
+                        Signal.created_at < _cutoff,
+                        ~select(Trade.id).where(Trade.signal_id == Signal.id).exists(),
+                    ).limit(_REDRIVE_BATCH))).scalars().all()
+            for _sid in _stranded:
+                await bus.enqueue(CH_SIGNAL_VALID, {"signal_id": _sid})
+            if _stranded:
+                log.warning("re-drove %s stranded validated signal(s): %s",
+                            len(_stranded), list(_stranded))
+        except Exception as exc:               # a sweep failure must never kill the worker
+            log.warning("stranded-signal re-drive sweep failed: %s", exc)
+
+
 async def main() -> None:
     await init_models()
-    asyncio.create_task(run_health_server("executor", bus, port=8080))
+    spawn_bg(run_health_server("executor", bus, port=8080))
+    spawn_bg(_redrive_stranded_signals())
     log.info("executor consuming %s (durable queue)", CH_SIGNAL_VALID)
     # Durable at-least-once: a signal enqueued while we're mid-handle / restarting
     # waits in Redis and is delivered on return (redelivery is safe — handle_signal
