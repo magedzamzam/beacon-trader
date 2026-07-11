@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { RefreshCw, Sparkles } from "lucide-react";
-import { Card, Th, Td, Badge, Empty } from "../components/ui";
+import { Table, Card, Th, Td, Badge, Empty } from "../components/ui";
 import { Button, Field, Input, Select, Toggle, ErrorNote } from "../components/form";
 import { api } from "../lib/api";
 
@@ -63,7 +63,7 @@ export default function AI() {
             <Field label="AI enabled"><Toggle checked={cfg.enabled} onChange={v => set("enabled", v)} label={cfg.enabled ? "on" : "off"} /></Field>
             <Field label="API key set"><Badge tone={cfg.has_api_key ? "long" : "muted"}>{cfg.has_api_key ? "yes" : "no"}</Badge></Field>
           </div>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <Field label="Model" hint="Anthropic model id"><Input value={cfg.model} onChange={e => set("model", e.target.value)} /></Field>
             <Field label="API key" hint={cfg.has_api_key ? "leave blank to keep current key" : "stored encrypted in the DB"}>
               <Input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="sk-ant-…" />
@@ -96,7 +96,7 @@ export default function AI() {
               and skip this. Tune below for replies under 5 seconds; if the model can’t answer in time
               the signal still trades on the parser output but is flagged “unvalidated”.
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <Field label="Validation model" hint="a fast model for the hot path (e.g. Haiku)">
                 <Input value={cfg.validation_model || ""} onChange={e => set("validation_model", e.target.value)} />
               </Field>
@@ -130,7 +130,7 @@ export default function AI() {
           <Button variant="ghost" onClick={load}><RefreshCw className="w-4 h-4" /></Button>
         </div>
         {!assess.length ? <Empty>No AI assessments yet. Enable AI and signals will be judged as they arrive.</Empty> : (
-          <table className="w-full">
+          <Table>
             <thead><tr className="border-b border-edge">
               <Th>When</Th><Th>Kind</Th><Th right>Ref</Th><Th>Verdict</Th><Th right>Conf</Th><Th right>Score</Th><Th>Rationale</Th>
             </tr></thead>
@@ -147,7 +147,7 @@ export default function AI() {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </Table>
         )}
       </Card>
     </div>

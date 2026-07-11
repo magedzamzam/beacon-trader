@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Plus, Trash2, Pencil } from "lucide-react";
-import { Card, Th, Td, Badge, Empty } from "../components/ui";
+import { Table, Card, Th, Td, Badge, Empty } from "../components/ui";
 import { Modal, Field, Input, Select, Toggle, Button, ErrorNote } from "../components/form";
 import RiskConfigEditor from "../components/RiskConfigEditor";
 import SlRulesEditor from "../components/SlRulesEditor";
@@ -50,7 +50,7 @@ export default function Sources() {
           </div>
         </div>
         {!sources.length ? <Empty>No sources. Add a Telegram channel or a webhook to start.</Empty> : (
-          <table className="w-full">
+          <Table>
             <thead><tr className="border-b border-edge">
               <Th>Name</Th><Th>Kind</Th><Th>Ref</Th>
               <Th right>Accounts</Th><Th>Trading</Th><Th right>Actions</Th>
@@ -81,7 +81,7 @@ export default function Sources() {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </Table>
         )}
       </Card>
       {editing && <SourceModal source={editing === "new" ? null : editing} accounts={accounts}
@@ -128,7 +128,7 @@ function SourceModal({ source, accounts, onClose, onSaved }) {
   return (
     <Modal title={source ? `Edit ${source.name}` : "Add source"} onClose={onClose} wide>
       <ErrorNote>{err}</ErrorNote>
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <Field label="Kind">
           <Select value={kind} onChange={e => setKind(e.target.value)}>
             <option value="telegram">Telegram channel</option>
@@ -144,7 +144,7 @@ function SourceModal({ source, accounts, onClose, onSaved }) {
         <Input mono value={externalId} onChange={e => setExternalId(e.target.value)} />
       </Field>
 
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <Field label="Entry TTL (min)"
           hint="orders rest as LIMIT; a leg is auto-MARKET if the candle already crossed its entry. Cancels an unfilled limit after N min (0 = never).">
           <Input type="number" value={ttl} onChange={e => setTtl(e.target.value)} />
@@ -163,7 +163,7 @@ function SourceModal({ source, accounts, onClose, onSaved }) {
       <div>
         <div className="text-xs uppercase tracking-wider text-muted mb-1.5">Route to accounts</div>
         {accounts.length === 0 ? <div className="text-xs text-muted">No accounts yet — add one under Brokers first.</div> : (
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {accounts.map(a => (
               <label key={a.id} className="flex items-center gap-2 text-sm border border-edge rounded-lg px-3 py-2 bg-panel2 cursor-pointer">
                 <input type="checkbox" checked={accountMap.includes(a.id)} onChange={() => toggleAcct(a.id)} />

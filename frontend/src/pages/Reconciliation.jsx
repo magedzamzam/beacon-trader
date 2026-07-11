@@ -1,6 +1,6 @@
 import { Fragment, useState } from "react";
 import { RefreshCw } from "lucide-react";
-import { Card, KPI, Th, Td, Badge, Empty } from "../components/ui";
+import { Table, Card, KPI, Th, Td, Badge, Empty } from "../components/ui";
 import { Button, Toggle } from "../components/form";
 import { api } from "../lib/api";
 import { useData, money, tone } from "./_useData";
@@ -72,7 +72,7 @@ export default function Reconciliation() {
           {!!sum.by_source.length && (
             <Card>
               <div className="px-4 py-3 border-b border-edge text-sm font-medium">Match rate by channel</div>
-              <table className="w-full">
+              <Table>
                 <thead><tr className="border-b border-edge"><Th>Channel</Th><Th right>Match</Th><Th right>Total</Th><Th right>Rate</Th></tr></thead>
                 <tbody>
                   {sum.by_source.map(s => (
@@ -84,7 +84,7 @@ export default function Reconciliation() {
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </Table>
             </Card>
           )}
         </>

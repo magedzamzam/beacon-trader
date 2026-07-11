@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Modal } from "./form";
-import { Badge, Th, Td, Empty } from "./ui";
+import { Table, Badge, Th, Td, Empty } from "./ui";
 import { api } from "../lib/api";
 import { money, tone } from "../pages/_useData";
 
@@ -145,7 +145,7 @@ export default function TradeDetail({ tradeId, onClose }) {
           })()}
 
           <Section title="Legs">
-            <table className="w-full">
+            <Table>
               <thead><tr>
                 <Th right>TP#</Th><Th>Type</Th><Th right>Entry</Th><Th right>TP</Th><Th right>SL</Th>
                 <Th>Status</Th><Th>Outcome</Th><Th right>P&L</Th>
@@ -166,7 +166,7 @@ export default function TradeDetail({ tradeId, onClose }) {
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </Table>
           </Section>
 
           {t.features && (
@@ -196,7 +196,7 @@ export default function TradeDetail({ tradeId, onClose }) {
 
           <Section title="Broker activity — truth">
             {!t.activities?.length ? <Empty>No broker activity recorded yet.</Empty> : (
-              <table className="w-full">
+              <Table>
                 <thead><tr>
                   <Th>When</Th><Th>Type</Th><Th>Source</Th><Th>Status</Th><Th>Deal</Th><Th right>P&L</Th>
                 </tr></thead>
@@ -214,13 +214,13 @@ export default function TradeDetail({ tradeId, onClose }) {
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </Table>
             )}
           </Section>
 
           <Section title="Execution events">
             {!t.events?.length ? <Empty>No events.</Empty> : (
-              <table className="w-full">
+              <Table>
                 <thead><tr><Th>When</Th><Th>Event</Th><Th right>Leg</Th><Th>Detail</Th></tr></thead>
                 <tbody>
                   {t.events.map(e => (
@@ -232,7 +232,7 @@ export default function TradeDetail({ tradeId, onClose }) {
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </Table>
             )}
           </Section>
         </div>

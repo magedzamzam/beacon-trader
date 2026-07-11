@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Card, Th, Td, Badge, Empty } from "../components/ui";
+import { Table, Card, Th, Td, Badge, Empty } from "../components/ui";
 import TradeDetail from "../components/TradeDetail";
 import { api } from "../lib/api";
 import { useData, money, tone } from "./_useData";
@@ -14,7 +14,7 @@ export default function History() {
   return (
     <Card>
       <div className="px-4 py-3 border-b border-edge text-sm font-medium">Closed legs</div>
-      <table className="w-full">
+      <Table>
         <thead><tr className="border-b border-edge">
           <Th>Trade</Th><Th>Symbol</Th><Th>Channel</Th><Th>Side</Th><Th right>TP#</Th>
           <Th right>Entry</Th><Th right>Close</Th><Th>Outcome</Th><Th right>P&L</Th>
@@ -37,7 +37,7 @@ export default function History() {
             </tr>
           ))}
         </tbody>
-      </table>
+      </Table>
       {detail && <TradeDetail tradeId={detail} onClose={() => setDetail(null)} />}
     </Card>
   );

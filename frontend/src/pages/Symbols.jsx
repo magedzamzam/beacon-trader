@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Plus, Trash2, Pencil } from "lucide-react";
-import { Card, Th, Td, Empty } from "../components/ui";
+import { Table, Card, Th, Td, Empty } from "../components/ui";
 import { Modal, Field, Input, NumberInput, Select, Button, ErrorNote } from "../components/form";
 import { api } from "../lib/api";
 
@@ -27,7 +27,7 @@ export default function Symbols() {
           value_per_point is money per 1.0 price move per 1.0 size — calibrate it per broker or sizing will be wrong.
         </div>
         {!symbols.length ? <Empty>No symbol maps. Add XAUUSD → your broker’s gold epic.</Empty> : (
-          <table className="w-full">
+          <Table>
             <thead><tr className="border-b border-edge">
               <Th>Internal</Th><Th>Broker epic</Th><Th right>value/point</Th><Th right>min lot</Th>
               <Th right>lot step</Th><Th right>min dist</Th><Th right></Th>
@@ -47,7 +47,7 @@ export default function Symbols() {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </Table>
         )}
       </Card>
       {editing && <SymbolModal sym={editing === "new" ? null : editing} brokers={brokers}
@@ -80,7 +80,7 @@ function SymbolModal({ sym, brokers, onClose, onSaved }) {
     <Modal title={sym ? "Edit mapping" : "Add mapping"} onClose={onClose}>
       <ErrorNote>{err}</ErrorNote>
       {!sym && (
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <Field label="Broker">
             <Select value={brokerId} onChange={e => setBrokerId(e.target.value)}>
               {brokers.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
@@ -90,7 +90,7 @@ function SymbolModal({ sym, brokers, onClose, onSaved }) {
         </div>
       )}
       <Field label="Broker epic" hint="Capital.com market epic, e.g. GOLD"><Input mono value={epic} onChange={e => setEpic(e.target.value)} /></Field>
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <Field label="value / point"><NumberInput value={vpp} onChange={e => setVpp(e.target.value)} /></Field>
         <Field label="min stop distance"><NumberInput value={minDist} onChange={e => setMinDist(e.target.value)} placeholder="optional" /></Field>
         <Field label="min lot"><NumberInput value={minLot} onChange={e => setMinLot(e.target.value)} /></Field>

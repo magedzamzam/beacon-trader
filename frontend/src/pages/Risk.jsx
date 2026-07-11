@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Pencil } from "lucide-react";
-import { Card, Th, Td, Badge, Empty } from "../components/ui";
+import { Table, Card, Th, Td, Badge, Empty } from "../components/ui";
 import { Modal, Field, Input, Toggle, Button, ErrorNote } from "../components/form";
 import RiskConfigEditor from "../components/RiskConfigEditor";
 import { api } from "../lib/api";
@@ -34,7 +34,7 @@ export default function Risk() {
       <Card>
         <div className="px-4 py-3 border-b border-edge text-sm font-medium">Account limits</div>
         {!accounts.length ? <Empty>No accounts. Add one under Brokers.</Empty> : (
-          <table className="w-full">
+          <Table>
             <thead><tr className="border-b border-edge"><Th>Account</Th><Th>Risk / limits</Th><Th>Trading</Th><Th right></Th></tr></thead>
             <tbody>
               {accounts.map(a => (
@@ -46,14 +46,14 @@ export default function Risk() {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </Table>
         )}
       </Card>
 
       <Card>
         <div className="px-4 py-3 border-b border-edge text-sm font-medium">Per-source overrides</div>
         {!sources.length ? <Empty>No sources.</Empty> : (
-          <table className="w-full">
+          <Table>
             <thead><tr className="border-b border-edge"><Th>Source</Th><Th>Override</Th></tr></thead>
             <tbody>
               {sources.map(s => (
@@ -65,7 +65,7 @@ export default function Risk() {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </Table>
         )}
         <div className="px-4 py-2 text-[11px] text-muted border-t border-edge">Edit source overrides under Sources.</div>
       </Card>

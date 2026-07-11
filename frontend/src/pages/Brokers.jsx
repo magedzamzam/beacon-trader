@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { RefreshCw, Plus, Trash2, Activity, Download, Pencil } from "lucide-react";
-import { Card, Th, Td, Badge, Empty } from "../components/ui";
+import { Table, Card, Th, Td, Badge, Empty } from "../components/ui";
 import { Modal, Field, Input, Toggle, Button, Select, ErrorNote } from "../components/form";
 import RiskConfigEditor from "../components/RiskConfigEditor";
 import { api } from "../lib/api";
@@ -41,7 +41,7 @@ export default function Brokers() {
           <Button onClick={() => setAddBroker(true)}><Plus className="w-4 h-4 inline -mt-0.5" /> Add broker</Button>
         </div>
         {!brokers.length ? <Empty>No brokers yet. Add one to connect Capital.com.</Empty> : (
-          <table className="w-full">
+          <Table>
             <thead><tr className="border-b border-edge">
               <Th>Name</Th><Th>Type</Th><Th>Mode</Th><Th>State</Th><Th>Connection</Th><Th right>Actions</Th>
             </tr></thead>
@@ -66,14 +66,14 @@ export default function Brokers() {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </Table>
         )}
       </Card>
 
       <Card>
         <div className="px-4 py-3 border-b border-edge text-sm font-medium">Accounts</div>
         {!accounts.length ? <Empty>No accounts. Use “Fetch accounts” on a broker to pull them from Capital.com.</Empty> : (
-          <table className="w-full">
+          <Table>
             <thead><tr className="border-b border-edge">
               <Th>Name</Th><Th>Account ID</Th><Th>Ccy</Th><Th>Risk</Th><Th>Trading</Th><Th right>Actions</Th>
             </tr></thead>
@@ -94,7 +94,7 @@ export default function Brokers() {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </Table>
         )}
       </Card>
 
@@ -132,7 +132,7 @@ function AddBrokerModal({ onClose, onSaved }) {
       <Field label="Mode"><Toggle checked={isDemo} onChange={setIsDemo} label={isDemo ? "Demo" : "Live"} /></Field>
       <div className="text-xs text-muted">Secrets are encrypted with SECRET_KEY before they are stored — never kept in plaintext, and never read from .env.</div>
       <Field label="API key"><Input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="Capital.com API key" /></Field>
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <Field label="Username"><Input value={username} onChange={e => setUsername(e.target.value)} /></Field>
         <Field label="Password"><Input type="password" value={password} onChange={e => setPassword(e.target.value)} /></Field>
       </div>
@@ -169,7 +169,7 @@ function LiveAccountsModal({ broker, existing, onClose, onAdded }) {
       <ErrorNote>{err}</ErrorNote>
       {!live ? <div className="text-sm text-muted">Fetching from Capital.com…</div> : (
         live.length === 0 ? <Empty>No accounts returned.</Empty> : (
-          <table className="w-full">
+          <Table>
             <thead><tr className="border-b border-edge">
               <Th>Name</Th><Th>Account ID</Th><Th right>Balance</Th><Th>Ccy</Th><Th right></Th>
             </tr></thead>
@@ -186,7 +186,7 @@ function LiveAccountsModal({ broker, existing, onClose, onAdded }) {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </Table>
         )
       )}
     </Modal>

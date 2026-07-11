@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { RefreshCw } from "lucide-react";
-import { Card, Th, Td, Badge, Empty } from "../components/ui";
+import { Table, Card, Th, Td, Badge, Empty } from "../components/ui";
 import { Button, ErrorNote } from "../components/form";
 import TradeDetail from "../components/TradeDetail";
 import { api } from "../lib/api";
@@ -34,7 +34,7 @@ export default function Activity() {
           <Button variant="ghost" onClick={load}><RefreshCw className="w-4 h-4" /></Button>
         </div>
         {!rows ? <Empty>Loading…</Empty> : !rows.length ? <Empty>No activity yet.</Empty> : (
-          <table className="w-full">
+          <Table>
             <thead><tr className="border-b border-edge">
               <Th>When</Th><Th>Event</Th><Th right>Trade</Th><Th right>Leg</Th><Th>Detail</Th>
             </tr></thead>
@@ -51,7 +51,7 @@ export default function Activity() {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </Table>
         )}
       </Card>
       {detail && <TradeDetail tradeId={detail} onClose={() => setDetail(null)} />}

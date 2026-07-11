@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { RefreshCw, DownloadCloud } from "lucide-react";
-import { Card, Th, Td, Badge, Empty } from "../components/ui";
+import { Table, Card, Th, Td, Badge, Empty } from "../components/ui";
 import { Modal, Button, Select, Toggle, ErrorNote } from "../components/form";
 import { api } from "../lib/api";
 
@@ -71,7 +71,7 @@ export default function Messages() {
           </div>
         </div>
         {!rows ? <Empty>Loading…</Empty> : !rows.length ? <Empty>No messages.</Empty> : (
-          <table className="w-full">
+          <Table>
             <thead><tr className="border-b border-edge">
               <Th>When</Th><Th>Channel</Th><Th>Message</Th><Th>Parse</Th><Th right>Signal</Th>
             </tr></thead>
@@ -87,7 +87,7 @@ export default function Messages() {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </Table>
         )}
       </Card>
 
