@@ -44,6 +44,21 @@ def register_estimator(name: str, fn: Estimator) -> None:
     ESTIMATORS[name] = fn
 
 
+def _register_builtin() -> None:
+    """Register the Phase-1 estimators (#53). Kept out of estimators.py so that
+    module imports only stdlib (dev-testable); sidecar depends on estimators,
+    never the reverse."""
+    try:
+        from . import estimators
+        for _name, _fn in estimators.ESTIMATORS.items():
+            ESTIMATORS.setdefault(_name, _fn)
+    except Exception as exc:                         # never break capture on a bad estimator import
+        log.warning("ANALYTICS-SIDECAR-DEGRADED: estimator registration failed: %s", exc)
+
+
+_register_builtin()
+
+
 @dataclass
 class AnalyticsCtx:
     """Everything an estimator may need, assembled once per signal. `session` is

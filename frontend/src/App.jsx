@@ -16,10 +16,12 @@ import Chart from "./pages/Chart";
 import Messages from "./pages/Messages";
 import Activity from "./pages/Activity";
 import AI from "./pages/AI";
+import Analytics from "./pages/Analytics";
 import Configuration from "./pages/Configuration";
 
 const PAGES = { dashboard: Dashboard, positions: Positions, signals: Signals,
   history: History, performance: Performance, reconciliation: Reconciliation,
+  analytics: Analytics,
   sources: Sources, brokers: Brokers, symbols: Symbols, risk: Risk, chart: Chart,
   messages: Messages, activity: Activity, ai: AI, configuration: Configuration };
 

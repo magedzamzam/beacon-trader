@@ -91,6 +91,10 @@ export const api = {
   saveRiskLimits: (c) => req("/risk-limits/config", { method: "PUT", body: JSON.stringify(c) }),
   entryFilters: () => req("/entry-filters/config"),
   saveEntryFilters: (c) => req("/entry-filters/config", { method: "PUT", body: JSON.stringify(c) }),
+  analyticsConfig: () => req("/analytics/config"),
+  saveAnalyticsConfig: (c) => req("/analytics/config", { method: "PUT", body: JSON.stringify(c) }),
+  analyticsCorrelation: () => req("/analytics/correlation"),
+  signalAnalytics: (id) => req(`/analytics/signal/${id}`),
   // reconciliation: channel-claimed outcomes vs bot execution
   reconciliationSummary: (includeHistory = false) =>
     req(`/reconciliation/summary?include_history=${includeHistory}`),
