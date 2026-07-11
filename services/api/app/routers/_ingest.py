@@ -14,6 +14,7 @@ from beacon_core.db.models import Signal, Source
 from beacon_core.logging import get_logger
 from beacon_core.parsing.models import ParsedSignal
 from beacon_core.execution.planner import validate_signal
+from beacon_core.timeutil import utcnow
 
 bus = Bus()
 log = get_logger("ingest")
@@ -37,7 +38,7 @@ async def ingest_structured(session, *, source_id, symbol, direction, entry_from
     dedupe = _hash(source_id, symbol, direction, entry_from, sl)
     recent = (await session.execute(select(Signal).where(
         Signal.dedupe_hash == dedupe,
-        Signal.created_at >= dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=10)
+        Signal.created_at >= utcnow() - dt.timedelta(minutes=10)
     ))).scalars().first()
     if recent:
         return recent.id, False, "duplicate"

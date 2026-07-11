@@ -619,7 +619,7 @@ async def tick() -> None:
 
 async def main() -> None:
     await init_models()
-    asyncio.create_task(run_health_server("monitor", bus, port=8080))
+    spawn_bg(run_health_server("monitor", bus, port=8080))
     log.info("monitor loop every %ss", settings.monitor_interval)
     while True:
         try:

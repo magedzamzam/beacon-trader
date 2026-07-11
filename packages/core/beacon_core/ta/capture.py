@@ -13,6 +13,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from ..db.models import SignalFeature
 from ..logging import get_logger
 from ..settings_store import get_setting
+from ..timeutil import utcnow
 from .features import compute_timeframe
 from .registry import DEFAULT_CONFIG, TF_RESOLUTION, sanitize_config
 
@@ -74,7 +75,7 @@ async def capture_for_signal(session, sig, adapter, smap, *, max_bars: int = MAX
         log.info("no TA features computed for signal %s", sig.id)
         return None
 
-    now = dt.datetime.now(dt.timezone.utc)
+    now = utcnow()
     stmt = pg_insert(SignalFeature).values(
         signal_id=sig.id, symbol=sig.symbol, direction=sig.direction,
         price=Decimal(str(price)) if price is not None else None,

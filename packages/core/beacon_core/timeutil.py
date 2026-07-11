@@ -19,4 +19,8 @@ def parse_iso_utc(v) -> Optional[dt.datetime]:
         d = dt.datetime.fromisoformat(str(v).replace("Z", "+00:00"))
     except (ValueError, TypeError, AttributeError):
         return None
-    return d if d.tzinfo else d.replace(tzinfo=dt.timezone.utc)
+    # Deliver on the UTC contract: a naive value is UTC; a value already carrying
+    # a non-UTC offset is CONVERTED to UTC (not returned as-is), so callers that
+    # strip tzinfo to store "naive UTC" get the right wall-clock (#41).
+    d = d if d.tzinfo else d.replace(tzinfo=dt.timezone.utc)
+    return d.astimezone(dt.timezone.utc)

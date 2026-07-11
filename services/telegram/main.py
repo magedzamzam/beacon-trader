@@ -243,13 +243,13 @@ async def main() -> None:
         except Exception as exc:
             log.warning("message handling failed: %s", exc)
 
-    asyncio.create_task(run_health_server("telegram", bus, port=8080))
+    spawn_bg(run_health_server("telegram", bus, port=8080))
     await client.start()
     log.info("telegram listening on %s channels", len(watch))
     # Backfill recent history so the portal isn't empty, then stay responsive
     # to on-demand sync requests from the API.
-    asyncio.create_task(_backfill(client, sources))
-    asyncio.create_task(_control_loop(client, sources))
+    spawn_bg(_backfill(client, sources))
+    spawn_bg(_control_loop(client, sources))
     await client.run_until_disconnected()
 
 

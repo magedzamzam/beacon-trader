@@ -12,23 +12,12 @@ import os
 from typing import List, Optional
 
 from ..logging import get_logger
+from ..timeutil import parse_iso_utc as _parse_ts   # UTC-normalizing ISO parse (#41)
 
 log = get_logger("trading_hours.calendar")
 
 DEFAULT_URL = os.getenv("TRADING_HOURS_CALENDAR_URL",
                         "https://nfs.faireconomy.media/ff_calendar_thisweek.json")
-
-
-def _parse_ts(v) -> Optional[dt.datetime]:
-    if not v:
-        return None
-    try:
-        d = dt.datetime.fromisoformat(str(v).replace("Z", "+00:00"))
-        if d.tzinfo is None:
-            d = d.replace(tzinfo=dt.timezone.utc)
-        return d.astimezone(dt.timezone.utc)
-    except (ValueError, AttributeError):
-        return None
 
 
 async def fetch_events(url: Optional[str] = None) -> List[dict]:
