@@ -6,6 +6,8 @@ Wraps the Capital.com REST API per the v1 documentation:
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
+import time
 from decimal import Decimal
 from typing import Dict, List, Optional
 
@@ -207,10 +209,12 @@ class CapitalComAdapter(BrokerAdapter):
             return resp.text
 
     async def healthcheck(self) -> dict:
+        _t0 = time.monotonic()
         try:
             info = await self.get_account_info()
+            _latency_ms = round((time.monotonic() - _t0) * 1000)
             return {"ok": True, "message": f"connected as {info.account_id}",
-                    "currency": info.currency,
+                    "currency": info.currency, "latency_ms": _latency_ms,
                     "balance": str(info.balance) if info.balance is not None else None}
         except AuthError as e:
             return {"ok": False, "message": f"auth failed: {e}"}
@@ -334,6 +338,16 @@ class CapitalComAdapter(BrokerAdapter):
             }
             if req.stop_loss is not None: payload["stopLevel"] = float(req.stop_loss)
             if req.take_profit is not None: payload["profitLevel"] = float(req.take_profit)
+            # Broker-enforced expiry (#40): without goodTillDate Capital.com rests
+            # the order GOOD_TILL_CANCELLED (indefinitely). Send the TTL so the
+            # broker auto-cancels an unfilled entry even if our monitor is down.
+            # GTD wants exchange time as "yyyy-MM-ddTHH:mm:ss" (UTC, no offset).
+            if req.good_till is not None:
+                _gtd = req.good_till
+                if _gtd.tzinfo is not None:
+                    _gtd = _gtd.astimezone(dt.timezone.utc).replace(tzinfo=None)
+                payload["goodTillDate"] = _gtd.strftime("%Y-%m-%dT%H:%M:%S")
+                payload["timeInForce"] = "GOOD_TILL_DATE"
             data = await self._request("POST", "/api/v1/workingorders", json=payload)
 
         deal_ref = data.get("dealReference")

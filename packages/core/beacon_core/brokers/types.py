@@ -3,6 +3,7 @@ rest of Beacon never imports a broker SDK directly."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -147,6 +148,10 @@ class PlaceOrderRequest:
     limit_price: Optional[Decimal] = None
     stop_loss: Optional[Decimal] = None
     take_profit: Optional[Decimal] = None
+    # Broker-enforced expiry for working (LIMIT/STOP) orders (#40). A tz-aware
+    # UTC datetime; when set, the adapter sends it so the order auto-cancels
+    # instead of resting as GTC. Ignored for MARKET orders (they fill at once).
+    good_till: Optional["datetime"] = None
 
 
 @dataclass

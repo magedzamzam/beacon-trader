@@ -8,6 +8,7 @@ crash never loses track of real money.
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 from decimal import Decimal
 
 from sqlalchemy import func, select
@@ -15,7 +16,8 @@ from sqlalchemy import func, select
 from beacon_core.ai import service as ai_service
 from beacon_core.bus import Bus
 from beacon_core.settings_store import get_setting
-from beacon_core.config import (CH_SIGNAL_VALID, CH_TRADE_OPENED, get_settings)
+from beacon_core.config import (CH_SIGNAL_VALID, CH_TRADE_OPENED, get_settings,
+                                effective_entry_ttl_min)
 from beacon_core.logging import get_logger
 from beacon_core.health import run_health_server
 from beacon_core.db.base import Session, init_models
@@ -97,6 +99,8 @@ async def handle_signal(signal_id: int) -> None:
         source = await session.get(Source, sig.source_id) if sig.source_id else None
         if not source or not source.enabled_for_trading:
             log.info("signal %s: source not enabled for trading; skipping", signal_id)
+            sig.status = "skipped"          # terminal: not the re-drive sweep's job (#38)
+            await session.commit()
             return
 
         # Trust gate: untrusted / blocklisted sources do not auto-place live orders
@@ -119,6 +123,8 @@ async def handle_signal(signal_id: int) -> None:
         accounts = await _accounts_for(session, source)
         if not accounts:
             log.info("signal %s: no enabled accounts mapped", signal_id)
+            sig.status = "skipped"          # terminal: nothing to re-drive (#38)
+            await session.commit()
             return
 
         _entry = str(sig.entry_from) if sig.entry_from is not None else None
@@ -248,7 +254,10 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             rl_cfg = dict(DEFAULT_RISK_LIMITS)
             log.warning("RISK-LIMITS-DEFAULTED: no risk_limits setting; applying "
                         "conservative defaults (%s)", rl_cfg)
-        if rl_cfg.get("enabled"):
+        # Always evaluate: risk_limit_reason() self-gates the opt-in checks but
+        # ALWAYS enforces the kill-switch and daily-loss floor, so a mis-set
+        # `enabled: false` cannot silently disarm capital protection (PM 2026-07-10).
+        if True:
             day_start = utcnow().replace(
                 hour=0, minute=0, second=0, microsecond=0)
             day_realized = (await session.execute(select(
@@ -320,6 +329,11 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         session.add(trade)
         await session.flush()
 
+        # Broker-enforced expiry for any working (LIMIT/STOP) leg (#40): the
+        # per-channel TTL, clamped to a safe range, so an unfilled entry can't
+        # rest as GTC and fill hours late at a stale price.
+        good_till = utcnow() + timedelta(minutes=effective_entry_ttl_min(source.strategy))
+
         placed = 0
         for pleg in valid:
             leg = Leg(trade_id=trade.id, tp_index=pleg.tp_index,
@@ -328,13 +342,16 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             session.add(leg)
             await session.flush()
             try:
+                _is_market = pleg.order_type == "MARKET"
                 req = PlaceOrderRequest(
                     broker_symbol=smap.broker_epic,
                     side=OrderSide.BUY if side_buy else OrderSide.SELL,
-                    order_type=OrderType.MARKET if pleg.order_type == "MARKET" else OrderType.LIMIT,
+                    order_type=OrderType.MARKET if _is_market else OrderType.LIMIT,
                     quantity=pleg.lot,
-                    limit_price=None if pleg.order_type == "MARKET" else pleg.entry,
+                    limit_price=None if _is_market else pleg.entry,
                     stop_loss=pleg.sl, take_profit=pleg.tp,
+                    # Broker-enforced TTL for working orders (#40) — never GTC.
+                    good_till=None if _is_market else good_till,
                 )
                 res = await adapter.place_order(req)
                 if res.status == OrderStatus.REJECTED:
@@ -382,9 +399,43 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         await adapter.aclose()
 
 
+# --- stranded-signal re-drive (backstop for the in-flight at-most-once gap, #38)
+_REDRIVE_GRACE_SEC = 60        # older than a normal handle -> not still in flight
+_REDRIVE_INTERVAL_SEC = 30     # one sweep per N seconds (never storms the queue)
+_REDRIVE_BATCH = 50            # cap per pass
+
+
+async def _redrive_stranded_signals() -> None:
+    """Re-enqueue live signals that were validated but never became trades — the
+    residual crash/redeploy window between BRPOP and commit that #34's durable
+    queue can't cover (the message was already popped). Redelivery is safe:
+    handle_signal short-circuits an executed signal and the per-(signal,account)
+    guard prevents a double-place. Un-executable signals are marked 'skipped'
+    (not 'validated') so they never re-drive."""
+    while True:
+        try:
+            await asyncio.sleep(_REDRIVE_INTERVAL_SEC)
+            _cutoff = utcnow() - timedelta(seconds=_REDRIVE_GRACE_SEC)
+            async with Session()() as session:
+                _stranded = (await session.execute(
+                    select(Signal.id).where(
+                        Signal.status == "validated",
+                        Signal.created_at < _cutoff,
+                        ~select(Trade.id).where(Trade.signal_id == Signal.id).exists(),
+                    ).limit(_REDRIVE_BATCH))).scalars().all()
+            for _sid in _stranded:
+                await bus.enqueue(CH_SIGNAL_VALID, {"signal_id": _sid})
+            if _stranded:
+                log.warning("re-drove %s stranded validated signal(s): %s",
+                            len(_stranded), list(_stranded))
+        except Exception as exc:               # a sweep failure must never kill the worker
+            log.warning("stranded-signal re-drive sweep failed: %s", exc)
+
+
 async def main() -> None:
     await init_models()
-    asyncio.create_task(run_health_server("executor", bus, port=8080))
+    spawn_bg(run_health_server("executor", bus, port=8080))
+    spawn_bg(_redrive_stranded_signals())
     log.info("executor consuming %s (durable queue)", CH_SIGNAL_VALID)
     # Durable at-least-once: a signal enqueued while we're mid-handle / restarting
     # waits in Redis and is delivered on return (redelivery is safe — handle_signal

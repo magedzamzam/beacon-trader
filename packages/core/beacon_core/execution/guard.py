@@ -57,12 +57,25 @@ def risk_limit_reason(*, planned_risk, day_realized, open_risk_symbol,
       max_open_risk_per_symbol    cap on summed open planned_risk for the symbol
       max_open_risk_per_account   cap on summed open planned_risk for the account
     """
-    if not cfg or not cfg.get("enabled"):
-        return None
-    if cfg.get("trading_halted"):                 # manual kill-switch
-        return "trading is halted (kill switch on)"
+    cfg = cfg or {}
     pr = _dec(planned_risk)
     daily = abs(_dec(cfg.get("daily_loss_limit")))
+
+    # --- Fail-safe floor: ALWAYS honored, even if the master switch is off ---
+    # A mis-set `enabled: false` must never fully disarm capital protection, so
+    # the manual kill-switch and the daily-loss circuit breaker apply regardless
+    # of `enabled`. Added after the 2026-07-10 PM run found `risk_limits.enabled`
+    # left false while the account bled well past its daily floor. Only these two
+    # hard limits are unconditional; the per-signal ceiling and open-risk caps
+    # below remain opt-in via the master switch (unchanged behaviour).
+    if cfg.get("trading_halted"):                 # manual kill-switch
+        return "trading is halted (kill switch on)"
+    if daily > 0 and _dec(day_realized) <= -daily:
+        return f"daily loss limit reached (today {_dec(day_realized)} <= -{daily})"
+
+    # --- Opt-in limits: only when the master switch is on ---
+    if not cfg.get("enabled"):
+        return None
 
     pct = cfg.get("per_signal_max_pct_of_daily")
     if daily > 0 and pct:
@@ -70,9 +83,6 @@ def risk_limit_reason(*, planned_risk, day_realized, open_risk_symbol,
         if pr > ceiling:
             return (f"per-signal risk {pr} exceeds ceiling {ceiling} "
                     f"({_dec(pct) * 100}% of daily limit {daily})")
-
-    if daily > 0 and _dec(day_realized) <= -daily:
-        return f"daily loss limit reached (today {_dec(day_realized)} <= -{daily})"
 
     cap_sym = cfg.get("max_open_risk_per_symbol")
     if cap_sym and (_dec(open_risk_symbol) + pr) > _dec(cap_sym):

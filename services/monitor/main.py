@@ -19,7 +19,7 @@ from sqlalchemy import select
 
 from beacon_core.ai import service as ai_service
 from beacon_core.bus import Bus
-from beacon_core.config import CH_TRADE_EVENT, get_settings
+from beacon_core.config import CH_TRADE_EVENT, get_settings, effective_entry_ttl_min
 from beacon_core.logging import get_logger
 from beacon_core.health import run_health_server
 from beacon_core.db.base import Session, init_models
@@ -92,7 +92,7 @@ async def _rules_for(session, trade) -> tuple[list, dict, int]:
     if not rules:                       # no per-source rules -> global default ladder
         cfg = await get_setting(session, "strategy", {}) or {}
         rules = cfg.get("default_sl_rules") or DEFAULT_SL_RULES
-    return rules, strat, strat.get("entry_ttl_minutes", 60)
+    return rules, strat, effective_entry_ttl_min(strat)
 
 
 # Persistent broker sessions, reused across ticks. Re-logging in (and switching
@@ -222,10 +222,15 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
             Leg.trade_id == trade.id))).scalars().all()
         tp_levels = {l.tp_index: Decimal(str(l.tp)) for l in _all_legs}
 
-        # positions already linked to an open leg of this trade (so the heuristic
-        # fallback never re-claims a position that is already tracked).
-        linked_refs = {l.broker_position_ref for l in legs
-                       if l.status == "open" and l.broker_position_ref}
+        # Positions already linked to an open leg of ANY trade (not just this one)
+        # so the epic+direction heuristic can never re-claim a broker position
+        # that another leg already owns. A per-trade set let two same-symbol/
+        # -direction trades each grab the SAME dealId, putting one
+        # broker_position_ref on legs across trades and double-counting its
+        # realized P&L (#9). Global uniqueness is the invariant: 1 position -> 1 leg.
+        _claimed = (await session.execute(select(Leg.broker_position_ref).where(
+            Leg.status == "open", Leg.broker_position_ref.isnot(None)))).scalars().all()
+        linked_refs = {r for r in _claimed if r}
 
         def _find_fill_heuristic():
             """Fallback ONLY: an open position on this epic+direction not yet
@@ -383,6 +388,10 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                 if outcome == "sl_hit" and realized_pl > 0:
                     realized_pl = -realized_pl
 
+            # Was this close attributed by the EXACT position dealId (source of
+            # truth), or only heuristically? Surface the latter so a mis-matched
+            # leg P&L is auditable instead of silently trusted (#9).
+            _exact = m is not None and str(m.get("deal_id") or "") == str(leg.broker_position_ref or "")
             leg.outcome = outcome
             leg.close_price = close_px
             leg.realized_pl = realized_pl
@@ -392,6 +401,12 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                 leg.broker_position_ref = str(m.get("deal_id"))
             session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="closed",
                               payload={"outcome": outcome, "pl": str(realized_pl), "source": src}))
+            if not _exact:
+                session.add(Event(trade_id=trade.id, leg_id=leg.id,
+                                  kind="reconcile_unmatched",
+                                  payload={"reason": "no exact dealId close txn",
+                                           "attributed_via": src, "pl": str(realized_pl),
+                                           "position_ref": str(leg.broker_position_ref or "")}))
             await bus.publish(CH_TRADE_EVENT, {"trade_id": trade.id, "leg_id": leg.id,
                                                "outcome": outcome})
             _ev = {"tp_hit": "tp_hit", "sl_hit": "sl_hit", "breakeven": "sl_hit"}.get(outcome)
@@ -604,7 +619,7 @@ async def tick() -> None:
 
 async def main() -> None:
     await init_models()
-    asyncio.create_task(run_health_server("monitor", bus, port=8080))
+    spawn_bg(run_health_server("monitor", bus, port=8080))
     log.info("monitor loop every %ss", settings.monitor_interval)
     while True:
         try:

@@ -27,6 +27,15 @@ def test_parse_iso_utc_variants():
     assert parse_iso_utc("2026-07-10").tzinfo is not None
 
 
+def test_parse_iso_utc_normalizes_offset_to_utc():
+    # a non-UTC offset is CONVERTED to UTC, not returned as-is (#41), so a caller
+    # that strips tzinfo to store "naive UTC" gets the right wall-clock.
+    d = parse_iso_utc("2026-07-10T12:00:00+05:00")
+    assert d.utcoffset() == dt.timedelta(0)
+    assert d == dt.datetime(2026, 7, 10, 7, 0, tzinfo=dt.timezone.utc)
+    assert d.replace(tzinfo=None) == dt.datetime(2026, 7, 10, 7, 0)
+
+
 def test_parse_iso_utc_bad_input_returns_none():
     for bad in (None, "", "not-a-date", 12345, [], {}):
         assert parse_iso_utc(bad) is None
