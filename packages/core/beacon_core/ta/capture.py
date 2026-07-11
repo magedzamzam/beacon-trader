@@ -10,6 +10,7 @@ from decimal import Decimal
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from ..analysis import sidecar
 from ..db.models import SignalFeature
 from ..logging import get_logger
 from ..settings_store import get_setting
@@ -48,6 +49,16 @@ async def capture_for_signal(session, sig, adapter, smap, *, max_bars: int = MAX
     timeframes = cfg.get("timeframes") or DEFAULT_CONFIG["timeframes"]
     indicators = cfg.get("indicators") or DEFAULT_CONFIG["indicators"]
 
+    # Shadow analytics sidecar (#51/#52): reuse the bars we're about to fetch for
+    # its primary timeframe (no extra broker call), so estimators run on the same
+    # window. Loaded up front so we know which timeframe's bars to retain.
+    try:
+        a_cfg = await sidecar.load_config(session)
+    except Exception:
+        a_cfg = {"enabled": False}
+    a_tf = a_cfg.get("timeframe", "1h")
+    analytics_bars = None
+
     # Reference price (live mid) for above/below + distance features.
     price = None
     try:
@@ -67,6 +78,8 @@ async def capture_for_signal(session, sig, adapter, smap, *, max_bars: int = MAX
         except Exception as exc:
             log.info("bars %s/%s failed: %s", smap.broker_epic, resolution, exc)
             continue
+        if label == a_tf:                        # retain for the analytics sidecar
+            analytics_bars = bars
         f = compute_timeframe(bars, price, indicators)
         if f is not None:
             tf_features[label] = f
@@ -85,4 +98,18 @@ async def capture_for_signal(session, sig, adapter, smap, *, max_bars: int = MAX
     await session.execute(stmt)
     log.info("captured TA features for signal %s (%s timeframes, %s indicators)",
              sig.id, len(tf_features), len(indicators))
+
+    # Shadow analytics sidecar (#51/#52) — runs in its OWN session, fully
+    # isolated; any failure is swallowed here and never affects TA capture (which
+    # itself never affects trading).
+    if a_cfg.get("enabled"):
+        try:
+            await sidecar.capture_analytics(
+                signal_id=sig.id, symbol=sig.symbol, direction=sig.direction,
+                source_id=getattr(sig, "source_id", None), features=tf_features,
+                bars=analytics_bars, price=price, timeframe=a_tf, cfg=a_cfg)
+        except Exception as exc:
+            log.warning("ANALYTICS-SIDECAR-DEGRADED: capture failed (signal %s): %s",
+                        sig.id, exc)
+
     return tf_features

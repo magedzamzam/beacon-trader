@@ -19,6 +19,7 @@ from beacon_core.db.models import Account, Broker, Source, SymbolMap
 from beacon_core.execution.guard import DEFAULT_RISK_LIMITS
 from beacon_core.strategy.rules import DEFAULT_SL_RULES
 from beacon_core.execution.trend_filter import DEFAULT_TREND_FILTER
+from beacon_core.analysis.sidecar import DEFAULT_ANALYTICS
 from beacon_core.settings_store import get_setting, set_setting
 
 
@@ -102,6 +103,13 @@ async def main():
         ef_cfg = dict(await get_setting(s, "entry_filters", {}) or {})
         ef_cfg.setdefault("trend_alignment", dict(DEFAULT_TREND_FILTER))
         await set_setting(s, "entry_filters", ef_cfg)
+
+        # Shadow analytics sidecar (#51/#52) — pure observability, off the hot
+        # path, on by default. Set analytics.enabled=false to disable entirely.
+        an_cfg = dict(await get_setting(s, "analytics", {}) or {})
+        for k, v in DEFAULT_ANALYTICS.items():
+            an_cfg.setdefault(k, v)
+        await set_setting(s, "analytics", an_cfg)
 
         await s.commit()
     print("seed complete.")

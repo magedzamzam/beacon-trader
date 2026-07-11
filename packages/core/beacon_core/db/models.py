@@ -281,6 +281,27 @@ class SignalFeature(Base):
     captured_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
+class SignalAnalytics(Base):
+    """Shadow analytics sidecar (#51/#52) — advanced quant estimators computed
+    per signal, side-by-side with live trading and FULLY NON-BLOCKING. Pure
+    observability: nothing here gates or alters execution. Joins to
+    trades.realized_pl via signal_id (mirrors signal_features) for labelled
+    correlation analysis. `window` keeps a compact price snapshot so estimators
+    are reproducible offline; `degraded` lists estimators that failed this run."""
+    __tablename__ = "signal_analytics"
+    __table_args__ = (UniqueConstraint("signal_id", name="uq_signal_analytics"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    signal_id: Mapped[int] = mapped_column(ForeignKey("signals.id"))
+    symbol: Mapped[str] = mapped_column(String(16))
+    direction: Mapped[str | None] = mapped_column(String(4), nullable=True)
+    regime: Mapped[str | None] = mapped_column(String(16), nullable=True)      # trending|ranging|high_vol
+    price: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)
+    window: Mapped[dict] = mapped_column(JSON, default=dict)                   # compact price window (reproducibility)
+    analytics: Mapped[dict] = mapped_column(JSON, default=dict)                # {estimator: output}
+    degraded: Mapped[list] = mapped_column(JSON, default=list)                 # estimators that errored this run
+    captured_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 class EconEvent(Base):
     """Economic-calendar events (GMT) for the Trading Hours news blackout.
     Fetched from a free calendar feed and persisted so they survive restarts."""
