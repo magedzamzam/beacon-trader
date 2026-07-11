@@ -54,3 +54,18 @@ async def init_models() -> None:
                 await conn.exec_driver_sql(stmt)
             except Exception:                       # non-Postgres / already applied
                 pass
+
+    # Idempotency backstop (#15): at most one trade per (signal, account). The
+    # executor already guards this in code (existence check + already-executed
+    # short-circuit); this makes a concurrent/retried double-place fail at the
+    # DB layer too. Run in its OWN transaction — unlike the IF-NOT-EXISTS ALTERs
+    # above, this DDL can legitimately fail if pre-existing duplicates block the
+    # unique index, and a failure inside the create_all transaction would poison
+    # it. On failure the code guard still protects.
+    try:
+        async with engine().begin() as conn:
+            await conn.exec_driver_sql(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_trades_signal_account "
+                "ON trades (signal_id, account_id)")
+    except Exception:
+        pass
