@@ -18,6 +18,7 @@ from beacon_core.db.base import Session, init_models
 from beacon_core.db.models import Account, Broker, Source, SymbolMap
 from beacon_core.execution.guard import DEFAULT_RISK_LIMITS
 from beacon_core.strategy.rules import DEFAULT_SL_RULES
+from beacon_core.execution.trend_filter import DEFAULT_TREND_FILTER
 from beacon_core.settings_store import get_setting, set_setting
 
 
@@ -95,6 +96,12 @@ async def main():
         strat_cfg = dict(await get_setting(s, "strategy", {}) or {})
         strat_cfg.setdefault("default_sl_rules", DEFAULT_SL_RULES)
         await set_setting(s, "strategy", strat_cfg)
+
+        # Trend-alignment entry filter (#48) — seeded DISABLED (A/B flag). Flip
+        # entry_filters.trend_alignment.enabled to roll it out on demand.
+        ef_cfg = dict(await get_setting(s, "entry_filters", {}) or {})
+        ef_cfg.setdefault("trend_alignment", dict(DEFAULT_TREND_FILTER))
+        await set_setting(s, "entry_filters", ef_cfg)
 
         await s.commit()
     print("seed complete.")

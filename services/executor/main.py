@@ -31,8 +31,11 @@ from beacon_core.parsing.models import ParsedSignal
 from beacon_core.execution.planner import build_plan
 from beacon_core.execution.guard import (should_auto_execute, risk_limit_reason,
                                           DEFAULT_RISK_LIMITS)
+from beacon_core.execution.trend_filter import trend_filter_cfg, decide as trend_decide
 from beacon_core.risk.sizing import RiskConfig, InstrumentSpec, size_legs, plan_total_risk
 from beacon_core.ta import capture as ta_capture
+from beacon_core.ta.registry import TF_RESOLUTION
+from beacon_core.ta.indicators import ema as _ema
 from beacon_core import notifications as notify
 
 log = get_logger("executor")
@@ -75,6 +78,24 @@ def _to_parsed(sig: Signal) -> ParsedSignal:
         sl=Decimal(str(sig.sl)), tps=[Decimal(str(t)) for t in sig.tps],
         order_type_hint=sig.order_type, raw_text=sig.raw_text or "",
     )
+
+
+async def _trend_above(adapter, epic: str, tf_cfg: dict, price: float):
+    """price vs the configured trend EMA (True = above / up-trend). Returns None
+    on any failure (fail-open — a missing indicator never blocks a trade). #48."""
+    resolution = TF_RESOLUTION.get(tf_cfg.get("timeframe", "4h"))
+    if not resolution:
+        return None
+    try:
+        bars = await adapter.get_bars(epic, resolution, max_bars=250)
+    except Exception as exc:
+        log.info("trend-filter bars failed (%s/%s): %s", epic, resolution, exc)
+        return None
+    closes = [float(b["c"]) for b in bars if b.get("c") is not None]
+    val = _ema(closes, int(tf_cfg.get("ema_period", 200)))
+    if val is None:
+        return None
+    return price > val
 
 
 async def _accounts_for(session, source: Source):
@@ -197,6 +218,26 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             log.warning("no price for %s; skipping account %s", smap.broker_epic, acct.id)
             return
 
+        # --- trend-alignment entry filter (#48; config `entry_filters`, default off) ---
+        # Counter-trend entries (direction fighting the higher-TF trend) held ~95%
+        # of the book's realized loss. Skip or de-size them. Fail-open.
+        trend_size_factor = Decimal("1")
+        tf_cfg = trend_filter_cfg(await get_setting(session, "entry_filters", {}))
+        if tf_cfg.get("enabled"):
+            _above = await _trend_above(adapter, smap.broker_epic, tf_cfg, float(current))
+            _action, _factor, _aligned = trend_decide(tf_cfg, parsed.direction, _above)
+            if _action == "skip":
+                log.info("signal %s acct %s: SKIP counter-trend (%s EMA%s)",
+                         sig.id, acct.id, tf_cfg.get("timeframe"), tf_cfg.get("ema_period"))
+                session.add(Event(kind="entry_filtered",
+                                  payload={"signal_id": sig.id, "account_id": acct.id,
+                                           "reason": "counter_trend", "aligned": False,
+                                           "timeframe": tf_cfg.get("timeframe"),
+                                           "ema_period": tf_cfg.get("ema_period")}))
+                await session.commit()
+                return
+            trend_size_factor = Decimal(str(_factor))   # <1 only for de-sized counter-trend
+
         # Current-candle range: a leg whose entry the candle has already crossed is
         # opened MARKET (see build_plan). Best-effort; falls back to the live price.
         candle_high = candle_low = None
@@ -234,6 +275,17 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             honor_market_hint=bool(planner_cfg.get("honor_market_hint", True)),
         )
         risk = RiskConfig.from_dict(source.risk_config or acct.risk_config or {})
+        if trend_size_factor < 1:                       # counter-trend de-size (#48)
+            risk.value = risk.value * trend_size_factor
+            if risk.per_tp_percent:
+                risk.per_tp_percent = {k: v * trend_size_factor
+                                       for k, v in risk.per_tp_percent.items()}
+            log.info("signal %s acct %s: de-sized counter-trend x%s",
+                     sig.id, acct.id, trend_size_factor)
+            session.add(Event(kind="entry_filtered",
+                              payload={"signal_id": sig.id, "account_id": acct.id,
+                                       "reason": "counter_trend_desize", "aligned": False,
+                                       "factor": str(trend_size_factor)}))
         instrument = InstrumentSpec(
             value_per_point=Decimal(str(smap.value_per_point)),
             min_lot=Decimal(str(smap.min_lot)),

@@ -30,6 +30,7 @@ export default function Risk() {
     <div className="space-y-6">
       <ErrorNote>{err}</ErrorNote>
       <RiskLimitsCard />
+      <TrendFilterCard />
       <Card>
         <div className="px-4 py-3 border-b border-edge text-sm font-medium">Account limits</div>
         {!accounts.length ? <Empty>No accounts. Add one under Brokers.</Empty> : (
@@ -116,6 +117,59 @@ function RiskLimitsCard() {
             <Input type="number" value={cfg.max_open_risk_per_symbol} onChange={e => num("max_open_risk_per_symbol", e.target.value)} /></Field>
         </div>
         <div className="flex justify-end"><Button onClick={save}>Save risk limits</Button></div>
+      </div>
+    </Card>
+  );
+}
+
+function TrendFilterCard() {
+  const [cfg, setCfg] = useState(null);
+  const [saved, setSaved] = useState(false);
+  const [err, setErr] = useState(null);
+  useEffect(() => { api.entryFilters().then(r => setCfg(r.trend_alignment)).catch(e => setErr(e.message)); }, []);
+  if (!cfg) return null;
+  const set = (k, v) => { setCfg(c => ({ ...c, [k]: v })); setSaved(false); };
+  const save = async () => {
+    try { const r = await api.saveEntryFilters({ trend_alignment: cfg }); setCfg(r.trend_alignment); setSaved(true); }
+    catch (e) { setErr(e.message); }
+  };
+  return (
+    <Card>
+      <div className="px-4 py-3 border-b border-edge flex items-center justify-between">
+        <div className="text-sm font-medium">Trend-alignment entry filter</div>
+        <div className="flex items-center gap-2">
+          <Badge tone={cfg.enabled ? "beacon" : "muted"}>{cfg.enabled ? `on · ${cfg.mode}` : "off"}</Badge>
+          {saved && <span className="text-xs text-long">Saved</span>}
+        </div>
+      </div>
+      <div className="p-4 space-y-4">
+        <ErrorNote>{err}</ErrorNote>
+        <p className="text-[11px] text-muted">
+          Skips or de-sizes signals whose direction fights the higher-timeframe trend
+          ({cfg.timeframe} EMA{cfg.ema_period}). Counter-trend entries held ~95% of the
+          book's realized loss. Off by default — validated over a single bearish window,
+          so A/B it and re-verify when the trend flips (fail-open on missing data).
+        </p>
+        <div className="flex flex-wrap gap-x-8 gap-y-3">
+          <label className="flex items-center gap-2 text-sm">Enable filter
+            <Toggle checked={!!cfg.enabled} onChange={v => set("enabled", v)} /></label>
+        </div>
+        <div className={`grid grid-cols-1 sm:grid-cols-2 gap-3 ${cfg.enabled ? "" : "opacity-60"}`}>
+          <Field label="Trend timeframe" hint="e.g. 4h, 1d">
+            <Input value={cfg.timeframe} onChange={e => set("timeframe", e.target.value)} /></Field>
+          <Field label="EMA period">
+            <Input type="number" value={cfg.ema_period} onChange={e => set("ema_period", Number(e.target.value))} /></Field>
+          <Field label="Counter-trend action" hint="skip = reject · desize = trade smaller">
+            <select value={cfg.mode} onChange={e => set("mode", e.target.value)}
+              className="bg-panel2 border border-edge rounded-lg px-2.5 py-1.5 text-sm w-full outline-none focus:border-beacon">
+              <option value="skip">skip</option>
+              <option value="desize">desize</option>
+            </select></Field>
+          <Field label="De-size factor" hint="counter-trend size × this (desize mode)">
+            <Input type="number" step="0.05" min="0" max="1" value={cfg.desize_factor}
+              onChange={e => set("desize_factor", Number(e.target.value))} /></Field>
+        </div>
+        <div className="flex justify-end"><Button onClick={save}>Save entry filter</Button></div>
       </div>
     </Card>
   );

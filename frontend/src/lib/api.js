@@ -89,6 +89,8 @@ export const api = {
   // risk limits + kill switch
   riskLimits: () => req("/risk-limits/config"),
   saveRiskLimits: (c) => req("/risk-limits/config", { method: "PUT", body: JSON.stringify(c) }),
+  entryFilters: () => req("/entry-filters/config"),
+  saveEntryFilters: (c) => req("/entry-filters/config", { method: "PUT", body: JSON.stringify(c) }),
   // reconciliation: channel-claimed outcomes vs bot execution
   reconciliationSummary: (includeHistory = false) =>
     req(`/reconciliation/summary?include_history=${includeHistory}`),
