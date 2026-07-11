@@ -29,7 +29,7 @@ export default function Analysis() {
   const base = data?.base_rate;
   return (
     <div className="space-y-4">
-      <RangeFilter state={range} />
+      <RangeFilter state={range} variant="coarse" />
       {err && <ErrorNote>{err}</ErrorNote>}
       {!err && !data && <Card><Empty>Loading…</Empty></Card>}
       {!err && data && !data.ready && (

@@ -7,6 +7,8 @@ import { useMemo, useState } from "react";
  * backend `parse_iso_utc` is always given a `Z` instant); <RangeFilter> renders
  * the pill bar + Custom picker bound to that state.
  */
+// Full set — for sum/tally pages (Performance, Reconciliation): any granularity
+// is a meaningful question.
 export const PRESETS = [
   ["all", "All time"], ["today", "Today"], ["7d", "Last 7 days"],
   ["this_week", "This week"], ["last_week", "Last week"],
@@ -14,6 +16,18 @@ export const PRESETS = [
   ["this_quarter", "This quarter"], ["last_quarter", "Last quarter"],
   ["this_year", "This year"], ["custom", "Custom"],
 ];
+
+// Coarse set — for inference pages (Bayesian, Analytics). Fine-grained windows
+// give tiny per-cell n (credible intervals blow out to ~[0,1], a sparse slice
+// masquerades as an edge), so Today / Last 7 days / This week / Last week are
+// omitted (#58). These pages default to "all" for maximum statistical power.
+export const COARSE_PRESETS = [
+  ["all", "All time"], ["this_month", "This month"], ["last_month", "Last month"],
+  ["this_quarter", "This quarter"], ["last_quarter", "Last quarter"],
+  ["this_year", "This year"], ["custom", "Custom"],
+];
+
+const PRESET_SETS = { full: PRESETS, coarse: COARSE_PRESETS };
 
 // [from, to) as Date objects (or null = unbounded), local-time boundaries.
 export function rangeFor(id, custom = { from: "", to: "" }) {
@@ -53,11 +67,12 @@ export function useRange(initial = "all") {
            range: { from: fromIso, to: toIso } };
 }
 
-export default function RangeFilter({ state }) {
+export default function RangeFilter({ state, variant = "full" }) {
   const { preset, setPreset, custom, setCustom } = state;
+  const presets = PRESET_SETS[variant] || PRESETS;
   return (
     <div className="flex flex-wrap items-center gap-1.5">
-      {PRESETS.map(([id, label]) => (
+      {presets.map(([id, label]) => (
         <button key={id} onClick={() => setPreset(id)}
           className={`px-2.5 py-1 rounded-lg text-xs transition
             ${preset === id ? "bg-beacon/15 text-beacon" : "bg-panel2 text-muted hover:text-ink"}`}>
