@@ -4,26 +4,34 @@ This document describes the consolidated frontend navigation introduced to make 
 platform feel like a stable, enterprise-grade trading system, and it catalogues every
 **placeholder** so the remaining functionality can be implemented later.
 
-## Navigation consolidation
+## Navigation consolidation (unified sidebar — #57)
 
-The sidebar was collapsed from 13 flat items into three groups:
+There is now a **single** expandable sidebar (no separate Configuration menu). The
+former Configuration tabs are Settings subgroups whose children are first-class views,
+so every destination is reachable from the sidebar alone. The tree lives in
+`src/lib/nav.jsx` (`NAV` for the sidebar, `PAGES` for routing) and is consumed by both
+`Layout.jsx` and `App.jsx`.
 
-| Group    | Items |
-|----------|-------|
-| Overview | **Dashboard** |
-| Live     | Positions, Signals, Chart, Messages, Activity, History |
-| Settings | **Configuration** |
+| Group        | Items |
+|--------------|-------|
+| Overview     | **Dashboard** |
+| Live Trading | Positions, Signals, Chart, Messages, Activity, History |
+| Intelligence | Analytics, **Bayesian Analysis** (promoted from Configuration), Reconciler, Performance |
+| Settings     | **Connectivity** (Brokers & Accounts, Signal Sources, Symbols Mapping, Integrations) · **Trading** (Risk & Limits, Currency & FX, Strategies, Trading Hours) · **Intelligence** (AI Validation, Indicators, Notifications) · **Platform** (General, Users & Roles, API & Webhooks, Compliance & Audit, Backups & Data, Billing & Usage, System Health) |
 
-- **Dashboard** (`src/pages/Dashboard.jsx`) now surfaces all performance metrics
-  (realized P&L, win rate, profit factor, open positions, total trades, closed legs)
-  plus a *Performance by source* preview and *Recent trades*. Each card has a
-  **View more →** link that navigates to the detailed page (`performance`, `history`).
-  These detail pages are still routable (`App.jsx` `PAGES` map) but are no longer in
-  the sidebar — they are reached through the dashboard.
-
-- **Configuration** (`src/pages/Configuration.jsx`) is a single tabbed page. Tabs are
-  grouped (Connectivity / Trading / Intelligence / Platform). On desktop the tabs are a
-  vertical grouped list; on mobile they collapse to a horizontal scrollable strip.
+- Settings subgroups **expand/collapse** on both desktop and the mobile drawer; the
+  active leaf's parent auto-expands, and the expanded set persists to
+  `localStorage` (`beacon_nav_expanded`). On the collapsed desktop icon-rail, clicking a
+  subgroup un-collapses the rail and opens it (children can't render icon-only).
+- **Bayesian Analysis** (`analysis`, `src/pages/Analysis.jsx`) was promoted out of
+  Configuration to the top-level **Intelligence** group. It is distinct from **Analytics**
+  (`analytics`, `src/pages/Analytics.jsx`) — the two are not merged.
+- The legacy `configuration` view id redirects to the first Settings leaf (`brokers`)
+  via `REDIRECTS` in `nav.jsx`. The old `pages/Configuration.jsx` and its internal tab
+  menu were removed; the placeholder catalog moved to
+  `src/components/settings/placeholders.jsx`.
+- **Dashboard** still surfaces the performance metrics with **View more →** deep-links to
+  `performance` and `history` (ids unchanged).
 
 ## Functional tabs (already working)
 

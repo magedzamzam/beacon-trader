@@ -2,28 +2,7 @@ import { useEffect, useState } from "react";
 import Layout from "./components/Layout";
 import Login from "./pages/Login";
 import { api, getToken, clearToken } from "./lib/api";
-import Dashboard from "./pages/Dashboard";
-import Positions from "./pages/Positions";
-import Signals from "./pages/Signals";
-import History from "./pages/History";
-import Performance from "./pages/Performance";
-import Reconciliation from "./pages/Reconciliation";
-import Sources from "./pages/Sources";
-import Brokers from "./pages/Brokers";
-import Symbols from "./pages/Symbols";
-import Risk from "./pages/Risk";
-import Chart from "./pages/Chart";
-import Messages from "./pages/Messages";
-import Activity from "./pages/Activity";
-import AI from "./pages/AI";
-import Analytics from "./pages/Analytics";
-import Configuration from "./pages/Configuration";
-
-const PAGES = { dashboard: Dashboard, positions: Positions, signals: Signals,
-  history: History, performance: Performance, reconciliation: Reconciliation,
-  analytics: Analytics,
-  sources: Sources, brokers: Brokers, symbols: Symbols, risk: Risk, chart: Chart,
-  messages: Messages, activity: Activity, ai: AI, configuration: Configuration };
+import { PAGES, REDIRECTS } from "./lib/nav";
 
 export default function App() {
   const [view, setView] = useState("dashboard");
@@ -60,9 +39,10 @@ export default function App() {
   if (checking) return null;
   if (!authed) return <Login onAuthed={() => setAuthed(true)} />;
 
-  const Page = PAGES[view] || Dashboard;
+  const activeView = REDIRECTS[view] || view;      // legacy id -> sensible leaf
+  const Page = PAGES[activeView] || PAGES.dashboard;
   return (
-    <Layout view={view} setView={setView}
+    <Layout view={activeView} setView={setView}
       accounts={accounts} account={account} setAccount={chooseAccount}>
       <Page setView={setView} account={account} />
     </Layout>

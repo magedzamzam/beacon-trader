@@ -1,37 +1,51 @@
 import { useEffect, useState } from "react";
-import { Activity, Radio, Radar, ListChecks, CandlestickChart,
-         MessageSquare, GitBranch, Moon, Sun, KeyRound, LogOut,
-         Menu, X, SlidersHorizontal, BarChart3, GitCompare, Sigma,
+import { Radar, Moon, Sun, KeyRound, LogOut, Menu, X, ChevronDown,
          ChevronsLeft, ChevronsRight } from "lucide-react";
 import { api, getToken, setToken, clearToken } from "../lib/api";
 import { toggleTheme } from "../lib/theme";
+import { NAV, leafLabel, parentTitleOf } from "../lib/nav";
 
-// Overview + Live monitoring, then a single Settings entry — every
-// broker/account/risk/source/symbol/AI setting lives inside Configuration's tabs.
-const NAV = [
-  { title: "Overview", items: [
-    { id: "dashboard", label: "Dashboard", icon: Activity },
-  ]},
-  { title: "Live", items: [
-    { id: "positions", label: "Positions", icon: Radar },
-    { id: "signals", label: "Signals", icon: Radio },
-    { id: "chart", label: "Chart", icon: CandlestickChart },
-    { id: "messages", label: "Messages", icon: MessageSquare },
-    { id: "activity", label: "Activity", icon: GitBranch },
-    { id: "history", label: "History", icon: ListChecks },
-    { id: "performance", label: "Performance", icon: BarChart3 },
-    { id: "reconciliation", label: "Reconciler", icon: GitCompare },
-    { id: "analytics", label: "Analytics", icon: Sigma },
-  ]},
-  { title: "Settings", items: [
-    { id: "configuration", label: "Configuration", icon: SlidersHorizontal },
-  ]},
-];
+// A leaf destination: navigates to its view id.
+function NavLeaf({ item, view, go, collapsed, child }) {
+  const Icon = item.icon;
+  return (
+    <button onClick={() => go(item.id)}
+      title={collapsed ? item.label : undefined}
+      className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm mb-0.5 transition
+        ${collapsed ? "md:justify-center md:px-0" : child ? "md:pl-9" : ""}
+        ${view === item.id ? "bg-beacon/10 text-beacon" : "text-muted hover:text-ink hover:bg-panel"}`}>
+      <Icon className="w-4 h-4 shrink-0" />
+      <span className={collapsed ? "md:hidden" : ""}>{item.label}</span>
+    </button>
+  );
+}
 
-// Human-readable header label for a view id.
-function viewLabel(view) {
-  const item = NAV.flatMap(g => g.items).find(i => i.id === view);
-  return item ? item.label : view;
+// An expandable Settings subgroup. Collapsed rail: clicking it expands the rail
+// and opens the group (children can't render icon-only).
+function NavParent({ item, view, go, collapsed, open, toggle, uncollapse }) {
+  const Icon = item.icon;
+  const hasActive = item.children.some(c => c.id === view);
+  const onClick = () => {
+    if (collapsed) { uncollapse(); if (!open) toggle(item.label); }
+    else toggle(item.label);
+  };
+  return (
+    <div>
+      <button onClick={onClick} title={collapsed ? item.label : undefined}
+        className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm mb-0.5 transition
+          ${collapsed ? "md:justify-center md:px-0" : ""}
+          ${hasActive ? "text-ink" : "text-muted hover:text-ink hover:bg-panel"}`}>
+        <Icon className="w-4 h-4 shrink-0" />
+        <span className={`flex-1 text-left ${collapsed ? "md:hidden" : ""}`}>{item.label}</span>
+        <ChevronDown className={`w-3.5 h-3.5 shrink-0 transition-transform ${open ? "rotate-180" : ""} ${collapsed ? "md:hidden" : ""}`} />
+      </button>
+      <div className={`${open ? "block" : "hidden"} ${collapsed ? "md:hidden" : ""}`}>
+        {item.children.map(c => (
+          <NavLeaf key={c.id} item={c} view={view} go={go} collapsed={collapsed} child />
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function HealthPulse({ collapsed }) {
@@ -102,6 +116,23 @@ export default function Layout({ view, setView, children, accounts = [], account
     const n = !c; localStorage.setItem("beacon_nav_collapsed", n ? "1" : "0"); return n;
   });
 
+  // Expanded Settings subgroups (persisted). The active leaf's parent is always
+  // auto-expanded so the current page stays visible.
+  const [expanded, setExpanded] = useState(() => {
+    try { return new Set(JSON.parse(localStorage.getItem("beacon_nav_expanded") || "[]")); }
+    catch { return new Set(); }
+  });
+  useEffect(() => {
+    const p = parentTitleOf(view);
+    if (p) setExpanded(s => (s.has(p) ? s : new Set(s).add(p)));
+  }, [view]);
+  const toggleGroup = (label) => setExpanded(s => {
+    const n = new Set(s);
+    n.has(label) ? n.delete(label) : n.add(label);
+    localStorage.setItem("beacon_nav_expanded", JSON.stringify([...n]));
+    return n;
+  });
+
   // Close the mobile drawer on Escape for keyboard/accessibility parity.
   useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") setNavOpen(false); };
@@ -140,16 +171,12 @@ export default function Layout({ view, setView, children, accounts = [], account
           {NAV.map(group => (
             <div key={group.title}>
               <div className={`px-3 pt-1 pb-1.5 text-[10px] uppercase tracking-[0.16em] text-muted ${collapsed ? "md:hidden" : ""}`}>{group.title}</div>
-              {group.items.map(({ id, label, icon: Icon }) => (
-                <button key={id} onClick={() => go(id)}
-                  title={collapsed ? label : undefined}
-                  className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm mb-0.5 transition
-                    ${collapsed ? "md:justify-center md:px-0" : ""}
-                    ${view === id ? "bg-beacon/10 text-beacon" : "text-muted hover:text-ink hover:bg-panel"}`}>
-                  <Icon className="w-4 h-4 shrink-0" />
-                  <span className={collapsed ? "md:hidden" : ""}>{label}</span>
-                </button>
-              ))}
+              {group.items.map(item => item.children
+                ? <NavParent key={item.label} item={item} view={view} go={go}
+                    collapsed={collapsed} open={expanded.has(item.label)}
+                    toggle={toggleGroup} uncollapse={() => { setCollapsed(false); localStorage.setItem("beacon_nav_collapsed", "0"); }} />
+                : <NavLeaf key={item.id} item={item} view={view} go={go} collapsed={collapsed} />
+              )}
             </div>
           ))}
         </nav>
@@ -173,7 +200,7 @@ export default function Layout({ view, setView, children, accounts = [], account
               title="Menu" aria-label="Open menu">
               <Menu className="w-5 h-5" />
             </button>
-            <div className="text-sm font-medium capitalize truncate">{viewLabel(view)}</div>
+            <div className="text-sm font-medium capitalize truncate">{leafLabel(view)}</div>
           </div>
           <div className="flex items-center gap-2">
             <BrokerChip />
