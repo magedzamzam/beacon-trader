@@ -52,3 +52,22 @@ CH_TRADE_EVENT = "trades.events"
 CH_TG_CONTROL = "telegram.control"       # backfill / reload requests to telegram
 HEARTBEAT_PREFIX = "hb:"                  # hb:<service> -> unix ts
 EXEC_QUEUE = "queue:exec"                # paced broker-call queue
+
+# --- working-order time-to-live (per channel, see #40) --------------------
+# Every LIMIT/STOP entry gets a broker-enforced expiry (goodTillDate) so an
+# unfilled order can never rest as GTC and fill hours later at a stale price.
+# The value is per-channel (sources.strategy.entry_ttl_minutes) but clamped to
+# [MIN, MAX] with a safe default so a channel can't be set to GTC by accident.
+DEFAULT_ENTRY_TTL_MIN = 60
+MIN_ENTRY_TTL_MIN = 1
+MAX_ENTRY_TTL_MIN = 480                   # 8h — the slowest-fill channel we allow
+
+
+def effective_entry_ttl_min(strategy) -> int:
+    """The clamped, per-channel working-order TTL in minutes. Falls back to
+    DEFAULT_ENTRY_TTL_MIN when unset/invalid and is bounded to [MIN, MAX]."""
+    try:
+        v = int((strategy or {}).get("entry_ttl_minutes", DEFAULT_ENTRY_TTL_MIN))
+    except (TypeError, ValueError):
+        v = DEFAULT_ENTRY_TTL_MIN
+    return max(MIN_ENTRY_TTL_MIN, min(MAX_ENTRY_TTL_MIN, v))

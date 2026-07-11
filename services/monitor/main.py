@@ -19,7 +19,7 @@ from sqlalchemy import select
 
 from beacon_core.ai import service as ai_service
 from beacon_core.bus import Bus
-from beacon_core.config import CH_TRADE_EVENT, get_settings
+from beacon_core.config import CH_TRADE_EVENT, get_settings, effective_entry_ttl_min
 from beacon_core.logging import get_logger
 from beacon_core.health import run_health_server
 from beacon_core.db.base import Session, init_models
@@ -92,7 +92,7 @@ async def _rules_for(session, trade) -> tuple[list, dict, int]:
     if not rules:                       # no per-source rules -> global default ladder
         cfg = await get_setting(session, "strategy", {}) or {}
         rules = cfg.get("default_sl_rules") or DEFAULT_SL_RULES
-    return rules, strat, strat.get("entry_ttl_minutes", 60)
+    return rules, strat, effective_entry_ttl_min(strat)
 
 
 # Persistent broker sessions, reused across ticks. Re-logging in (and switching

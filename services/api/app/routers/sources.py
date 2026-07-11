@@ -3,11 +3,23 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from beacon_core.db.models import Source
+from beacon_core.config import effective_entry_ttl_min
 from ..deps import get_db
 from ..auth import require_token
 from ..schemas import SourceIn
 
 router = APIRouter(prefix="/sources", tags=["sources"], dependencies=[Depends(require_token)])
+
+
+def _sanitize_strategy(strat):
+    """Range-validate per-channel strategy on save so a bad value can never
+    reach the broker. entry_ttl_minutes is clamped to [MIN, MAX] (#40) — this
+    is what stops a channel being set to GTC (unbounded rest) by accident."""
+    if not isinstance(strat, dict) or "entry_ttl_minutes" not in strat:
+        return strat
+    out = dict(strat)
+    out["entry_ttl_minutes"] = effective_entry_ttl_min(strat)   # clamped to [MIN, MAX]
+    return out
 
 
 def _dump(s: Source) -> dict:
@@ -30,7 +42,9 @@ async def list_sources(include_archived: bool = False,
 
 @router.post("")
 async def create_source(body: SourceIn, db: AsyncSession = Depends(get_db)):
-    s = Source(**body.model_dump()); db.add(s); await db.commit()
+    data = body.model_dump()
+    data["strategy"] = _sanitize_strategy(data.get("strategy"))
+    s = Source(**data); db.add(s); await db.commit()
     return {"id": s.id}
 
 
@@ -40,7 +54,7 @@ async def update_source(source_id: int, body: dict, db: AsyncSession = Depends(g
     for k in ("name", "enabled_for_trading", "is_trusted", "strategy",
               "risk_config", "account_map", "external_id", "archived"):
         if k in body:
-            setattr(s, k, body[k])
+            setattr(s, k, _sanitize_strategy(body[k]) if k == "strategy" else body[k])
     await db.commit()
     return _dump(s)
 

@@ -8,6 +8,7 @@ crash never loses track of real money.
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 from decimal import Decimal
 
 from sqlalchemy import func, select
@@ -15,7 +16,8 @@ from sqlalchemy import func, select
 from beacon_core.ai import service as ai_service
 from beacon_core.bus import Bus
 from beacon_core.settings_store import get_setting
-from beacon_core.config import (CH_SIGNAL_VALID, CH_TRADE_OPENED, get_settings)
+from beacon_core.config import (CH_SIGNAL_VALID, CH_TRADE_OPENED, get_settings,
+                                effective_entry_ttl_min)
 from beacon_core.logging import get_logger
 from beacon_core.health import run_health_server
 from beacon_core.db.base import Session, init_models
@@ -323,6 +325,11 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         session.add(trade)
         await session.flush()
 
+        # Broker-enforced expiry for any working (LIMIT/STOP) leg (#40): the
+        # per-channel TTL, clamped to a safe range, so an unfilled entry can't
+        # rest as GTC and fill hours late at a stale price.
+        good_till = utcnow() + timedelta(minutes=effective_entry_ttl_min(source.strategy))
+
         placed = 0
         for pleg in valid:
             leg = Leg(trade_id=trade.id, tp_index=pleg.tp_index,
@@ -331,13 +338,16 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             session.add(leg)
             await session.flush()
             try:
+                _is_market = pleg.order_type == "MARKET"
                 req = PlaceOrderRequest(
                     broker_symbol=smap.broker_epic,
                     side=OrderSide.BUY if side_buy else OrderSide.SELL,
-                    order_type=OrderType.MARKET if pleg.order_type == "MARKET" else OrderType.LIMIT,
+                    order_type=OrderType.MARKET if _is_market else OrderType.LIMIT,
                     quantity=pleg.lot,
-                    limit_price=None if pleg.order_type == "MARKET" else pleg.entry,
+                    limit_price=None if _is_market else pleg.entry,
                     stop_loss=pleg.sl, take_profit=pleg.tp,
+                    # Broker-enforced TTL for working orders (#40) — never GTC.
+                    good_till=None if _is_market else good_till,
                 )
                 res = await adapter.place_order(req)
                 if res.status == OrderStatus.REJECTED:
