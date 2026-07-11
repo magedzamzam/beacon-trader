@@ -333,3 +333,86 @@ def hist_vol(closes: List[float], period: int = 20) -> Optional[float]:
         return None
     m = sum(rets) / len(rets)
     return (sum((r - m) ** 2 for r in rets) / len(rets)) ** 0.5 * (252 ** 0.5)
+
+
+# ---- market structure: Fair Value Gaps & Order Blocks (#59) ------------------
+def _zone_touched(highs, lows, lo, hi, start) -> bool:
+    """Did any candle from `start` onward trade inside the price band [lo, hi]?"""
+    return any(lows[j] <= hi and highs[j] >= lo for j in range(start, len(highs)))
+
+
+def fair_value_gap(highs, lows, closes, price, min_gap_atr: float = 0.25,
+                   lookback: int = 50) -> Optional[dict]:
+    """3-candle imbalance. Bullish FVG when low[t] > high[t-2] (a gap the price
+    skipped on the way up); bearish when high[t] < low[t-2]. Reports the NEAREST
+    still-unfilled gap to the current price. A gap is `filled` once a later candle
+    trades back into it. Gaps smaller than min_gap_atr×ATR are ignored as noise.
+    Structure feature only — never gates (measure-before-gate, #59)."""
+    n = len(highs)
+    if n < 3 or price is None or len(lows) < n:
+        return None
+    a = atr(highs, lows, closes, 14) or 0.0
+    min_gap = max(0.0, float(min_gap_atr)) * a
+    start = max(2, n - int(lookback))
+    gaps = []
+    for t in range(start, n):
+        if lows[t] > highs[t - 2]:
+            direction, bottom, top = "bull", highs[t - 2], lows[t]
+        elif highs[t] < lows[t - 2]:
+            direction, bottom, top = "bear", highs[t], lows[t - 2]
+        else:
+            continue
+        if (top - bottom) < min_gap:
+            continue
+        filled = _zone_touched(highs, lows, bottom, top, t + 1)
+        gaps.append((direction, top, bottom, filled))
+    if not gaps:
+        return {"present": False, "direction": None, "top": None, "bottom": None,
+                "mid": None, "size_pct": None, "dist_pct": None, "filled": None}
+
+    def _dist(g):
+        _, top, bottom, _ = g
+        return 0.0 if bottom <= price <= top else min(abs(price - top), abs(price - bottom))
+
+    unfilled = [g for g in gaps if not g[3]]
+    direction, top, bottom, filled = min(unfilled or gaps, key=_dist)
+    d = 0.0 if bottom <= price <= top else min(abs(price - top), abs(price - bottom))
+    return {"present": not filled, "direction": direction,
+            "top": top, "bottom": bottom, "mid": (top + bottom) / 2.0,
+            "size_pct": (top - bottom) / price * 100.0,
+            "dist_pct": d / price * 100.0, "filled": filled}
+
+
+def order_block(opens, highs, lows, closes, price, disp_atr: float = 1.0,
+                lookback: int = 50) -> Optional[dict]:
+    """The last opposing candle before an impulsive displacement. A bullish OB is
+    the last down candle before a strong up-move; bearish is the last up candle
+    before a strong down-move (impulse body >= disp_atr×ATR). Reports the freshest
+    still-unmitigated block (price hasn't returned into its [low, high] zone).
+    Needs candle opens; returns None if unavailable. Structure feature only (#59)."""
+    n = len(closes)
+    if n < 3 or price is None or not opens or len(opens) < n:
+        return None
+    a = atr(highs, lows, closes, 14) or 0.0
+    thr = max(0.0, float(disp_atr)) * a
+    if thr <= 0:
+        return None
+    start = max(1, n - int(lookback))
+    blocks = []
+    for t in range(start, n):
+        body = closes[t] - opens[t]
+        if body >= thr and closes[t - 1] < opens[t - 1]:            # bullish OB
+            blocks.append(("bull", highs[t - 1], lows[t - 1], t - 1))
+        elif -body >= thr and closes[t - 1] > opens[t - 1]:         # bearish OB
+            blocks.append(("bear", highs[t - 1], lows[t - 1], t - 1))
+    if not blocks:
+        return {"present": False, "type": None, "top": None, "bottom": None,
+                "dist_pct": None, "mitigated": None}
+    scored = [(typ, top, bottom, idx,
+               _zone_touched(highs, lows, bottom, top, idx + 2))
+              for typ, top, bottom, idx in blocks]
+    unmit = [b for b in scored if not b[4]]
+    typ, top, bottom, idx, mitigated = max(unmit or scored, key=lambda b: b[3])
+    d = 0.0 if bottom <= price <= top else min(abs(price - top), abs(price - bottom))
+    return {"present": not mitigated, "type": typ, "top": top, "bottom": bottom,
+            "dist_pct": d / price * 100.0, "mitigated": mitigated}

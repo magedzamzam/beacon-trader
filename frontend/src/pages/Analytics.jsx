@@ -11,6 +11,7 @@ const fmt = (v, d = 2) => (v == null ? "—" : Number(v).toFixed(d));
  *  Read-only observability — nothing here gates trading. */
 export default function Analytics() {
   const [rep, setRep] = useState(null);
+  const [struct, setStruct] = useState(null);
   const [cfg, setCfg] = useState(null);
   const [err, setErr] = useState(null);
   const range = useRange("all");
@@ -18,8 +19,9 @@ export default function Analytics() {
   const loadCfg = () => api.analyticsConfig().then(setCfg).catch(e => setErr(e.message));
   useEffect(() => { loadCfg(); }, []);
   useEffect(() => {
-    setRep(null);
+    setRep(null); setStruct(null);
     api.analyticsCorrelation(range.range).then(setRep).catch(e => setErr(e.message));
+    api.analyticsStructure(range.range).then(setStruct).catch(e => setErr(e.message));
   }, [range.fromIso, range.toIso]);
 
   const toggle = async (v) => {
@@ -97,6 +99,40 @@ export default function Analytics() {
           </Table>
         </Card>
       )}
+
+      <StructureCard title="Fair Value Gap — inside vs outside" rows={struct?.fvg} ready={!!struct} />
+      <StructureCard title="Order Block — inside vs outside" rows={struct?.ob} ready={!!struct} />
     </div>
+  );
+}
+
+// FVG/OB-vs-outcome cut (#59): win-rate & expectancy inside vs outside the zone,
+// overall then per channel/regime, with 90% credible intervals.
+function StructureCard({ title, rows, ready }) {
+  return (
+    <Card>
+      <div className="px-4 py-3 border-b border-edge text-sm font-medium">{title}</div>
+      {!ready ? <Empty>Loading…</Empty>
+        : !rows || !rows.length ? <Empty>No labelled structure data yet — accrues as signals capture and trades close.</Empty> : (
+        <Table>
+          <thead><tr className="border-b border-edge">
+            <Th>Scope</Th><Th>Zone</Th><Th right>n</Th><Th right>Win%</Th>
+            <Th right>90% CI</Th><Th right>Expectancy</Th>
+          </tr></thead>
+          <tbody>
+            {rows.map((r, i) => (
+              <tr key={i} className="border-b border-edge/60">
+                <Td><span className="text-xs text-muted">{r.scope === "overall" ? "all" : `${r.scope}: ${r.label}`}</span></Td>
+                <Td><Badge tone={r.membership === "inside" ? "beacon" : "muted"}>{r.membership}</Badge></Td>
+                <Td right mono>{r.n}</Td>
+                <Td right mono>{fmt(r.win_rate * 100, 0)}%</Td>
+                <Td right mono>{fmt(r.ci_low * 100, 0)}–{fmt(r.ci_high * 100, 0)}%</Td>
+                <Td right mono><span className={r.expectancy >= 0 ? "text-long" : "text-short"}>{fmt(r.expectancy)}</span></Td>
+              </tr>
+            ))}
+          </tbody>
+        </Table>
+      )}
+    </Card>
   );
 }

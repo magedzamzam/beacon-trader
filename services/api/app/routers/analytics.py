@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from beacon_core.analysis.report import channel_regime_report
+from beacon_core.analysis.report import channel_regime_report, structure_outcome_report
 from beacon_core.analysis.sidecar import load_config
 from beacon_core.db.models import SignalAnalytics
 from beacon_core.settings_store import set_setting
@@ -45,6 +45,15 @@ async def correlation(date_from: str = None, date_to: str = None,
     channel, and a win/loss feature read. Optional date range (#58) anchored on
     signal time."""
     return await channel_regime_report(db, parse_iso_utc(date_from), parse_iso_utc(date_to))
+
+
+@router.get("/structure")
+async def structure(date_from: str = None, date_to: str = None,
+                    db: AsyncSession = Depends(get_db)):
+    """FVG/OB-vs-outcome cut (#59): win-rate & expectancy when the entry sits
+    inside an unfilled Fair Value Gap / unmitigated Order Block vs not, per
+    channel and regime with credible intervals. Shadow only."""
+    return await structure_outcome_report(db, parse_iso_utc(date_from), parse_iso_utc(date_to))
 
 
 @router.get("/signal/{signal_id}")

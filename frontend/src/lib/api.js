@@ -99,6 +99,7 @@ export const api = {
   analyticsConfig: () => req("/analytics/config"),
   saveAnalyticsConfig: (c) => req("/analytics/config", { method: "PUT", body: JSON.stringify(c) }),
   analyticsCorrelation: (range = {}) => req(`/analytics/correlation${_perfQs("", range)}`),
+  analyticsStructure: (range = {}) => req(`/analytics/structure${_perfQs("", range)}`),
   signalAnalytics: (id) => req(`/analytics/signal/${id}`),
   // reconciliation: channel-claimed outcomes vs bot execution
   reconciliationSummary: (includeHistory = false, { from, to } = {}) => {

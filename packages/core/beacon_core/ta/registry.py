@@ -23,6 +23,7 @@ class Ctx:
     lows: List[float]
     volumes: List[Optional[float]]
     price: float
+    opens: Optional[List[float]] = None       # candle opens (for Order Blocks, #59)
 
 
 AVAILABLE_TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
@@ -99,6 +100,27 @@ def _vwap(ctx, p):
     return {"value": _r(v), "above": (ctx.price > v) if ctx.price else None}
 
 
+def _fvg(ctx, p):
+    r = I.fair_value_gap(ctx.highs, ctx.lows, ctx.closes, ctx.price,
+                         p["min_gap_atr"], p["lookback"])
+    if r is None:
+        return None
+    return {"present": r["present"], "direction": r["direction"],
+            "top": _r(r["top"], 5), "bottom": _r(r["bottom"], 5), "mid": _r(r["mid"], 5),
+            "size_pct": _r(r["size_pct"]), "dist_pct": _r(r["dist_pct"]),
+            "filled": r["filled"]}
+
+
+def _order_block(ctx, p):
+    r = I.order_block(ctx.opens, ctx.highs, ctx.lows, ctx.closes, ctx.price,
+                      p["disp_atr"], p["lookback"])
+    if r is None:
+        return None
+    return {"present": r["present"], "type": r["type"],
+            "top": _r(r["top"], 5), "bottom": _r(r["bottom"], 5),
+            "dist_pct": _r(r["dist_pct"]), "mitigated": r["mitigated"]}
+
+
 REGISTRY = [
     {"id": "sma", "label": "SMA", "category": "trend",
      "params": [_P("period", 50, 2, 500)], "compute": _ma(I.sma)},
@@ -158,6 +180,12 @@ REGISTRY = [
      "params": [_P("k", 3, 1, 20)], "compute": _sr},
     {"id": "fib", "label": "Fibonacci", "category": "structure",
      "params": [], "compute": _fib},
+    {"id": "fvg", "label": "Fair Value Gap", "category": "structure",
+     "params": [_P("min_gap_atr", 0.25, 0, 5, "float"), _P("lookback", 50, 3, 300)],
+     "compute": _fvg},
+    {"id": "order_block", "label": "Order Block", "category": "structure",
+     "params": [_P("disp_atr", 1.0, 0, 10, "float"), _P("lookback", 50, 3, 300)],
+     "compute": _order_block},
 ]
 
 _BY_ID = {s["id"]: s for s in REGISTRY}
@@ -175,6 +203,8 @@ DEFAULT_CONFIG = {
         {"id": "adx", "params": {"period": 14}},
         {"id": "support_resistance", "params": {"k": 3}},
         {"id": "fib", "params": {}},
+        {"id": "fvg", "params": {"min_gap_atr": 0.25, "lookback": 50}},
+        {"id": "order_block", "params": {"disp_atr": 1.0, "lookback": 50}},
     ],
 }
 

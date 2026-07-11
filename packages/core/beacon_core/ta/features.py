@@ -23,8 +23,13 @@ def compute_timeframe(bars: List[dict], price: Optional[float],
     if len(closes) < MIN_BARS or len(highs) < MIN_BARS or len(lows) < MIN_BARS:
         return None
     volumes = [float(b["v"]) if b.get("v") is not None else None for b in bars]
+    # Opens for Order-Block detection (#59) — only when every bar has one, so the
+    # OHLC arrays stay index-aligned; otherwise OB degrades to None (never blocks).
+    opens = [float(b["o"]) for b in bars if b.get("o") is not None]
+    if len(opens) != len(closes):
+        opens = None
     ctx = Ctx(closes=closes, highs=highs, lows=lows, volumes=volumes,
-              price=float(price) if price else closes[-1])
+              price=float(price) if price else closes[-1], opens=opens)
 
     out: dict = {"_n_bars": len(closes), "_price": round(ctx.price, 4)}
     for item in (indicators or []):

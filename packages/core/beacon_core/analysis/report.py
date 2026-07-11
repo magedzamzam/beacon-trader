@@ -116,3 +116,95 @@ async def channel_regime_report(session, frm=None, to=None) -> dict:
         "note": ("Shadow analytics — observability only, nothing gates on this. "
                  "Stats pooled across history; weigh config-change regime breaks."),
     }
+
+
+def _structure_membership(features: dict) -> tuple:
+    """(in_fvg, in_ob): is the entry price inside an UNFILLED FVG / UNMITIGATED
+    OB on any captured timeframe? The structure keys embed their params
+    (e.g. "fvg_0.25_50"), so match by prefix (#59)."""
+    in_fvg = in_ob = False
+    for _tf, block in (features or {}).items():
+        if not isinstance(block, dict):
+            continue
+        for key, val in block.items():
+            if not isinstance(val, dict):
+                continue
+            inside = bool(val.get("present")) and val.get("dist_pct") == 0
+            if key.startswith("fvg"):
+                in_fvg = in_fvg or inside
+            elif key.startswith("order_block"):
+                in_ob = in_ob or inside
+    return in_fvg, in_ob
+
+
+async def structure_outcome_report(session, frm=None, to=None) -> dict:
+    """The FVG/OB-vs-outcome cut (#59): win-rate & expectancy when a signal's
+    entry sits inside an unfilled Fair Value Gap / unmitigated Order Block vs not,
+    overall and per channel/regime, with Beta-Binomial credible intervals. Joins
+    signal_features (structure) + signal_analytics (regime) -> trades.realized_pl.
+    Shadow only — nothing gates on it."""
+    from collections import defaultdict
+    from sqlalchemy import select
+    from ..db.models import SignalFeature, SignalAnalytics, Signal, Source, Trade
+
+    q = (select(Source.name, SignalFeature.features, SignalAnalytics.regime,
+                Trade.realized_pl)
+         .join(Signal, Signal.id == SignalFeature.signal_id)
+         .join(Trade, Trade.signal_id == SignalFeature.signal_id)
+         .outerjoin(SignalAnalytics, SignalAnalytics.signal_id == SignalFeature.signal_id)
+         .outerjoin(Source, Source.id == Signal.source_id))
+    if frm is not None:
+        q = q.where(Signal.created_at >= frm)
+    if to is not None:
+        q = q.where(Signal.created_at < to)
+    rows = (await session.execute(q)).all()
+
+    def _cell():
+        return {"n": 0, "wins": 0, "pl": 0.0}
+
+    agg = {"fvg": defaultdict(lambda: defaultdict(_cell)),
+           "ob": defaultdict(lambda: defaultdict(_cell))}
+    overall_n = overall_wins = 0
+
+    for name, feats, regime, pl in rows:
+        if pl is None:
+            continue
+        pl = float(pl)
+        win = pl > 0
+        overall_n += 1
+        overall_wins += 1 if win else 0
+        in_fvg, in_ob = _structure_membership(feats)
+        chan = name or "Unattributed"
+        reg = regime or "unknown"
+        for struct, inside in (("fvg", in_fvg), ("ob", in_ob)):
+            mem = "inside" if inside else "outside"
+            for scope, label in (("overall", "all"), ("channel", chan), ("regime", reg)):
+                b = agg[struct][(scope, label)][mem]
+                b["n"] += 1
+                b["wins"] += 1 if win else 0
+                b["pl"] += pl
+
+    base = (overall_wins / overall_n) if overall_n else 0.5
+
+    def _rows(struct):
+        out = []
+        for (scope, label), mems in agg[struct].items():
+            for mem, b in mems.items():
+                if not b["n"]:
+                    continue
+                post = posterior(b["wins"], b["n"], base)
+                out.append({"scope": scope, "label": label, "membership": mem,
+                            "n": b["n"], "win_rate": round(b["wins"] / b["n"], 4),
+                            "expectancy": round(b["pl"] / b["n"], 4),
+                            "ci_low": round(post["ci_low"], 4),
+                            "ci_high": round(post["ci_high"], 4)})
+        out.sort(key=lambda r: (r["scope"] != "overall", r["label"], r["membership"]))
+        return out
+
+    return {
+        "n_labelled": overall_n, "base_rate": round(base, 4),
+        "fvg": _rows("fvg"), "ob": _rows("ob"),
+        "note": ("Structure (FVG/OB) vs outcome — SHADOW only, measure-before-gate "
+                 "(#59). 'inside' = entry price within an unfilled FVG / unmitigated "
+                 "OB on any captured timeframe. Small-n: trust the credible interval."),
+    }
