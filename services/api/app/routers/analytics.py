@@ -9,6 +9,7 @@ from beacon_core.analysis.report import channel_regime_report
 from beacon_core.analysis.sidecar import load_config
 from beacon_core.db.models import SignalAnalytics
 from beacon_core.settings_store import set_setting
+from beacon_core.timeutil import parse_iso_utc
 from ..deps import get_db
 from ..auth import require_token
 
@@ -38,10 +39,12 @@ async def put_config(body: dict, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/correlation")
-async def correlation(db: AsyncSession = Depends(get_db)):
+async def correlation(date_from: str = None, date_to: str = None,
+                      db: AsyncSession = Depends(get_db)):
     """Per-channel × regime performance (with credible intervals), regime mix by
-    channel, and a win/loss feature read."""
-    return await channel_regime_report(db)
+    channel, and a win/loss feature read. Optional date range (#58) anchored on
+    signal time."""
+    return await channel_regime_report(db, parse_iso_utc(date_from), parse_iso_utc(date_to))
 
 
 @router.get("/signal/{signal_id}")

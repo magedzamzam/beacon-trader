@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Sigma } from "lucide-react";
 import { Card, Table, Th, Td, Badge, Empty } from "../components/ui";
 import { Button, ErrorNote } from "../components/form";
+import RangeFilter, { useRange } from "../components/RangeFilter";
 import { api } from "../lib/api";
 
 const pct = (v) => (v == null ? "—" : (v * 100).toFixed(1) + "%");
@@ -18,21 +19,24 @@ export default function Analysis() {
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
   const [minN, setMinN] = useState(5);
+  const range = useRange("all");
 
-  const load = (n) => { setData(null); setErr(null);
-    api.bayesAnalysis(n).then(setData).catch(e => setErr(e.message)); };
-  useEffect(() => { load(minN); /* eslint-disable-next-line */ }, []);
+  const load = () => { setData(null); setErr(null);
+    api.bayesAnalysis(minN, range.range).then(setData).catch(e => setErr(e.message)); };
+  // refetch on range change; the "Apply" button refetches on a min-n change
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [range.fromIso, range.toIso]);
 
-  if (err) return <ErrorNote>{err}</ErrorNote>;
-  if (!data) return <Card><Empty>Loading…</Empty></Card>;
-  if (!data.ready) return (
-    <Card><Empty>{data.message || "Not enough data yet."} The Bayesian analysis
-      appears once trades close with a captured TA snapshot.</Empty></Card>
-  );
-
-  const base = data.base_rate;
+  const base = data?.base_rate;
   return (
     <div className="space-y-4">
+      <RangeFilter state={range} />
+      {err && <ErrorNote>{err}</ErrorNote>}
+      {!err && !data && <Card><Empty>Loading…</Empty></Card>}
+      {!err && data && !data.ready && (
+        <Card><Empty>{data.message || "Not enough data yet."} The Bayesian analysis
+          appears once trades close with a captured TA snapshot.</Empty></Card>
+      )}
+      {!err && data && data.ready && (<>
       <Card>
         <div className="px-4 py-3 border-b border-edge flex items-center justify-between gap-3 flex-wrap">
           <div className="text-sm font-medium flex items-center gap-2">
@@ -44,7 +48,7 @@ export default function Analysis() {
             <label className="flex items-center gap-1">min n
               <input type="number" min="2" value={minN} onChange={e => setMinN(+e.target.value)}
                 className="w-14 bg-panel2 border border-edge rounded px-2 py-1 num outline-none focus:border-beacon" /></label>
-            <Button variant="ghost" onClick={() => load(minN)}>Apply</Button>
+            <Button variant="ghost" onClick={load}>Apply</Button>
           </div>
         </div>
         <div className="px-4 py-2 text-[11px] text-muted border-b border-edge">
@@ -95,6 +99,7 @@ export default function Analysis() {
           </Table>
         )}
       </Card>
+      </>)}
     </div>
   );
 }

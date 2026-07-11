@@ -45,18 +45,24 @@ def _summary(vals):
     return {"n": len(vals), "mean": round(sum(vals) / len(vals), 4)}
 
 
-async def channel_regime_report(session) -> dict:
+async def channel_regime_report(session, frm=None, to=None) -> dict:
     """Per-channel × regime performance + regime mix by channel + a
-    win/loss feature read, all off the labelled analytics→trade join."""
+    win/loss feature read, all off the labelled analytics→trade join.
+    Optional [frm, to) window anchored on the SIGNAL time (Signal.created_at) —
+    the time the report groups by (#58)."""
     from sqlalchemy import select
     from ..db.models import SignalAnalytics, Signal, Source, Trade
 
-    rows = (await session.execute(
-        select(Source.name, SignalAnalytics.regime, SignalAnalytics.analytics,
-               Trade.realized_pl)
-        .join(Signal, Signal.id == SignalAnalytics.signal_id)
-        .join(Trade, Trade.signal_id == SignalAnalytics.signal_id)
-        .outerjoin(Source, Source.id == Signal.source_id))).all()
+    q = (select(Source.name, SignalAnalytics.regime, SignalAnalytics.analytics,
+                Trade.realized_pl)
+         .join(Signal, Signal.id == SignalAnalytics.signal_id)
+         .join(Trade, Trade.signal_id == SignalAnalytics.signal_id)
+         .outerjoin(Source, Source.id == Signal.source_id))
+    if frm is not None:
+        q = q.where(Signal.created_at >= frm)
+    if to is not None:
+        q = q.where(Signal.created_at < to)
+    rows = (await session.execute(q)).all()
 
     buckets = defaultdict(lambda: {"n": 0, "wins": 0, "pl": 0.0})
     chan_regime = defaultdict(lambda: defaultdict(int))

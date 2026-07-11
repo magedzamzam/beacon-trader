@@ -2,6 +2,7 @@ import { Fragment, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { Table, Card, KPI, Th, Td, Badge, Empty } from "../components/ui";
 import { Button, Toggle } from "../components/form";
+import RangeFilter, { useRange } from "../components/RangeFilter";
 import { api } from "../lib/api";
 import { useData, money, tone } from "./_useData";
 
@@ -23,10 +24,13 @@ export default function Reconciliation() {
   const [category, setCategory] = useState("");     // "" = all
   const [expanded, setExpanded] = useState(null);
   const [busy, setBusy] = useState(false);
+  const range = useRange("all");                    // anchored on Signal.created_at
+  const { fromIso, toIso } = range;
 
-  const { data: sum } = useData(() => api.reconciliationSummary(includeHistory), [includeHistory, busy]);
-  const { data: rows } = useData(() => api.reconciliationRows({ includeHistory, category }),
-    [includeHistory, category, busy]);
+  const { data: sum } = useData(() => api.reconciliationSummary(includeHistory, range.range),
+    [includeHistory, busy, fromIso, toIso]);
+  const { data: rows } = useData(() => api.reconciliationRows({ includeHistory, category, from: fromIso, to: toIso }),
+    [includeHistory, category, busy, fromIso, toIso]);
 
   const refresh = async () => { setBusy(true); try { await api.reconciliationRefresh(); } finally { setBusy(v => !v); } };
 
@@ -42,6 +46,8 @@ export default function Reconciliation() {
         <Button variant="ghost" onClick={refresh} disabled={busy}>
           <RefreshCw className="w-4 h-4 inline -mt-0.5" /> Re-link claims</Button>
       </div>
+
+      <RangeFilter state={range} />
 
       {/* summary */}
       {sum && (

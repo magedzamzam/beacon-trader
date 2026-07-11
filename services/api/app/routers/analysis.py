@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from beacon_core.analysis import bayes as B
 from beacon_core.db.models import SignalFeature, Trade
+from beacon_core.timeutil import parse_iso_utc
 from ..deps import get_db
 from ..auth import require_token
 
@@ -11,10 +12,18 @@ router = APIRouter(prefix="/analysis", tags=["analysis"],
                    dependencies=[Depends(require_token)])
 
 
-async def _model(db: AsyncSession, min_n: int):
+async def _model(db: AsyncSession, min_n: int, frm=None, to=None):
     """Label closed trades by realized P&L > 0, join to their captured signal
-    features, and build the Bayesian model."""
-    trades = (await db.execute(select(Trade).where(Trade.status == "closed"))).scalars().all()
+    features, and build the Bayesian model. Optional [frm, to) window (#58):
+    Trade has no close timestamp, so we anchor on Trade.created_at (entry/signal
+    time) — a slightly different anchor than Performance's leg-close time; called
+    out so "This month" is interpreted correctly per page."""
+    q = select(Trade).where(Trade.status == "closed")
+    if frm is not None:
+        q = q.where(Trade.created_at >= frm)
+    if to is not None:
+        q = q.where(Trade.created_at < to)
+    trades = (await db.execute(q)).scalars().all()
     sfs = (await db.execute(select(SignalFeature))).scalars().all()
     by_sig = {s.signal_id: s.features for s in sfs if s.features}
     examples = [(by_sig[t.signal_id], float(t.realized_pl or 0) > 0)
@@ -29,10 +38,12 @@ def _round_cond(c: dict) -> dict:
 
 
 @router.get("/bayes")
-async def bayes(min_n: int = 5, limit: int = 100, db: AsyncSession = Depends(get_db)):
+async def bayes(min_n: int = 5, limit: int = 100, date_from: str = None,
+                date_to: str = None, db: AsyncSession = Depends(get_db)):
     """Per-condition Beta-Binomial win-rate table (credible intervals shrink thin
-    samples toward the base rate) + Naive-Bayes P(win) for recent signals."""
-    model = await _model(db, min_n)
+    samples toward the base rate) + Naive-Bayes P(win) for recent signals.
+    Optional date range (#58) anchored on trade entry time."""
+    model = await _model(db, min_n, parse_iso_utc(date_from), parse_iso_utc(date_to))
     if not model.get("ready"):
         return {"ready": False, "n": 0,
                 "message": "No closed trades with captured features yet."}

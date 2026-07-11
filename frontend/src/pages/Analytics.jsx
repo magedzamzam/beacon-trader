@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Table, Card, Th, Td, Badge, Empty } from "../components/ui";
 import { Toggle } from "../components/form";
+import RangeFilter, { useRange } from "../components/RangeFilter";
 import { api } from "../lib/api";
 
 const REGIME_TONE = { trending: "beacon", ranging: "muted", high_vol: "warn", unknown: "muted" };
@@ -12,12 +13,14 @@ export default function Analytics() {
   const [rep, setRep] = useState(null);
   const [cfg, setCfg] = useState(null);
   const [err, setErr] = useState(null);
+  const range = useRange("all");
 
   const loadCfg = () => api.analyticsConfig().then(setCfg).catch(e => setErr(e.message));
+  useEffect(() => { loadCfg(); }, []);
   useEffect(() => {
-    api.analyticsCorrelation().then(setRep).catch(e => setErr(e.message));
-    loadCfg();
-  }, []);
+    setRep(null);
+    api.analyticsCorrelation(range.range).then(setRep).catch(e => setErr(e.message));
+  }, [range.fromIso, range.toIso]);
 
   const toggle = async (v) => {
     try { const c = { ...cfg, enabled: v }; setCfg(c); await api.saveAnalyticsConfig(c); }
@@ -44,6 +47,8 @@ export default function Analytics() {
           intervals (small samples shrink toward the {rep ? `${fmt(rep.base_rate * 100, 1)}%` : "base"} rate).
         </div>
       </Card>
+
+      <RangeFilter state={range} />
 
       <Card>
         <div className="px-4 py-3 border-b border-edge text-sm font-medium">

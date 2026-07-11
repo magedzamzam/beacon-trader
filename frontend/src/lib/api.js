@@ -75,7 +75,12 @@ export const api = {
   taConfig: () => req("/ta/config"),
   saveTaConfig: (c) => req("/ta/config", { method: "PUT", body: JSON.stringify(c) }),
   // Bayesian correlation of captured features with outcomes
-  bayesAnalysis: (minN = 5) => req(`/analysis/bayes?min_n=${minN}`),
+  bayesAnalysis: (minN = 5, { from, to } = {}) => {
+    const p = new URLSearchParams({ min_n: minN });
+    if (from) p.set("date_from", from);
+    if (to) p.set("date_to", to);
+    return req(`/analysis/bayes?${p.toString()}`);
+  },
   // trading hours: sessions / news blackout / holidays
   tradingHoursStatus: () => req("/trading-hours/status"),
   tradingHoursConfig: () => req("/trading-hours/config"),
@@ -93,13 +98,22 @@ export const api = {
   saveEntryFilters: (c) => req("/entry-filters/config", { method: "PUT", body: JSON.stringify(c) }),
   analyticsConfig: () => req("/analytics/config"),
   saveAnalyticsConfig: (c) => req("/analytics/config", { method: "PUT", body: JSON.stringify(c) }),
-  analyticsCorrelation: () => req("/analytics/correlation"),
+  analyticsCorrelation: (range = {}) => req(`/analytics/correlation${_perfQs("", range)}`),
   signalAnalytics: (id) => req(`/analytics/signal/${id}`),
   // reconciliation: channel-claimed outcomes vs bot execution
-  reconciliationSummary: (includeHistory = false) =>
-    req(`/reconciliation/summary?include_history=${includeHistory}`),
-  reconciliationRows: ({ includeHistory = false, category = "" } = {}) =>
-    req(`/reconciliation?include_history=${includeHistory}${category ? `&category=${category}` : ""}`),
+  reconciliationSummary: (includeHistory = false, { from, to } = {}) => {
+    const p = new URLSearchParams({ include_history: includeHistory });
+    if (from) p.set("date_from", from);
+    if (to) p.set("date_to", to);
+    return req(`/reconciliation/summary?${p.toString()}`);
+  },
+  reconciliationRows: ({ includeHistory = false, category = "", from = "", to = "" } = {}) => {
+    const p = new URLSearchParams({ include_history: includeHistory });
+    if (category) p.set("category", category);
+    if (from) p.set("date_from", from);
+    if (to) p.set("date_to", to);
+    return req(`/reconciliation?${p.toString()}`);
+  },
   reconciliationRefresh: (full = false) => post(`/reconciliation/refresh?full=${full}`, {}),
   // brokers
   createBroker: (b) => post("/brokers", b),
