@@ -256,6 +256,76 @@ async def knn(ctx, k: int = 5) -> Optional[dict]:
                             "realized_pl": round(pl, 2)} for dist, sid, pl in ranked]}
 
 
+def _htf_alignment(direction, structures) -> str:
+    """Signal direction vs the higher-timeframe (1W/1D) structure labels."""
+    if not direction:
+        return "mixed"
+    want = "bull" if direction == "BUY" else "bear"
+    labels = [structures[tf].label for tf in ("1w", "1d") if tf in structures]
+    if not labels:
+        return "mixed"
+    agree = sum(1 for l in labels if l == want)
+    disagree = sum(1 for l in labels if l in ("bull", "bear") and l != want)
+    if agree and not disagree:
+        return "aligned"
+    if disagree and not agree:
+        return "counter"
+    return "mixed"
+
+
+async def structure_magnet(ctx) -> Optional[dict]:
+    """Per-signal reference into the ACTIVE persistent structure/magnet map (#61):
+    per-TF structure state (label, premium/discount, nearest fib) + nearest magnet
+    zone + HTF alignment, tagged with the map version for point-in-time joins. It
+    READS the active map (does not recompute). SHADOW ONLY — never gates. Lazy DB
+    import so the module stays pure."""
+    if ctx.session is None or ctx.price is None:
+        return None
+    from .structure_map import active_map
+    m = await active_map(ctx.session, ctx.symbol)
+    if not m:
+        return None
+    price = float(ctx.price)
+
+    per_tf = {}
+    for tf, s in m["structures"].items():
+        atr = float(s.atr) if s.atr is not None else None
+        fibs = [lv for lv in m["levels_by_tf"].get(tf, [])
+                if lv.kind in ("fib_retracement", "fib_extension")]
+        nf = None
+        if fibs:
+            nearest = min(fibs, key=lambda lv: abs(price - float(lv.price)))
+            d = abs(price - float(nearest.price))
+            nf = {"ratio": float(nearest.ratio) if nearest.ratio is not None else None,
+                  "price": round(float(nearest.price), 5),
+                  "dist_atr": round(d / atr, 3) if atr else None}
+        per_tf[tf] = {"label": s.label,
+                      "premium_discount": (float(s.premium_discount)
+                                           if s.premium_discount is not None else None),
+                      "nearest_fib": nf}
+
+    nearest_zone, nearest_d, within = None, None, []
+    for z in m["zones"]:
+        lo, hi = float(z.price_low), float(z.price_high)
+        ref_atr = float(z.ref_atr) if z.ref_atr else None
+        inside = lo <= price <= hi
+        d = 0.0 if inside else min(abs(price - lo), abs(price - hi))
+        dist_atr = round(d / ref_atr, 3) if ref_atr else None
+        side = "inside" if inside else ("above" if price > hi else "below")
+        if nearest_d is None or d < nearest_d:
+            nearest_d = d
+            nearest_zone = {"zone_id": z.id, "band": [round(lo, 5), round(hi, 5)],
+                            "dist_atr": dist_atr, "side": side,
+                            "score": float(z.score), "inside": inside}
+        if dist_atr is not None and dist_atr <= 2.0:
+            within.append({"zone_id": z.id, "dist_atr": dist_atr, "side": side,
+                           "score": float(z.score)})
+
+    return {"map_version_id": m["version_id"], "per_tf": per_tf,
+            "nearest_zone": nearest_zone, "zones_within_2atr": within,
+            "htf_alignment": _htf_alignment(ctx.direction, m["structures"])}
+
+
 # Registered into the harness by sidecar.py (kept here so estimators stay pure).
 ESTIMATORS = {
     "regime": regime,
@@ -263,4 +333,5 @@ ESTIMATORS = {
     "kalman": kalman,
     "vwap_deviation": vwap_deviation,
     "knn": knn,
+    "structure_magnet": structure_magnet,
 }

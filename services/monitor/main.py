@@ -28,7 +28,8 @@ from beacon_core.db.models import (Account, Broker, Event, Leg, PositionActivity
 from beacon_core.brokers import build_adapter, symbol_map
 from beacon_core.brokers.types import AuthError, ModifyPositionRequest
 from beacon_core.strategy.rules import PositionCtx, evaluate, DEFAULT_SL_RULES
-from beacon_core.settings_store import get_setting
+from beacon_core.settings_store import get_setting, set_setting
+from beacon_core.analysis import structure_map as struct_map
 from beacon_core.tasks import spawn_bg
 from beacon_core.timeutil import utcnow, parse_iso_utc
 from beacon_core import notifications as notify
@@ -617,6 +618,30 @@ async def tick() -> None:
         await session.commit()
 
 
+_STRUCT_RECOMPUTE_KEY = "structure_last_recompute"
+
+
+async def _maybe_recompute_structure() -> None:
+    """Weekly (config) recompute of the persistent structure/magnet map (#61).
+    Best-effort, background, own session — zero impact on the trade loop. The
+    timestamp is stamped BEFORE launching so a slow recompute never re-triggers."""
+    try:
+        async with Session()() as s:
+            cfg = await struct_map.load_config(s)
+            if not cfg.get("enabled"):
+                return
+            last = parse_iso_utc(await get_setting(s, _STRUCT_RECOMPUTE_KEY, None))
+            cadence = float(cfg.get("recompute_cadence_days", 7)) * 86400
+            if last is not None and (utcnow() - last).total_seconds() < cadence:
+                return
+            await set_setting(s, _STRUCT_RECOMPUTE_KEY, utcnow().isoformat())
+            await s.commit()
+        log.info("structure: weekly recompute due — launching in background")
+        spawn_bg(struct_map.recompute_all(cfg))
+    except Exception as exc:                    # never disturb the monitor loop
+        log.warning("structure recompute check failed: %s", exc)
+
+
 async def main() -> None:
     await init_models()
     spawn_bg(run_health_server("monitor", bus, port=8080))
@@ -624,6 +649,7 @@ async def main() -> None:
     while True:
         try:
             await tick()
+            await _maybe_recompute_structure()
         except Exception as exc:
             log.exception("tick failed: %s", exc)
         await asyncio.sleep(settings.monitor_interval)

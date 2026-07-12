@@ -208,3 +208,89 @@ async def structure_outcome_report(session, frm=None, to=None) -> dict:
                  "(#59). 'inside' = entry price within an unfilled FVG / unmitigated "
                  "OB on any captured timeframe. Small-n: trust the credible interval."),
     }
+
+
+def _zone_proximity_band(sm: dict, direction: str):
+    """(proximity_band, adverse) from a structure_magnet block: how close is the
+    nearest magnet zone, and is it on the ADVERSE side (BUY into a zone above /
+    SELL into one below)?"""
+    nz = (sm or {}).get("nearest_zone") or {}
+    if nz.get("inside"):
+        band = "inside"
+    else:
+        d = nz.get("dist_atr")
+        band = ("near" if d is not None and d <= 0.5 else
+                "mid" if d is not None and d <= 2.0 else "far")
+    side = nz.get("side")
+    adverse = (direction == "BUY" and side == "above") or (direction == "SELL" and side == "below")
+    return band, bool(adverse)
+
+
+async def structure_magnet_outcome_report(session, frm=None, to=None) -> dict:
+    """Phase-2 payoff (#61): does magnet proximity / HTF-structure alignment
+    predict outcome? Cuts win-rate & expectancy by `htf_alignment`, by nearest-
+    zone proximity band, and by adverse-side, with Beta-Binomial credible
+    intervals — off the signal_analytics(structure_magnet) -> trades join. This is
+    the measurement Phase-3 filtering waits on (measure-before-gate). Shadow only."""
+    from collections import defaultdict
+    from sqlalchemy import select
+    from ..db.models import SignalAnalytics, Signal, Trade
+
+    q = (select(SignalAnalytics.analytics, SignalAnalytics.direction, Trade.realized_pl)
+         .join(Trade, Trade.signal_id == SignalAnalytics.signal_id)
+         .join(Signal, Signal.id == SignalAnalytics.signal_id))
+    if frm is not None:
+        q = q.where(Signal.created_at >= frm)
+    if to is not None:
+        q = q.where(Signal.created_at < to)
+    rows = (await session.execute(q)).all()
+
+    def _cell():
+        return {"n": 0, "wins": 0, "pl": 0.0}
+
+    cuts = {"htf_alignment": defaultdict(_cell), "proximity": defaultdict(_cell),
+            "adverse_side": defaultdict(_cell)}
+    overall_n = overall_wins = 0
+
+    for analytics, direction, pl in rows:
+        sm = (analytics or {}).get("structure_magnet")
+        if pl is None or not sm:
+            continue
+        pl = float(pl)
+        win = pl > 0
+        overall_n += 1
+        overall_wins += 1 if win else 0
+        band, adverse = _zone_proximity_band(sm, direction)
+        for dim, key in (("htf_alignment", sm.get("htf_alignment") or "unknown"),
+                         ("proximity", band),
+                         ("adverse_side", "adverse" if adverse else "clear")):
+            b = cuts[dim][key]
+            b["n"] += 1
+            b["wins"] += 1 if win else 0
+            b["pl"] += pl
+
+    base = (overall_wins / overall_n) if overall_n else 0.5
+
+    def _rows(dim):
+        out = []
+        for key, b in cuts[dim].items():
+            if not b["n"]:
+                continue
+            post = posterior(b["wins"], b["n"], base)
+            out.append({"bucket": key, "n": b["n"],
+                        "win_rate": round(b["wins"] / b["n"], 4),
+                        "expectancy": round(b["pl"] / b["n"], 4),
+                        "ci_low": round(post["ci_low"], 4),
+                        "ci_high": round(post["ci_high"], 4)})
+        out.sort(key=lambda r: (-r["ci_low"], -r["n"]))
+        return out
+
+    return {
+        "n_labelled": overall_n, "base_rate": round(base, 4),
+        "htf_alignment": _rows("htf_alignment"),
+        "proximity": _rows("proximity"),
+        "adverse_side": _rows("adverse_side"),
+        "note": ("Magnet/structure vs outcome — SHADOW only (#61). Phase-3 "
+                 "filtering waits on this: enable structure.filter once a bucket's "
+                 "credible interval separates from the base rate at N>=30."),
+    }

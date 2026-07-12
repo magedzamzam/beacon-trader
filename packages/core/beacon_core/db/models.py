@@ -5,8 +5,8 @@ from __future__ import annotations
 import datetime as dt
 from decimal import Decimal
 
-from sqlalchemy import (JSON, Boolean, DateTime, ForeignKey, Integer, Numeric,
-                        String, Text, UniqueConstraint)
+from sqlalchemy import (JSON, Boolean, DateTime, ForeignKey, Index, Integer,
+                        Numeric, String, Text, UniqueConstraint)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base
@@ -300,6 +300,74 @@ class SignalAnalytics(Base):
     analytics: Mapped[dict] = mapped_column(JSON, default=dict)                # {estimator: output}
     degraded: Mapped[list] = mapped_column(JSON, default=list)                 # estimators that errored this run
     captured_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class MarketStructure(Base):
+    """Persistent multi-TF market structure (#61), VERSIONED. Slow-moving: a
+    weekly (config) / on-demand recompute writes a new `version_id` per symbol
+    and supersedes the prior, so any signal can be joined to the map that was
+    live when it fired (point-in-time). One row per (symbol, timeframe, version).
+    Shadow-only — never gates execution."""
+    __tablename__ = "market_structure"
+    __table_args__ = (Index("ix_market_structure_active", "symbol", "active"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(16), index=True)
+    timeframe: Mapped[str] = mapped_column(String(4))
+    version_id: Mapped[int] = mapped_column(Integer)            # groups a full recompute (per symbol)
+    label: Mapped[str] = mapped_column(String(8))              # bull | bear | range
+    swings: Mapped[list] = mapped_column(JSON, default=list)   # ordered pivots [{kind,price,idx}]
+    bias_price: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)
+    premium_discount: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)  # 0 discount -> 1 premium
+    atr: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)               # TF ATR at compute (for dist_atr)
+    last_event: Mapped[str | None] = mapped_column(String(8), nullable=True)      # BOS | CHoCH (future)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    computed_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    superseded_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class StructureLevel(Base):
+    """One row per individual level (#61) — the granularity that lets a future
+    signal engine SELECT/weight/combine each level. Fib retracement/extension,
+    swing highs/lows, (later) OB/FVG/equal-highs. Extensible `kind` enum."""
+    __tablename__ = "structure_levels"
+    __table_args__ = (Index("ix_structure_levels_active", "symbol", "active"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(16), index=True)
+    timeframe: Mapped[str] = mapped_column(String(4))
+    version_id: Mapped[int] = mapped_column(Integer)
+    structure_id: Mapped[int | None] = mapped_column(ForeignKey("market_structure.id"), nullable=True)
+    kind: Mapped[str] = mapped_column(String(20))             # fib_retracement|fib_extension|swing_high|...
+    ratio: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)   # e.g. 0.618 (null for swings)
+    price: Mapped[Decimal] = mapped_column(NUM)
+    anchor_a: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # {price, idx} of the swings it's derived from
+    anchor_b: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    anchor_c: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    direction: Mapped[str | None] = mapped_column(String(4), nullable=True)   # up | down (leg direction)
+    weight: Mapped[Decimal] = mapped_column(NUM, default=0)   # tf_weight * kind_weight (config)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    computed_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    superseded_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class MagnetZone(Base):
+    """Cross-TF confluence clusters (#61) — the actual 'magnet' output. Σ(member
+    weight) = confluence score; rank 1 = strongest. Versioned + point-in-time."""
+    __tablename__ = "magnet_zones"
+    __table_args__ = (Index("ix_magnet_zones_active", "symbol", "active"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(16), index=True)
+    version_id: Mapped[int] = mapped_column(Integer)
+    price_low: Mapped[Decimal] = mapped_column(NUM)
+    price_high: Mapped[Decimal] = mapped_column(NUM)
+    mid: Mapped[Decimal] = mapped_column(NUM)
+    score: Mapped[Decimal] = mapped_column(NUM)
+    rank: Mapped[int] = mapped_column(Integer)
+    n_timeframes: Mapped[int] = mapped_column(Integer, default=0)
+    ref_atr: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)   # 1H ATR (for dist_atr)
+    members: Mapped[list] = mapped_column(JSON, default=list)             # [{level_id,timeframe,kind,ratio,price}]
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    computed_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    superseded_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class EconEvent(Base):

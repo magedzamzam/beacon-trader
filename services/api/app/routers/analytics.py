@@ -5,8 +5,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from beacon_core.analysis.report import channel_regime_report, structure_outcome_report
+from beacon_core.analysis.report import (channel_regime_report,
+                                         structure_outcome_report,
+                                         structure_magnet_outcome_report)
 from beacon_core.analysis.sidecar import load_config
+from beacon_core.analysis import structure_map as struct_map
+from beacon_core.analysis.structure import DEFAULT_STRUCTURE
 from beacon_core.db.models import SignalAnalytics
 from beacon_core.settings_store import set_setting
 from beacon_core.timeutil import parse_iso_utc
@@ -54,6 +58,59 @@ async def structure(date_from: str = None, date_to: str = None,
     inside an unfilled Fair Value Gap / unmitigated Order Block vs not, per
     channel and regime with credible intervals. Shadow only."""
     return await structure_outcome_report(db, parse_iso_utc(date_from), parse_iso_utc(date_to))
+
+
+@router.get("/structure/outcome")
+async def structure_outcome(date_from: str = None, date_to: str = None,
+                            db: AsyncSession = Depends(get_db)):
+    """Phase-2 measurement (#61): win-rate & expectancy by HTF alignment / magnet
+    proximity / adverse-side, with credible intervals. Shadow — informs Phase 3."""
+    return await structure_magnet_outcome_report(db, parse_iso_utc(date_from),
+                                                 parse_iso_utc(date_to))
+
+
+@router.get("/structure/config")
+async def structure_config(db: AsyncSession = Depends(get_db)):
+    return await struct_map.load_config(db)
+
+
+@router.put("/structure/config")
+async def structure_config_put(body: dict, db: AsyncSession = Depends(get_db)):
+    cfg = await struct_map.load_config(db)
+    for k in DEFAULT_STRUCTURE:
+        if k in body:
+            cfg[k] = body[k]
+    await set_setting(db, "structure", cfg)
+    return cfg
+
+
+@router.post("/structure/recompute")
+async def structure_recompute():
+    """On-demand recompute of the persistent map (#61). Runs in its own session
+    with an isolated adapter — zero impact on the execution path."""
+    return {"recomputed": await struct_map.recompute_all()}
+
+
+@router.get("/structure/map")
+async def structure_map_view(symbol: str = "XAUUSD", db: AsyncSession = Depends(get_db)):
+    """The active (current) structure/magnet map: per-TF structure + magnet zones."""
+    m = await struct_map.active_map(db, symbol)
+    if not m:
+        return {"symbol": symbol, "version_id": None, "structures": {}, "zones": []}
+    return {
+        "symbol": symbol, "version_id": m["version_id"],
+        "structures": {tf: {
+            "label": s.label,
+            "premium_discount": float(s.premium_discount) if s.premium_discount is not None else None,
+            "atr": float(s.atr) if s.atr is not None else None,
+            "swings": s.swings, "n_levels": len(m["levels_by_tf"].get(tf, [])),
+        } for tf, s in m["structures"].items()},
+        "zones": [{
+            "rank": z.rank, "band": [float(z.price_low), float(z.price_high)],
+            "mid": float(z.mid), "score": float(z.score),
+            "n_timeframes": z.n_timeframes, "members": z.members,
+        } for z in m["zones"]],
+    }
 
 
 @router.get("/signal/{signal_id}")

@@ -20,6 +20,7 @@ from beacon_core.execution.guard import DEFAULT_RISK_LIMITS
 from beacon_core.strategy.rules import DEFAULT_SL_RULES
 from beacon_core.execution.trend_filter import DEFAULT_TREND_FILTER
 from beacon_core.analysis.sidecar import DEFAULT_ANALYTICS
+from beacon_core.analysis.structure import DEFAULT_STRUCTURE
 from beacon_core.settings_store import get_setting, set_setting
 
 
@@ -110,6 +111,13 @@ async def main():
         for k, v in DEFAULT_ANALYTICS.items():
             an_cfg.setdefault(k, v)
         await set_setting(s, "analytics", an_cfg)
+
+        # Persistent structure/magnet map (#61) — shadow observability, weekly
+        # recompute. The nested `filter` block is DISABLED (Phase-3 scaffolding).
+        st_cfg = dict(await get_setting(s, "structure", {}) or {})
+        for k, v in DEFAULT_STRUCTURE.items():
+            st_cfg.setdefault(k, v)
+        await set_setting(s, "structure", st_cfg)
 
         await s.commit()
     print("seed complete.")
