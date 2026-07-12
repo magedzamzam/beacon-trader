@@ -14,12 +14,17 @@ bus = Bus()
 WORKERS = ("executor", "monitor", "telegram")
 STALE_SEC = 30
 BROKER_PROBE_TIMEOUT = 5      # never let a hung broker stall the health poll
+# Each broker probe is a fresh Capital.com /session login, which Capital.com
+# strictly rate-limits. The dashboard polls /health every 8s from several places
+# (header chip, sidebar pulse, System Health) across every tab — so we CACHE the
+# probe result and re-probe at most once per TTL, regardless of poll rate or
+# client count. Without this the polls hammer /session -> 429 (broker "down").
+BROKER_CACHE_TTL = 60
+_broker_cache = {"ts": 0.0, "data": None}
+_broker_lock = asyncio.Lock()
 
 
-async def _broker_health(db) -> dict:
-    """Per-broker connectivity + round-trip latency. Reported separately from
-    the internal-service checks and NOT folded into `overall` — a demo broker
-    being down must not flip the whole system to degraded (#45)."""
+async def _probe_brokers(db) -> dict:
     out = {}
     brokers = (await db.execute(
         select(Broker).where(Broker.enabled == True))).scalars().all()
@@ -38,6 +43,27 @@ async def _broker_health(db) -> dict:
             except Exception:
                 pass
     return out
+
+
+async def _broker_health(db) -> dict:
+    """Per-broker connectivity + latency, TTL-cached so many pollers/tabs share
+    one Capital.com login per minute. Reported separately from the internal-
+    service checks and NOT folded into `overall` (#45)."""
+    now = time.monotonic()
+    cached = _broker_cache["data"]
+    if cached is not None and (now - _broker_cache["ts"]) < BROKER_CACHE_TTL:
+        return cached
+    # One prober at a time; concurrent pollers wait and reuse the fresh result
+    # instead of each firing their own login (thundering-herd guard).
+    async with _broker_lock:
+        now = time.monotonic()
+        cached = _broker_cache["data"]
+        if cached is not None and (now - _broker_cache["ts"]) < BROKER_CACHE_TTL:
+            return cached
+        out = await _probe_brokers(db)
+        _broker_cache["data"] = out
+        _broker_cache["ts"] = time.monotonic()
+        return out
 
 
 @router.get("/health")

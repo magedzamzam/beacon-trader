@@ -26,7 +26,14 @@ class Bus:
     @property
     def r(self) -> aioredis.Redis:
         if self._r is None:
-            self._r = aioredis.from_url(self._url, decode_responses=True)
+            # keepalive + periodic health checks so a dead/stale connection (e.g.
+            # after a Redis restart or a brief AOF-fsync stall) is detected and
+            # pruned quickly instead of hanging reads; short connect timeout so a
+            # reconnect fails fast into the backoff loop.
+            self._r = aioredis.from_url(
+                self._url, decode_responses=True,
+                socket_keepalive=True, health_check_interval=30,
+                socket_connect_timeout=5)
         return self._r
 
     async def publish(self, channel: str, payload: dict) -> None:
@@ -72,7 +79,7 @@ class Bus:
                 log.warning("bus subscribe %s: reconnecting in %ss (%s)", channel, backoff, exc)
                 await self._reset()
                 await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 30)
+                backoff = min(backoff * 2, 10)
 
     # --- work queue (LPUSH / BRPOP) — durable, at-least-once ---
     async def enqueue(self, key: str, payload: dict) -> None:
@@ -103,7 +110,7 @@ class Bus:
                 log.warning("bus consume %s: reconnecting in %ss (%s)", key, backoff, exc)
                 await self._reset()
                 await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 30)
+                backoff = min(backoff * 2, 10)
 
     # --- heartbeats ---
     async def beat(self, service: str) -> None:
