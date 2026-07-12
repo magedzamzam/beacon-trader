@@ -19,13 +19,17 @@ export default function Analytics() {
   const range = useRange("all");
 
   const [map, setMap] = useState(null);
+  const [price, setPrice] = useState(null);
   const [mapBusy, setMapBusy] = useState(false);
   const loadCfg = () => api.analyticsConfig().then(setCfg).catch(e => setErr(e.message));
   const loadMap = () => api.structureMap("XAUUSD").then(setMap).catch(e => setErr(e.message));
-  useEffect(() => { loadCfg(); loadMap(); }, []);
+  const loadPrice = () => api.quote("XAUUSD")
+    .then(q => setPrice(q.last ?? (q.bid != null && q.offer != null ? (q.bid + q.offer) / 2 : null)))
+    .catch(() => setPrice(null));   // market closed / broker down -> ladder still renders
+  useEffect(() => { loadCfg(); loadMap(); loadPrice(); }, []);
   const recompute = async () => {
     setMapBusy(true);
-    try { await api.structureRecompute(); await loadMap(); }
+    try { await api.structureRecompute(); await loadMap(); await loadPrice(); }
     catch (e) { setErr(e.message); } finally { setMapBusy(false); }
   };
   useEffect(() => {
@@ -60,7 +64,7 @@ export default function Analytics() {
         </div>
       </Card>
 
-      <StructureMapCard map={map} busy={mapBusy} onRecompute={recompute} />
+      <StructureMapCard map={map} price={price} busy={mapBusy} onRecompute={recompute} />
 
       <RangeFilter state={range} variant="coarse" />
 
@@ -118,18 +122,33 @@ export default function Analytics() {
   );
 }
 
-// Persistent market-structure + Fib magnet map (#61) — Layer A, market-wide per
-// symbol. Per-TF bull/bear/range + premium/discount, and the ranked magnet zones.
-function StructureMapCard({ map, busy, onRecompute }) {
+// Persistent market-structure + Fib magnet map (#61) — a decision-oriented view:
+// a one-glance multi-TF bias strip + a levels ladder of the STRONGEST magnet
+// zones above/below the live price (not a dump of every zone).
+const TOP_ZONES = 8;
+
+function StructureMapCard({ map, price, busy, onRecompute }) {
   const structures = map?.structures || {};
   const tfs = TF_ORDER.filter(t => structures[t]);
-  const zones = map?.zones || [];
+  const counts = { bull: 0, bear: 0, range: 0 };
+  tfs.forEach(t => { counts[structures[t].label] = (counts[structures[t].label] || 0) + 1; });
+  const bias = counts.bull > counts.bear ? "bull" : counts.bear > counts.bull ? "bear" : "range";
+
+  // Keep only the strongest zones, then order high → low for the ladder.
+  const strongest = [...(map?.zones || [])].sort((a, b) => b.score - a.score).slice(0, TOP_ZONES);
+  const maxScore = Math.max(1, ...strongest.map(z => z.score));
+  const ladder = [...strongest].sort((a, b) => b.mid - a.mid);
+  const priceShown = price != null && ladder.length > 0;
+
   return (
     <Card>
       <div className="px-4 py-3 border-b border-edge flex items-center justify-between gap-2 flex-wrap">
-        <div className="text-sm font-medium">
-          Market structure &amp; magnet map · XAUUSD
-          {map?.version_id != null && <span className="text-muted font-normal"> · v{map.version_id}</span>}
+        <div className="text-sm font-medium flex items-center gap-2">
+          Structure &amp; magnets · XAUUSD
+          {map?.version_id != null && (
+            <Badge tone={STRUCT_TONE[bias]}>{bias} bias · {counts.bull}▲/{counts.bear}▼</Badge>
+          )}
+          {price != null && <span className="text-muted font-normal num">price {fmt(price, 2)}</span>}
         </div>
         <Button variant="ghost" onClick={onRecompute} disabled={busy}>
           {busy ? "Recomputing…" : "Recompute"}
@@ -140,62 +159,71 @@ function StructureMapCard({ map, busy, onRecompute }) {
         : map.version_id == null ? (
           <Empty>No map computed yet — click <b>Recompute</b> (needs an enabled account + a XAUUSD symbol map).</Empty>
         ) : (
-        <>
-          <div className="px-4 pt-3 text-[11px] text-muted">Structure per timeframe (bull = HH+HL, bear = LH+LL).</div>
-          <Table>
-            <thead><tr className="border-b border-edge">
-              <Th>TF</Th><Th>Structure</Th><Th right>Premium/Discount</Th><Th right>ATR</Th><Th right>Levels</Th>
-            </tr></thead>
-            <tbody>
-              {tfs.map(tf => {
-                const s = structures[tf];
+        <div className="p-4 space-y-4">
+          {/* one-glance multi-TF structure */}
+          <div className="flex flex-wrap gap-1.5">
+            {tfs.map(tf => {
+              const s = structures[tf];
+              return (
+                <span key={tf}
+                  className={`px-2 py-1 rounded-md text-[11px] num border ${
+                    s.label === "bull" ? "border-long/40 text-long"
+                    : s.label === "bear" ? "border-short/40 text-short"
+                    : "border-edge text-muted"}`}
+                  title={`${tf.toUpperCase()} · ${s.label} · P/D ${s.premium_discount == null ? "—" : Math.round(s.premium_discount * 100) + "%"}`}>
+                  {tf.toUpperCase()}
+                </span>
+              );
+            })}
+          </div>
+
+          {/* levels ladder — strongest zones, resistance above price / support below */}
+          {!ladder.length ? <Empty>No magnet zones.</Empty> : (
+            <div className="space-y-1">
+              {priceShown && price > ladder[0].mid && <PriceRow price={price} />}
+              {ladder.map((z, i) => {
+                const above = price != null && z.mid > price;
+                const prev = ladder[i - 1];
+                const showPrice = priceShown && prev && prev.mid > price && z.mid <= price;
+                const pct = price != null ? Math.abs(z.mid - price) / price * 100 : null;
                 return (
-                  <tr key={tf} className="border-b border-edge/60">
-                    <Td mono>{tf.toUpperCase()}</Td>
-                    <Td><Badge tone={STRUCT_TONE[s.label] || "muted"}>{s.label}</Badge></Td>
-                    <Td right mono>{s.premium_discount == null ? "—" : `${fmt(s.premium_discount * 100, 0)}%`}</Td>
-                    <Td right mono>{fmt(s.atr, 2)}</Td>
-                    <Td right mono>{s.n_levels}</Td>
-                  </tr>
+                  <div key={z.rank}>
+                    {showPrice && <PriceRow price={price} />}
+                    <div className="flex items-center gap-3">
+                      <span className={`w-20 shrink-0 num text-sm text-right ${above ? "text-short" : price != null ? "text-long" : ""}`}>
+                        {fmt(z.mid, 2)}
+                      </span>
+                      <span className="flex-1 h-2 rounded-full bg-panel2 overflow-hidden">
+                        <span className="block h-full rounded-full bg-beacon/70"
+                          style={{ width: `${Math.max(6, (z.score / maxScore) * 100)}%` }} />
+                      </span>
+                      <span className="w-28 shrink-0 text-[11px] text-muted num text-right">
+                        {z.n_timeframes} TF · {fmt(z.score, 0)}{pct != null ? ` · ${fmt(pct, 1)}%` : ""}
+                      </span>
+                    </div>
+                  </div>
                 );
               })}
-            </tbody>
-          </Table>
-
-          <div className="px-4 pt-4 text-[11px] text-muted">
-            Magnet zones — cross-timeframe Fib/swing confluence. Score = Σ weight; rank 1 = strongest.
-          </div>
-          {!zones.length ? <Empty>No zones.</Empty> : (
-            <Table>
-              <thead><tr className="border-b border-edge">
-                <Th right>#</Th><Th>Band</Th><Th right>Mid</Th><Th right>Score</Th><Th right>TFs</Th><Th>Members</Th>
-              </tr></thead>
-              <tbody>
-                {zones.map(z => (
-                  <tr key={z.rank} className="border-b border-edge/60">
-                    <Td right mono>{z.rank}</Td>
-                    <Td mono>{fmt(z.band[0], 2)}–{fmt(z.band[1], 2)}</Td>
-                    <Td right mono>{fmt(z.mid, 2)}</Td>
-                    <Td right mono>{fmt(z.score, 1)}</Td>
-                    <Td right mono>{z.n_timeframes}</Td>
-                    <Td><span className="text-[11px] text-muted">
-                      {(z.members || []).slice(0, 5).map((m, i) => (
-                        <span key={i} className="mr-1.5 whitespace-nowrap">
-                          {m.timeframe}:{m.kind === "fib_retracement" ? `fib${m.ratio}`
-                            : m.kind === "fib_extension" ? `ext${m.ratio}`
-                            : m.kind === "swing_high" ? "SH" : m.kind === "swing_low" ? "SL" : m.kind}
-                        </span>
-                      ))}
-                      {(z.members || []).length > 5 && <span>+{z.members.length - 5}</span>}
-                    </span></Td>
-                  </tr>
-                ))}
-              </tbody>
-            </Table>
+              {priceShown && price < ladder[ladder.length - 1].mid && <PriceRow price={price} />}
+            </div>
           )}
-        </>
+          <div className="text-[11px] text-muted">
+            Bar = confluence strength (Σ weight across timeframes). <span className="text-short">Red</span> = above price
+            (resistance), <span className="text-long">green</span> = below (support). Shadow only — nothing gates.
+          </div>
+        </div>
       )}
     </Card>
+  );
+}
+
+function PriceRow({ price }) {
+  return (
+    <div className="flex items-center gap-3 my-1">
+      <span className="w-20 shrink-0 num text-sm text-right font-semibold text-beacon">{price.toFixed(2)}</span>
+      <span className="flex-1 border-t border-dashed border-beacon/50" />
+      <span className="w-28 shrink-0 text-[11px] text-beacon text-right">◀ price</span>
+    </div>
   );
 }
 
