@@ -13,35 +13,58 @@ router = APIRouter(tags=["health"])
 bus = Bus()
 WORKERS = ("executor", "monitor", "telegram")
 STALE_SEC = 30
-BROKER_PROBE_TIMEOUT = 5      # never let a hung broker stall the health poll
-# Each broker probe is a fresh Capital.com /session login, which Capital.com
-# strictly rate-limits. The dashboard polls /health every 8s from several places
-# (header chip, sidebar pulse, System Health) across every tab — so we CACHE the
-# probe result and re-probe at most once per TTL, regardless of poll rate or
-# client count. Without this the polls hammer /session -> 429 (broker "down").
+BROKER_PROBE_TIMEOUT = 8      # room for one 429 /session retry on a cold login
+# Each broker probe used to be a FRESH Capital.com /session login, which
+# Capital.com strictly rate-limits (~1/sec per API key). With two brokers (e.g.
+# Live + Demo) probed back-to-back the second login 429'd and, wrapped in the
+# probe timeout, showed as "down" — while Test Connection (one broker, no
+# timeout) succeeded. Fix: (1) PERSIST a logged-in adapter per broker and reuse
+# it across probes (re-login only on session expiry/failure — self-healing, and
+# each broker's expiry is staggered, so they rarely collide), and (2) TTL-cache
+# the whole result so many pollers/tabs share one refresh per minute.
 BROKER_CACHE_TTL = 60
 _broker_cache = {"ts": 0.0, "data": None}
 _broker_lock = asyncio.Lock()
+# broker_id -> logged-in adapter, reused across probes (each isolated: own
+# host/credentials/session tokens — no cross-referencing between brokers).
+_broker_adapters: dict = {}
+
+
+async def _evict_adapter(broker_id: int) -> None:
+    a = _broker_adapters.pop(broker_id, None)
+    if a is not None:
+        try:
+            await a.aclose()
+        except Exception:
+            pass
 
 
 async def _probe_brokers(db) -> dict:
     out = {}
     brokers = (await db.execute(
         select(Broker).where(Broker.enabled == True))).scalars().all()
+    live_ids = {b.id for b in brokers}
+    for _bid in [i for i in _broker_adapters if i not in live_ids]:
+        await _evict_adapter(_bid)          # drop adapters for disabled/removed brokers
+
     for b in brokers:
-        _a = make_adapter(b)
+        a = _broker_adapters.get(b.id)
+        if a is None:
+            a = make_adapter(b)             # constructed now; logs in lazily on first call
+            _broker_adapters[b.id] = a
         try:
-            out[b.name] = await asyncio.wait_for(
-                _a.healthcheck(), timeout=BROKER_PROBE_TIMEOUT)
+            res = await asyncio.wait_for(a.healthcheck(), timeout=BROKER_PROBE_TIMEOUT)
+            # On failure, drop the adapter so the next cycle rebuilds/re-logins.
+            # By then the other broker is cached, so the two don't collide.
+            if not res.get("ok"):
+                await _evict_adapter(b.id)
         except asyncio.TimeoutError:
-            out[b.name] = {"ok": False, "message": f"timeout after {BROKER_PROBE_TIMEOUT}s"}
+            res = {"ok": False, "message": f"timeout after {BROKER_PROBE_TIMEOUT}s"}
+            await _evict_adapter(b.id)
         except Exception as e:
-            out[b.name] = {"ok": False, "message": str(e)[:120]}
-        finally:
-            try:
-                await _a.aclose()
-            except Exception:
-                pass
+            res = {"ok": False, "message": str(e)[:120]}
+            await _evict_adapter(b.id)
+        out[b.name] = res
     return out
 
 
