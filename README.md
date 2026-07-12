@@ -189,19 +189,28 @@ the key (env `ANTHROPIC_API_KEY`, or entered encrypted from the **AI** page).
 ## Repo layout
 
 ```
-packages/core/beacon_core/   shared library (installed into each image)
-  brokers/    adapter base + types + registry + capital_com
-  parsing/    symbol registry + signal parser
-  execution/  fanout planner
-  risk/       position sizing
-  strategy/   SL-rule engine
-  ai/         provider + assessments + orchestration (signals/exec/outcome)
-  crypto.py   Fernet encryption for secrets at rest
-  settings_store.py  DB-backed runtime settings
-  db/         async engine + schema
+packages/core/beacon_core/   shared library (baked into each image)
+  brokers/       adapter base + types + registry + capital_com + fx
+  parsing/       symbol registry + signal & outcome parsers
+  ingest/        the one inbound pipeline (parse→validate→dedupe→persist→publish)
+  execution/     fanout planner + trust/risk guard + trend-alignment filter
+  risk/          position sizing (basis × allocation → lots)
+  strategy/      declarative SL-rule ratchet engine
+  ta/            indicator registry + per-signal feature capture
+  analysis/      shadow analytics: bayes, sidecar estimators, structure/magnet, reports
+  ai/            provider + assessments + orchestration (signals/exec/outcome)
+  trading_hours/ sessions + holidays + economic-calendar blackout
+  notifications/ multi-channel operational alerts (best-effort)
+  db/            async engine + full ORM schema
+  {config,bus,tasks,timeutil,crypto,settings_store,logging,health}.py   infra
+  tests/         pure-Python unit tests (run on a bare box)
 services/     api · telegram · executor · monitor  (each: Dockerfile + code)
-frontend/     React + Vite + nginx  (Messages · Activity · AI · Brokers · …)
+frontend/     React + Vite + nginx  (Dashboard · Analytics · Brokers · …)
 scripts/      init_db.py
 ```
+
+**Every folder has its own `README.md`** describing its purpose, files, and how it
+works — start at `packages/core/beacon_core/README.md` for the library map, or
+`services/README.md` for the runtime processes.
 
 See **INSTALL.md** for the deployment runbook.
