@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import { Table, Card, Th, Td, Badge, Empty } from "../components/ui";
-import { Toggle } from "../components/form";
+import { Toggle, Button } from "../components/form";
 import RangeFilter, { useRange } from "../components/RangeFilter";
 import { api } from "../lib/api";
 
 const REGIME_TONE = { trending: "beacon", ranging: "muted", high_vol: "warn", unknown: "muted" };
+const STRUCT_TONE = { bull: "long", bear: "short", range: "muted" };
+const TF_ORDER = ["1w", "1d", "4h", "1h", "30m", "15m", "5m", "1m"];
 const fmt = (v, d = 2) => (v == null ? "—" : Number(v).toFixed(d));
 
 /** Shadow analytics sidecar (#51/#53): signal↔channel↔regime correlation.
@@ -16,8 +18,16 @@ export default function Analytics() {
   const [err, setErr] = useState(null);
   const range = useRange("all");
 
+  const [map, setMap] = useState(null);
+  const [mapBusy, setMapBusy] = useState(false);
   const loadCfg = () => api.analyticsConfig().then(setCfg).catch(e => setErr(e.message));
-  useEffect(() => { loadCfg(); }, []);
+  const loadMap = () => api.structureMap("XAUUSD").then(setMap).catch(e => setErr(e.message));
+  useEffect(() => { loadCfg(); loadMap(); }, []);
+  const recompute = async () => {
+    setMapBusy(true);
+    try { await api.structureRecompute(); await loadMap(); }
+    catch (e) { setErr(e.message); } finally { setMapBusy(false); }
+  };
   useEffect(() => {
     setRep(null); setStruct(null);
     api.analyticsCorrelation(range.range).then(setRep).catch(e => setErr(e.message));
@@ -49,6 +59,8 @@ export default function Analytics() {
           intervals (small samples shrink toward the {rep ? `${fmt(rep.base_rate * 100, 1)}%` : "base"} rate).
         </div>
       </Card>
+
+      <StructureMapCard map={map} busy={mapBusy} onRecompute={recompute} />
 
       <RangeFilter state={range} variant="coarse" />
 
@@ -103,6 +115,87 @@ export default function Analytics() {
       <StructureCard title="Fair Value Gap — inside vs outside" rows={struct?.fvg} ready={!!struct} />
       <StructureCard title="Order Block — inside vs outside" rows={struct?.ob} ready={!!struct} />
     </div>
+  );
+}
+
+// Persistent market-structure + Fib magnet map (#61) — Layer A, market-wide per
+// symbol. Per-TF bull/bear/range + premium/discount, and the ranked magnet zones.
+function StructureMapCard({ map, busy, onRecompute }) {
+  const structures = map?.structures || {};
+  const tfs = TF_ORDER.filter(t => structures[t]);
+  const zones = map?.zones || [];
+  return (
+    <Card>
+      <div className="px-4 py-3 border-b border-edge flex items-center justify-between gap-2 flex-wrap">
+        <div className="text-sm font-medium">
+          Market structure &amp; magnet map · XAUUSD
+          {map?.version_id != null && <span className="text-muted font-normal"> · v{map.version_id}</span>}
+        </div>
+        <Button variant="ghost" onClick={onRecompute} disabled={busy}>
+          {busy ? "Recomputing…" : "Recompute"}
+        </Button>
+      </div>
+
+      {!map ? <Empty>Loading…</Empty>
+        : map.version_id == null ? (
+          <Empty>No map computed yet — click <b>Recompute</b> (needs an enabled account + a XAUUSD symbol map).</Empty>
+        ) : (
+        <>
+          <div className="px-4 pt-3 text-[11px] text-muted">Structure per timeframe (bull = HH+HL, bear = LH+LL).</div>
+          <Table>
+            <thead><tr className="border-b border-edge">
+              <Th>TF</Th><Th>Structure</Th><Th right>Premium/Discount</Th><Th right>ATR</Th><Th right>Levels</Th>
+            </tr></thead>
+            <tbody>
+              {tfs.map(tf => {
+                const s = structures[tf];
+                return (
+                  <tr key={tf} className="border-b border-edge/60">
+                    <Td mono>{tf.toUpperCase()}</Td>
+                    <Td><Badge tone={STRUCT_TONE[s.label] || "muted"}>{s.label}</Badge></Td>
+                    <Td right mono>{s.premium_discount == null ? "—" : `${fmt(s.premium_discount * 100, 0)}%`}</Td>
+                    <Td right mono>{fmt(s.atr, 2)}</Td>
+                    <Td right mono>{s.n_levels}</Td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </Table>
+
+          <div className="px-4 pt-4 text-[11px] text-muted">
+            Magnet zones — cross-timeframe Fib/swing confluence. Score = Σ weight; rank 1 = strongest.
+          </div>
+          {!zones.length ? <Empty>No zones.</Empty> : (
+            <Table>
+              <thead><tr className="border-b border-edge">
+                <Th right>#</Th><Th>Band</Th><Th right>Mid</Th><Th right>Score</Th><Th right>TFs</Th><Th>Members</Th>
+              </tr></thead>
+              <tbody>
+                {zones.map(z => (
+                  <tr key={z.rank} className="border-b border-edge/60">
+                    <Td right mono>{z.rank}</Td>
+                    <Td mono>{fmt(z.band[0], 2)}–{fmt(z.band[1], 2)}</Td>
+                    <Td right mono>{fmt(z.mid, 2)}</Td>
+                    <Td right mono>{fmt(z.score, 1)}</Td>
+                    <Td right mono>{z.n_timeframes}</Td>
+                    <Td><span className="text-[11px] text-muted">
+                      {(z.members || []).slice(0, 5).map((m, i) => (
+                        <span key={i} className="mr-1.5 whitespace-nowrap">
+                          {m.timeframe}:{m.kind === "fib_retracement" ? `fib${m.ratio}`
+                            : m.kind === "fib_extension" ? `ext${m.ratio}`
+                            : m.kind === "swing_high" ? "SH" : m.kind === "swing_low" ? "SL" : m.kind}
+                        </span>
+                      ))}
+                      {(z.members || []).length > 5 && <span>+{z.members.length - 5}</span>}
+                    </span></Td>
+                  </tr>
+                ))}
+              </tbody>
+            </Table>
+          )}
+        </>
+      )}
+    </Card>
   );
 }
 

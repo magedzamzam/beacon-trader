@@ -101,6 +101,8 @@ export const api = {
   analyticsCorrelation: (range = {}) => req(`/analytics/correlation${_perfQs("", range)}`),
   analyticsStructure: (range = {}) => req(`/analytics/structure${_perfQs("", range)}`),
   signalAnalytics: (id) => req(`/analytics/signal/${id}`),
+  structureMap: (symbol = "XAUUSD") => req(`/analytics/structure/map?symbol=${encodeURIComponent(symbol)}`),
+  structureRecompute: () => req("/analytics/structure/recompute", { method: "POST" }),
   // reconciliation: channel-claimed outcomes vs bot execution
   reconciliationSummary: (includeHistory = false, { from, to } = {}) => {
     const p = new URLSearchParams({ include_history: includeHistory });
