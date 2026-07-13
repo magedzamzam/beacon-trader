@@ -8,13 +8,17 @@ from typing import AsyncIterator, Optional
 
 import redis.asyncio as aioredis
 from redis.exceptions import RedisError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from .config import HEARTBEAT_PREFIX, get_settings
 from .logging import get_logger
 
 log = get_logger("bus")
 
-# transient failures a long-lived consumer should reconnect through, not die on
+# transient failures a long-lived consumer should reconnect through, not die on.
+# NB: RedisTimeoutError is a subclass of RedisError but is NOT an outage on a
+# blocking read (BRPOP) — it's a normal idle poll, so it's handled separately
+# (see consume_queue, #71) and must be caught BEFORE this tuple.
 _TRANSIENT = (RedisError, OSError)
 
 
@@ -106,7 +110,14 @@ class Bus:
                 backoff = 1
                 if msg is not None:
                     yield msg
-            except _TRANSIENT as exc:
+            except RedisTimeoutError:
+                # Idle BRPOP read-timeout on an empty queue — a normal empty poll,
+                # NOT a dropped connection (#71). Keep polling immediately; do not
+                # reset the client or back off (that added up to ~10s of latency
+                # and log noise). A signal enqueued next is consumed at once.
+                backoff = 1
+                continue
+            except _TRANSIENT as exc:                 # genuine connection loss
                 log.warning("bus consume %s: reconnecting in %ss (%s)", key, backoff, exc)
                 await self._reset()
                 await asyncio.sleep(backoff)
