@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from .registry import Ctx, compute_one
+from ..analysis._util import bars_col
 
 MIN_BARS = 30          # not enough history below this -> skip the timeframe
 
@@ -17,15 +18,16 @@ def compute_timeframe(bars: List[dict], price: Optional[float],
                       indicators: List[dict]) -> Optional[dict]:
     """bars: [{o,h,l,c,v}] oldest→newest. price: reference (live mid) or None.
     indicators: list of {id, params} config items. Returns {instance_key: {..}}."""
-    closes = [float(b["c"]) for b in bars if b.get("c") is not None]
-    highs = [float(b["h"]) for b in bars if b.get("h") is not None]
-    lows = [float(b["l"]) for b in bars if b.get("l") is not None]
+    closes = bars_col(bars, "c")
+    highs = bars_col(bars, "h")
+    lows = bars_col(bars, "l")
     if len(closes) < MIN_BARS or len(highs) < MIN_BARS or len(lows) < MIN_BARS:
         return None
+    # Volumes keep None for missing bars (stays index-aligned) — not bars_col.
     volumes = [float(b["v"]) if b.get("v") is not None else None for b in bars]
     # Opens for Order-Block detection (#59) — only when every bar has one, so the
     # OHLC arrays stay index-aligned; otherwise OB degrades to None (never blocks).
-    opens = [float(b["o"]) for b in bars if b.get("o") is not None]
+    opens = bars_col(bars, "o")
     if len(opens) != len(closes):
         opens = None
     ctx = Ctx(closes=closes, highs=highs, lows=lows, volumes=volumes,

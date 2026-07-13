@@ -14,6 +14,7 @@ from collections import defaultdict
 from typing import Optional
 
 from .bayes import posterior
+from ._util import dig_num, adverse_side
 from ..logging import get_logger
 
 log = get_logger("analytics.report")
@@ -29,13 +30,6 @@ _FEATURE_PATHS = {
 }
 
 
-def _dig(d, path):
-    cur = d
-    for p in path:
-        if not isinstance(cur, dict):
-            return None
-        cur = cur.get(p)
-    return cur if isinstance(cur, (int, float)) else None
 
 
 def _summary(vals):
@@ -85,7 +79,7 @@ async def channel_regime_report(session, frm=None, to=None) -> dict:
         overall_n += 1
         overall_wins += 1 if win else 0
         for fname, path in _FEATURE_PATHS.items():
-            v = _dig(analytics or {}, path)
+            v = dig_num(analytics or {}, *path)
             if v is not None:
                 (feat_win if win else feat_loss)[fname].append(v)
 
@@ -222,7 +216,7 @@ def _zone_proximity_band(sm: dict, direction: str):
         band = ("near" if d is not None and d <= 0.5 else
                 "mid" if d is not None and d <= 2.0 else "far")
     side = nz.get("side")
-    adverse = (direction == "BUY" and side == "above") or (direction == "SELL" and side == "below")
+    adverse = adverse_side(direction, side)
     return band, bool(adverse)
 
 

@@ -14,6 +14,7 @@ from ..logging import get_logger
 from ..timeutil import utcnow
 from ..ta.indicators import atr as _atr
 from . import structure as S
+from ._util import bars_col
 
 log = get_logger("analytics.structure")
 
@@ -27,10 +28,7 @@ async def load_config(session) -> dict:
 
 
 def _bar_cols(bars):
-    highs = [float(b["h"]) for b in bars if b.get("h") is not None]
-    lows = [float(b["l"]) for b in bars if b.get("l") is not None]
-    closes = [float(b["c"]) for b in bars if b.get("c") is not None]
-    return highs, lows, closes
+    return bars_col(bars, "h"), bars_col(bars, "l"), bars_col(bars, "c")
 
 
 async def recompute_symbol(session, adapter, symbol: str, broker_epic: str,

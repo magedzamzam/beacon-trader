@@ -22,6 +22,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+from ._util import dig as _dig            # nested dict lookup (#69)
+
 
 def _scalar(v) -> bool:
     return isinstance(v, (bool, int, float, str)) and not isinstance(v, bytes)
@@ -30,15 +32,6 @@ def _scalar(v) -> bool:
 def _put(fv: dict, key: str, val) -> None:
     if val is not None and _scalar(val):
         fv[key] = val
-
-
-def _dig(d, *path):
-    cur = d
-    for p in path:
-        if not isinstance(cur, dict):
-            return None
-        cur = cur.get(p)
-    return cur
 
 
 def assemble(*, ta_features: dict = None, session_tag=None, utc_hour=None,

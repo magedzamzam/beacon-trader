@@ -12,6 +12,8 @@ import math
 from statistics import pstdev, mean
 from typing import List, Optional
 
+from ._util import dig_num as _num, zone_side   # shared analytics helpers (#69)
+
 # --- Regime thresholds (labels only — nothing gates on them) ------------------
 ADX_TRENDING = 25.0          # classic ADX trend threshold
 HURST_TRENDING = 0.55        # >0.5 persistent/trending
@@ -152,13 +154,6 @@ def _tf_features(ctx):
     return {}
 
 
-def _num(d, *path):
-    cur = d
-    for p in path:
-        if not isinstance(cur, dict):
-            return None
-        cur = cur.get(p)
-    return cur if isinstance(cur, (int, float)) else None
 
 
 # ============================ ctx estimators ==================================
@@ -311,7 +306,7 @@ async def structure_magnet(ctx) -> Optional[dict]:
         inside = lo <= price <= hi
         d = 0.0 if inside else min(abs(price - lo), abs(price - hi))
         dist_atr = round(d / ref_atr, 3) if ref_atr else None
-        side = "inside" if inside else ("above" if price > hi else "below")
+        side = zone_side(price, lo, hi)
         if nearest_d is None or d < nearest_d:
             nearest_d = d
             nearest_zone = {"zone_id": z.id, "band": [round(lo, 5), round(hi, 5)],

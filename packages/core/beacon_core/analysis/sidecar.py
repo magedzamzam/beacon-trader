@@ -80,13 +80,8 @@ class AnalyticsCtx:
 
 async def load_config(session) -> dict:
     from ..settings_store import get_setting
-    stored = await get_setting(session, ANALYTICS_SETTING_KEY, None)
-    cfg = dict(DEFAULT_ANALYTICS)
-    if isinstance(stored, dict):
-        for k in DEFAULT_ANALYTICS:
-            if k in stored:
-                cfg[k] = stored[k]
-    return cfg
+    from ._util import overlay_config
+    return overlay_config(DEFAULT_ANALYTICS, await get_setting(session, ANALYTICS_SETTING_KEY, None))
 
 
 def build_window(ctx: AnalyticsCtx, max_bars: int) -> dict:
@@ -114,6 +109,14 @@ async def run_estimators(ctx: AnalyticsCtx, estimators=None):
             degraded.append(name)
             log.warning("ANALYTICS-SIDECAR-DEGRADED: estimator '%s' failed "
                         "(signal %s): %s", name, ctx.signal_id, exc)
+    # #70: realize the locked envelope — one uniform contributions view across
+    # every estimator, via the single central mapper. Per-estimator detail dicts
+    # stay untouched (back-compat); this is an additive block consumers may adopt.
+    from .contract import estimator_contributions
+    contribs = [c for n, out in analytics.items()
+                for c in estimator_contributions(n, out)]
+    if contribs:
+        analytics["_contributions"] = contribs
     return analytics, degraded
 
 
@@ -128,9 +131,7 @@ async def capture_analytics(*, signal_id: int, symbol: str, direction,
     from sqlalchemy.dialects.postgresql import insert as pg_insert
     from ..db.base import Session
     from ..db.models import SignalAnalytics
-
-    def _col(k):
-        return [float(b[k]) for b in (bars or []) if b.get(k) is not None]
+    from ._util import bars_col
 
     async with Session()() as session:
         cfg = cfg if cfg is not None else await load_config(session)
@@ -139,8 +140,9 @@ async def capture_analytics(*, signal_id: int, symbol: str, direction,
         ctx = AnalyticsCtx(
             signal_id=signal_id, symbol=symbol, direction=direction,
             price=float(price) if price is not None else None,
-            timeframe=timeframe, closes=_col("c"), highs=_col("h"), lows=_col("l"),
-            volumes=_col("v"), features=features or {}, session=session,
+            timeframe=timeframe, closes=bars_col(bars, "c"), highs=bars_col(bars, "h"),
+            lows=bars_col(bars, "l"),
+            volumes=bars_col(bars, "v"), features=features or {}, session=session,
             source_id=source_id,
         )
         analytics, degraded = await run_estimators(ctx)

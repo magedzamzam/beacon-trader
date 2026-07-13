@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from ..ta.registry import TF_RESOLUTION
+from ._util import bars_col, overlay_config
 
 # Structure timeframes add the weekly bar on top of the TA resolutions.
 STRUCT_TF_RESOLUTION = {**TF_RESOLUTION, "1w": "WEEK"}
@@ -52,12 +53,7 @@ DEFAULT_STRUCTURE = {
 
 def structure_cfg(stored) -> dict:
     """Effective structure config: defaults overlaid with stored known keys."""
-    cfg = dict(DEFAULT_STRUCTURE)
-    if isinstance(stored, dict):
-        for k in DEFAULT_STRUCTURE:
-            if k in stored:
-                cfg[k] = stored[k]
-    return cfg
+    return overlay_config(DEFAULT_STRUCTURE, stored)
 
 
 # ============================ pure pipeline ===================================
@@ -168,9 +164,9 @@ def analyze_timeframe(bars: List[dict], *, atr: float, k: float,
     """Full single-TF analysis. Returns structure summary + its levels (fib
     ladder anchored on the most recent completed leg + swing levels), or None on
     insufficient data. Prices only — money is never sized here."""
-    highs = [float(b["h"]) for b in bars if b.get("h") is not None]
-    lows = [float(b["l"]) for b in bars if b.get("l") is not None]
-    closes = [float(b["c"]) for b in bars if b.get("c") is not None]
+    highs = bars_col(bars, "h")
+    lows = bars_col(bars, "l")
+    closes = bars_col(bars, "c")
     if len(highs) < 5 or len(lows) != len(highs) or not closes:
         return None
     pivots = zigzag(highs, lows, atr, k)
@@ -246,13 +242,7 @@ def cluster_levels(levels: List[dict], tolerance: float) -> List[dict]:
     return zones
 
 
-# ---- composability: the common feature-contribution contract (#61) -----------
-def feature_contribution(name: str, value, direction: Optional[str],
-                         weight: float, confidence: float) -> dict:
-    """The shared (name, value, direction, weight, confidence) shape that
-    structure/magnets emit — identical to what regime/TA/bayes will emit — so a
-    future unified signal engine can compose one score across all layers. Keep
-    this contract stable; #31 (correlation->filters) and the TA/bayes layers
-    conform to it."""
-    return {"name": name, "value": value, "direction": direction,
-            "weight": float(weight), "confidence": float(confidence)}
+# ---- composability: the common feature-contribution contract (#61/#70) --------
+# Canonical definition now lives in contract.py (the locked estimator envelope);
+# re-exported here so existing structure.feature_contribution callers keep working.
+from .contract import feature_contribution  # noqa: E402,F401

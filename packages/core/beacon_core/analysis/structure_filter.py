@@ -13,6 +13,8 @@ against the higher-timeframe structure. Fail-open on missing data.
 """
 from __future__ import annotations
 
+from ._util import overlay_config, adverse_side
+
 DEFAULT_STRUCTURE_FILTER = {
     "enabled": False,             # Phase-1/2 shadow: NEVER gates
     "mode": "skip",               # skip | desize
@@ -32,13 +34,7 @@ def _clamp01(v, default):
 
 def structure_filter_cfg(structure_cfg) -> dict:
     """The effective filter config from the `structure.filter` block."""
-    cfg = dict(DEFAULT_STRUCTURE_FILTER)
-    f = (structure_cfg or {}).get("filter")
-    if isinstance(f, dict):
-        for k in DEFAULT_STRUCTURE_FILTER:
-            if k in f:
-                cfg[k] = f[k]
-    return cfg
+    return overlay_config(DEFAULT_STRUCTURE_FILTER, (structure_cfg or {}).get("filter"))
 
 
 def decide(cfg: dict, direction: str, structure_magnet) -> tuple:
@@ -51,9 +47,8 @@ def decide(cfg: dict, direction: str, structure_magnet) -> tuple:
     reasons = []
     nz = structure_magnet.get("nearest_zone")
     if nz and nz.get("dist_atr") is not None and nz["dist_atr"] <= float(cfg.get("adverse_zone_atr", 0.5)):
-        side = nz.get("side")
         # Adverse: BUY into a zone just ABOVE (resistance), SELL into one just BELOW.
-        if (direction == "BUY" and side == "above") or (direction == "SELL" and side == "below"):
+        if adverse_side(direction, nz.get("side")):
             reasons.append("adverse_magnet")
     if cfg.get("require_htf_aligned") and structure_magnet.get("htf_alignment") == "counter":
         reasons.append("htf_counter")
