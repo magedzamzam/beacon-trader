@@ -96,10 +96,16 @@ def posterior(wins: int, n: int, base_rate: float,
 
 # ---- feature flattening + conditions --------------------------------------
 def _flatten(features: dict) -> Dict[str, object]:
-    """{tf: {indicator_key: {field: value}}} -> {'tf.key.field': value}."""
+    """{tf: {indicator_key: {field: value}}} -> {'tf.key.field': value}.
+
+    Also accepts an ALREADY-flat namespaced dict (the unified feature vector,
+    #62): a scalar top-level value is passed through unchanged (e.g.
+    'analytics.regime.label' -> 'bull'), so both shapes flatten idempotently."""
     out: Dict[str, object] = {}
     for tf, inds in (features or {}).items():
         if not isinstance(inds, dict):
+            if not str(tf).startswith("_"):
+                out[tf] = inds                       # already-flat entry, pass through
             continue
         for key, val in inds.items():
             if key.startswith("_"):

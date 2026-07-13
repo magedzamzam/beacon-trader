@@ -3,7 +3,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from beacon_core.analysis import bayes as B
-from beacon_core.db.models import SignalFeature, Trade
+from beacon_core.analysis import feature_vector as FV
+from beacon_core.db.models import SignalFeature, SignalAnalytics, AiAssessment, Trade
 from beacon_core.timeutil import parse_iso_utc
 from ..deps import get_db
 from ..auth import require_token
@@ -13,21 +14,36 @@ router = APIRouter(prefix="/analysis", tags=["analysis"],
 
 
 async def _model(db: AsyncSession, min_n: int, frm=None, to=None):
-    """Label closed trades by realized P&L > 0, join to their captured signal
-    features, and build the Bayesian model. Optional [frm, to) window (#58):
-    Trade has no close timestamp, so we anchor on Trade.created_at (entry/signal
-    time) — a slightly different anchor than Performance's leg-close time; called
-    out so "This month" is interpreted correctly per page."""
+    """Label closed trades by realized P&L > 0 and build the Bayesian model over
+    the UNIFIED per-signal feature vector (#62) — TA + analytics + structure/
+    magnets + AI + session — not just the TA snapshot. Optional [frm, to) window
+    (#58) anchored on Trade.created_at (entry/signal time; Trade has no close ts).
+    Point-in-time: reads persisted per-signal rows, never a fresh recompute."""
     q = select(Trade).where(Trade.status == "closed")
     if frm is not None:
         q = q.where(Trade.created_at >= frm)
     if to is not None:
         q = q.where(Trade.created_at < to)
     trades = (await db.execute(q)).scalars().all()
-    sfs = (await db.execute(select(SignalFeature))).scalars().all()
-    by_sig = {s.signal_id: s.features for s in sfs if s.features}
-    examples = [(by_sig[t.signal_id], float(t.realized_pl or 0) > 0)
-                for t in trades if t.signal_id in by_sig]
+
+    # Bulk-load every layer once, keyed by signal_id (avoids N queries).
+    sf_by = {s.signal_id: s for s in (await db.execute(select(SignalFeature))).scalars().all()}
+    sa_by = {s.signal_id: s for s in (await db.execute(select(SignalAnalytics))).scalars().all()}
+    ai_sig, ai_exec = {}, {}
+    for r in (await db.execute(select(AiAssessment).where(
+            AiAssessment.signal_id.isnot(None)).order_by(AiAssessment.id))).scalars().all():
+        if r.kind == "signal_validation":
+            ai_sig[r.signal_id] = r          # keep the latest (ordered by id)
+        elif r.kind == "execution_review":
+            ai_exec[r.signal_id] = r
+
+    examples = []
+    for t in trades:
+        sid = t.signal_id
+        if sid not in sf_by and sid not in sa_by:   # nothing captured -> skip the row
+            continue
+        fv = FV.from_rows(sf_by.get(sid), sa_by.get(sid), ai_sig.get(sid), ai_exec.get(sid))
+        examples.append((fv, float(t.realized_pl or 0) > 0))
     return B.build_model(examples, min_n=min_n)
 
 
@@ -52,7 +68,8 @@ async def bayes(min_n: int = 5, limit: int = 100, date_from: str = None,
     rows = (await db.execute(select(SignalFeature)
                              .order_by(SignalFeature.id.desc()).limit(30))).scalars().all()
     for sf in rows:
-        sc = B.score(model, sf.features or {})
+        fv = await FV.feature_vector(db, sf.signal_id)      # unified vector (#62)
+        sc = B.score(model, fv or {})
         recent.append({"signal_id": sf.signal_id, "symbol": sf.symbol,
                        "direction": sf.direction,
                        "p_win": round(sc["p_win"], 4) if sc else None,
@@ -68,11 +85,10 @@ async def bayes(min_n: int = 5, limit: int = 100, date_from: str = None,
 @router.get("/bayes/score/{signal_id}")
 async def score_signal(signal_id: int, min_n: int = 5, db: AsyncSession = Depends(get_db)):
     model = await _model(db, min_n)
-    sf = (await db.execute(select(SignalFeature).where(
-        SignalFeature.signal_id == signal_id))).scalars().first()
-    if not sf:
+    fv = await FV.feature_vector(db, signal_id)             # unified vector (#62)
+    if fv is None:
         raise HTTPException(404, "no captured features for this signal")
-    sc = B.score(model, sf.features or {})
+    sc = B.score(model, fv)
     return {"signal_id": signal_id, "ready": bool(model.get("ready")),
             "base_rate": round(model.get("base_rate", 0.0), 4) if model.get("ready") else None,
             "score": (None if not sc else
