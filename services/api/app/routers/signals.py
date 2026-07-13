@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from beacon_core.db.models import AiAssessment, Signal, Source
+from beacon_core.db.models import AiAssessment, Event, Signal, Source
 from beacon_core.parsing import parse
 from ..deps import get_db
 from ..auth import require_token
@@ -91,11 +91,30 @@ async def tradingview_webhook(key: str, request: Request, db: AsyncSession = Dep
 
 @router.post("/signals/{signal_id}/reinitiate", dependencies=[Depends(require_token)])
 async def reinitiate_signal(signal_id: int, db: AsyncSession = Depends(get_db)):
-    """Re-run a stored signal through the executor (opens fresh trades)."""
+    """Re-open a stored signal as a fresh trade (#66). Rather than re-enqueue the
+    same signal (which the #15 idempotency guard would block, and which the old
+    code mis-sent to pub/sub instead of the durable queue), CLONE it into a new
+    validated Signal linked via `reinitiated_from`, then ENQUEUE the clone onto
+    the same durable queue the executor consumes. The clone runs through every
+    live gate (trust, risk, AI); block reasons land as events in the Activity
+    feed."""
     from beacon_core.bus import Bus
     from beacon_core.config import CH_SIGNAL_VALID
-    sig = await db.get(Signal, signal_id)
-    if not sig:
+    orig = await db.get(Signal, signal_id)
+    if not orig:
         raise HTTPException(404, "signal not found")
-    await Bus().publish(CH_SIGNAL_VALID, {"signal_id": sig.id})
-    return {"ok": True, "signal_id": sig.id}
+    clone = Signal(
+        source_id=orig.source_id, symbol=orig.symbol, direction=orig.direction,
+        entry_from=orig.entry_from, entry_to=orig.entry_to, sl=orig.sl,
+        tps=list(orig.tps or []), order_type=orig.order_type, status="validated",
+        raw_text=orig.raw_text, market_snapshot=dict(orig.market_snapshot or {}),
+        dedupe_hash=f"reinit:{orig.id}:{orig.dedupe_hash or ''}"[:64],
+        reinitiated_from=orig.id)
+    db.add(clone)
+    await db.flush()                                   # assign clone.id
+    db.add(Event(kind="reinitiated", payload={
+        "signal_id": clone.id, "reinitiated_from": orig.id, "symbol": orig.symbol}))
+    await db.commit()
+    await Bus().enqueue(CH_SIGNAL_VALID, {"signal_id": clone.id})   # durable queue, not pub/sub
+    return {"ok": True, "signal_id": clone.id, "reinitiated_from": orig.id,
+            "message": f"Re-initiated as signal #{clone.id} — placing fresh orders on the mapped accounts."}

@@ -49,6 +49,8 @@ async def init_models() -> None:
             "ADD COLUMN IF NOT EXISTS reply_to_message_id INTEGER",
             "ALTER TABLE sources "
             "ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE signals "
+            "ADD COLUMN IF NOT EXISTS reinitiated_from INTEGER",   # re-initiate clone link (#66)
         ):
             try:
                 await conn.exec_driver_sql(stmt)

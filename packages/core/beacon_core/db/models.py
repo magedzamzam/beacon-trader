@@ -87,6 +87,8 @@ class Signal(Base):
     raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     market_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)   # price/spread at signal time
     dedupe_hash: Mapped[str] = mapped_column(String(64), index=True)
+    reinitiated_from: Mapped[int | None] = mapped_column(               # clone audit trail (#66)
+        ForeignKey("signals.id"), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
     trades: Mapped[list["Trade"]] = relationship(back_populates="signal")
 

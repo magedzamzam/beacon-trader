@@ -17,6 +17,8 @@ export default function Signals() {
   const [add, setAdd] = useState(false);
   const [busy, setBusy] = useState(null);
   const [structId, setStructId] = useState(null);   // signal id whose structure panel is open
+  const [reinitSig, setReinitSig] = useState(null); // signal pending re-initiate confirmation
+  const [msg, setMsg] = useState(null);             // success feedback
 
   const load = async () => {
     try {
@@ -28,7 +30,16 @@ export default function Signals() {
   };
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [filter]);
 
-  const reinit = async (id) => { try { await api.reinitiate(id); await load(); } catch (e) { setErr(e.message); } };
+  const doReinit = async (sig) => {
+    setBusy(sig.id); setMsg(null);
+    try {
+      const r = await api.reinitiate(sig.id);
+      setMsg(r?.message || `Re-initiated as signal #${r?.signal_id}.`);
+      setReinitSig(null);
+      await load();
+    } catch (e) { setErr(e.message); }
+    finally { setBusy(null); }
+  };
   const runAi = async (id) => {
     setBusy(id);
     try { await api.aiAssessSignal(id); await load(); }
@@ -40,6 +51,12 @@ export default function Signals() {
   return (
     <div className="space-y-3">
       <ErrorNote>{err}</ErrorNote>
+      {msg && (
+        <div className="rounded-lg px-4 py-2 text-sm bg-long/15 text-long border border-long/30 flex items-center justify-between">
+          <span>{msg}</span>
+          <button onClick={() => setMsg(null)} className="text-xs opacity-70 hover:opacity-100">dismiss</button>
+        </div>
+      )}
       <div className="flex justify-between items-center">
         <Select value={filter} onChange={e => setFilter(e.target.value)}>
           <option value="">All channels</option>
@@ -77,7 +94,7 @@ export default function Signals() {
                         <Layers className="w-4 h-4" /></Button>
                       <Button variant="ghost" onClick={() => runAi(s.id)} title="Run AI validation">
                         <Sparkles className={`w-4 h-4 ${busy === s.id ? "animate-pulse" : ""}`} /></Button>
-                      <Button variant="ghost" onClick={() => reinit(s.id)} title="Re-initiate"><RotateCcw className="w-4 h-4" /></Button>
+                      <Button variant="ghost" onClick={() => setReinitSig(s)} title="Re-initiate — re-open as a fresh trade"><RotateCcw className="w-4 h-4" /></Button>
                     </div>
                   </Td>
                 </tr>
@@ -88,7 +105,34 @@ export default function Signals() {
       </Card>
       {add && <ManualModal sources={sources} onClose={() => setAdd(false)} onSaved={() => { setAdd(false); load(); }} />}
       {structId != null && <SignalStructureModal signalId={structId} onClose={() => setStructId(null)} />}
+      {reinitSig && (
+        <ReinitConfirmModal sig={reinitSig} busy={busy === reinitSig.id}
+          onConfirm={() => doReinit(reinitSig)} onClose={() => setReinitSig(null)} />
+      )}
     </div>
+  );
+}
+
+// Confirm before re-initiating — this places FRESH live orders on the mapped
+// accounts, so it must not fire accidentally (#66).
+function ReinitConfirmModal({ sig, busy, onConfirm, onClose }) {
+  return (
+    <Modal title={`Re-initiate signal #${sig.id}?`} onClose={onClose}>
+      <p className="text-sm text-muted">
+        This re-opens the signal as a <b className="text-ink">fresh trade</b> and places
+        <b className="text-ink"> live orders</b> on the mapped accounts. A new signal is
+        created (the original is untouched); it still passes the trust, risk and AI gates.
+      </p>
+      <div className="mt-3 rounded-lg bg-panel2 border border-edge px-3 py-2 text-xs num">
+        <Badge dot tone={sig.direction === "BUY" ? "long" : "short"}>{sig.direction}</Badge>
+        {" "}<b>{sig.symbol}</b> · entry {sig.entry_from}{sig.entry_to !== sig.entry_from ? `–${sig.entry_to}` : ""} ·
+        SL {sig.sl} · TP {(sig.tps || []).join(" / ")} · {sig.order_type}
+      </div>
+      <div className="flex justify-end gap-2 pt-3">
+        <Button variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
+        <Button onClick={onConfirm} disabled={busy}>{busy ? "Re-initiating…" : "Re-open & place orders"}</Button>
+      </div>
+    </Modal>
   );
 }
 
