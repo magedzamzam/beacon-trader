@@ -95,6 +95,8 @@ export const api = {
   riskLimits: () => req("/risk-limits/config"),
   saveRiskLimits: (c) => req("/risk-limits/config", { method: "PUT", body: JSON.stringify(c) }),
   riskStatus: (accountId = "") => req(`/risk-limits/status${accountId ? `?account_id=${accountId}` : ""}`),
+  plannerConfig: () => req("/planner/config"),
+  savePlannerConfig: (c) => req("/planner/config", { method: "PUT", body: JSON.stringify(c) }),
   entryFilters: () => req("/entry-filters/config"),
   saveEntryFilters: (c) => req("/entry-filters/config", { method: "PUT", body: JSON.stringify(c) }),
   analyticsConfig: () => req("/analytics/config"),

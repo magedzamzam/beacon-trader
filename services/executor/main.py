@@ -28,7 +28,7 @@ from beacon_core.tasks import spawn_bg
 from beacon_core.timeutil import utcnow
 from beacon_core.brokers.types import (OrderSide, OrderStatus, OrderType, PlaceOrderRequest)
 from beacon_core.parsing.models import ParsedSignal
-from beacon_core.execution.planner import build_plan
+from beacon_core.execution.planner import build_plan, DEFAULT_PLANNER
 from beacon_core.execution.guard import (should_auto_execute, risk_limit_reason,
                                           DEFAULT_RISK_LIMITS)
 from beacon_core.execution.trend_filter import trend_filter_cfg, decide as trend_decide
@@ -263,7 +263,7 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                               payload={"account_id": acct.id, "error": str(exc)}))
             return
 
-        planner_cfg = await get_setting(session, "planner", {}) or {}
+        planner_cfg = {**DEFAULT_PLANNER, **(await get_setting(session, "planner", {}) or {})}
         # Default 0.5 (50%): catches parse-artifact TPs (e.g. tp=1530 vs gold ~4180,
         # ~60% away) while never tripping a real target. Tune via the `planner` setting.
         max_tp_pct = Decimal(str(planner_cfg.get("max_tp_distance_pct", "0.5")))
@@ -273,7 +273,18 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             min_stop_distance=smap.min_stop_distance,
             max_tp_distance_pct=max_tp_pct if max_tp_pct > 0 else None,
             honor_market_hint=bool(planner_cfg.get("honor_market_hint", True)),
+            chase_tolerance_r=Decimal(str(planner_cfg.get("chase_tolerance_r", "0.25"))),
+            chase_tolerance_atr=Decimal(str(planner_cfg.get("chase_tolerance_atr", "0"))),
+            beyond_tolerance=str(planner_cfg.get("beyond_tolerance", "limit")),
         )
+        # Audit the chase-guard decision (#67) whenever it prevented a chase —
+        # a MARKET hint rested as a LIMIT, or was skipped — so a bad-fill-avoided
+        # is visible in the Activity feed, not silent.
+        _guarded = [d for d in plan.entry_decisions if d.get("decision") in ("limit", "skip")]
+        if _guarded:
+            session.add(Event(kind="entry_chase_guard",
+                              payload={"signal_id": sig.id, "account_id": acct.id,
+                                       "current_price": str(current), "decisions": _guarded}))
         risk = RiskConfig.from_dict(source.risk_config or acct.risk_config or {})
         if trend_size_factor < 1:                       # counter-trend de-size (#48)
             risk.value = risk.value * trend_size_factor

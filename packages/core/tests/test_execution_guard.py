@@ -104,18 +104,19 @@ def test_no_bound_keeps_all():
     assert plan.legs[0].valid is True     # no bound -> not skipped by distance
 
 
-# ---- MARKET / "BUY NOW" entry hint (#25) ----
-def _msig(hint):
-    return ParsedSignal(symbol="XAUUSD", direction="SELL", entry_from=Decimal("4160"),
-                        entry_to=Decimal("4160"), sl=Decimal("4170"),
-                        tps=[Decimal("4150")], order_type_hint=hint)
+# ---- MARKET / "BUY NOW" entry hint (#25) + bounded chase guard (#67) ----
+def _msig(hint, direction="SELL", ef="4160", sl="4170", tps=("4150",), et=None):
+    return ParsedSignal(symbol="XAUUSD", direction=direction, entry_from=Decimal(ef),
+                        entry_to=Decimal(et if et is not None else ef), sl=Decimal(sl),
+                        tps=[Decimal(str(t)) for t in tps], order_type_hint=hint)
 
 
-def test_market_hint_opens_market_now():
-    # price 4155 has NOT reached the 4160 sell entry, but the channel said enter now
-    plan = build_plan(_msig("MARKET"), current_price=Decimal("4155"), honor_market_hint=True)
+def test_market_hint_opens_market_now_when_near():
+    # #25 preserved: price 4159 is within the chase tolerance of the 4160 sell
+    # entry (gap 1 <= 0.25*10) -> still fills MARKET at the live price.
+    plan = build_plan(_msig("MARKET"), current_price=Decimal("4159"), honor_market_hint=True)
     assert plan.legs and all(l.order_type == "MARKET" for l in plan.legs)
-    assert all(l.entry == Decimal("4155") for l in plan.legs)
+    assert all(l.entry == Decimal("4159") for l in plan.legs)
 
 
 def test_limit_hint_still_rests():
@@ -124,5 +125,53 @@ def test_limit_hint_still_rests():
 
 
 def test_market_hint_can_be_disabled():
+    # honor_market_hint=false -> the candle-cross path; price 4155 hasn't reached
+    # the 4160 sell entry and no candle did -> rests a LIMIT at 4160.
     plan = build_plan(_msig("MARKET"), current_price=Decimal("4155"), honor_market_hint=False)
-    assert all(l.order_type == "LIMIT" for l in plan.legs)
+    assert all(l.order_type == "LIMIT" and l.entry == Decimal("4160") for l in plan.legs)
+
+
+# --- #67: the reported chase (BUY entry 3976 filled at ~3998) ---
+def test_chase_guard_rests_limit_beyond_tolerance_buy():
+    # BUY 3976, SL 3966 (10pt stop, tol=2.5), price 3998 -> 22pt chase -> LIMIT@3976.
+    plan = build_plan(_msig("MARKET", direction="BUY", ef="3976", sl="3966", tps=("4010",)),
+                      current_price=Decimal("3998"))
+    assert plan.legs and all(l.order_type == "LIMIT" and l.entry == Decimal("3976")
+                             for l in plan.legs)
+    d = plan.entry_decisions[0]
+    assert d["decision"] == "limit" and d["gap"] == "22"
+
+
+def test_chase_guard_rests_limit_beyond_tolerance_sell():
+    # SELL mirror: 4020, SL 4030, price 3998 -> 22pt chase down -> LIMIT@4020.
+    plan = build_plan(_msig("MARKET", direction="SELL", ef="4020", sl="4030", tps=("3990",)),
+                      current_price=Decimal("3998"))
+    assert all(l.order_type == "LIMIT" and l.entry == Decimal("4020") for l in plan.legs)
+
+
+def test_chase_guard_market_when_price_better_than_entry():
+    # BUY at a price BELOW its own entry (favourable) -> gap 0 -> MARKET.
+    plan = build_plan(_msig("MARKET", direction="BUY", ef="3976", sl="3966", tps=("4010",)),
+                      current_price=Decimal("3970"))
+    assert all(l.order_type == "MARKET" and l.entry == Decimal("3970") for l in plan.legs)
+
+
+def test_chase_guard_skip_mode():
+    plan = build_plan(_msig("MARKET", direction="BUY", ef="3976", sl="3966", tps=("4010",)),
+                      current_price=Decimal("3998"), beyond_tolerance="skip")
+    assert plan.legs == [] and plan.entry_decisions[0]["decision"] == "skip"
+
+
+def test_chase_guard_atr_tolerance():
+    # tol_r off, ATR tolerance 0.3*100 = 30 >= 22 gap -> MARKET.
+    plan = build_plan(_msig("MARKET", direction="BUY", ef="3976", sl="3966", tps=("4100",)),
+                      current_price=Decimal("3998"), chase_tolerance_r=Decimal("0"),
+                      chase_tolerance_atr=Decimal("0.3"), atr=Decimal("100"))
+    assert all(l.order_type == "MARKET" for l in plan.legs)
+
+
+def test_chase_guard_boundary_is_inclusive():
+    # gap exactly == tolerance -> MARKET (<=). BUY 3976 SL 3966 tol 2.5; price 3978.5.
+    plan = build_plan(_msig("MARKET", direction="BUY", ef="3976", sl="3966", tps=("4010",)),
+                      current_price=Decimal("3978.5"))
+    assert all(l.order_type == "MARKET" for l in plan.legs)

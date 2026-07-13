@@ -19,6 +19,7 @@ from beacon_core.db.models import Account, Broker, Source, SymbolMap
 from beacon_core.execution.guard import DEFAULT_RISK_LIMITS
 from beacon_core.strategy.rules import DEFAULT_SL_RULES
 from beacon_core.execution.trend_filter import DEFAULT_TREND_FILTER
+from beacon_core.execution.planner import DEFAULT_PLANNER
 from beacon_core.analysis.sidecar import DEFAULT_ANALYTICS
 from beacon_core.analysis.structure import DEFAULT_STRUCTURE
 from beacon_core.settings_store import get_setting, set_setting
@@ -104,6 +105,14 @@ async def main():
         ef_cfg = dict(await get_setting(s, "entry_filters", {}) or {})
         ef_cfg.setdefault("trend_alignment", dict(DEFAULT_TREND_FILTER))
         await set_setting(s, "entry_filters", ef_cfg)
+
+        # Entry/planner config (#67) — the market-on-receipt chase guard etc.
+        # Seeded so it's visible/editable from the Risk page; safe defaults apply
+        # even if unset (a MARKET-hint entry never chases beyond the tolerance).
+        pl_cfg = dict(await get_setting(s, "planner", {}) or {})
+        for k, v in DEFAULT_PLANNER.items():
+            pl_cfg.setdefault(k, v)
+        await set_setting(s, "planner", pl_cfg)
 
         # Shadow analytics sidecar (#51/#52) — pure observability, off the hot
         # path, on by default. Set analytics.enabled=false to disable entirely.
