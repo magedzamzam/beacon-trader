@@ -94,6 +94,7 @@ export const api = {
   // risk limits + kill switch
   riskLimits: () => req("/risk-limits/config"),
   saveRiskLimits: (c) => req("/risk-limits/config", { method: "PUT", body: JSON.stringify(c) }),
+  riskStatus: (accountId = "") => req(`/risk-limits/status${accountId ? `?account_id=${accountId}` : ""}`),
   entryFilters: () => req("/entry-filters/config"),
   saveEntryFilters: (c) => req("/entry-filters/config", { method: "PUT", body: JSON.stringify(c) }),
   analyticsConfig: () => req("/analytics/config"),

@@ -306,9 +306,11 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             rl_cfg = dict(DEFAULT_RISK_LIMITS)
             log.warning("RISK-LIMITS-DEFAULTED: no risk_limits setting; applying "
                         "conservative defaults (%s)", rl_cfg)
-        # Always evaluate: risk_limit_reason() self-gates the opt-in checks but
-        # ALWAYS enforces the kill-switch and daily-loss floor, so a mis-set
-        # `enabled: false` cannot silently disarm capital protection (PM 2026-07-10).
+        # risk_limit_reason() self-gates on cfg (#65): a present row with
+        # enabled:false blocks nothing except the explicit kill-switch; a MISSING
+        # row uses DEFAULT_RISK_LIMITS above (enabled) so an un-configured install
+        # still fails safe. All limits come from the DB-backed `risk_limits`
+        # setting — edited only from the Risk page, never hardcoded here.
         if True:
             day_start = utcnow().replace(
                 hour=0, minute=0, second=0, microsecond=0)

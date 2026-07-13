@@ -25,6 +25,7 @@ export default function Dashboard({ setView, account }) {
   const acct = account || "";
   const { data: kpi, error } = useData(() => api.dashboard(acct), [acct]);
   const { data: rl } = useData(api.riskLimits);
+  const { data: rs } = useData(() => api.riskStatus(acct), [acct]);
   const { data: perf } = useData(() => api.perfSummary(acct), [acct]);
   const { data: bySrc } = useData(() => api.perfBySource(acct), [acct]);
   const { data: curve } = useData(() => api.equityCurve(acct), [acct]);
@@ -45,13 +46,28 @@ export default function Dashboard({ setView, account }) {
     <div className="space-y-6">
       {rl && rl.trading_halted && (
         <div className="rounded-lg px-4 py-2.5 text-sm font-medium bg-warn/15 text-warn border border-warn/30">
-          ⛔ Trading is HALTED (kill switch on). No new orders will be placed — Configuration → Risk &amp; Limits.
+          ⛔ Trading is HALTED (kill switch on). No new orders will be placed — Settings → Risk &amp; Limits.
+        </div>
+      )}
+      {rs && rs.blocked && !rl?.trading_halted && (
+        <div className="rounded-lg px-4 py-2.5 text-sm bg-short/15 text-short border border-short/30">
+          <div className="font-medium">⛔ Trading blocked — daily-loss limit reached</div>
+          <div className="mt-1 space-y-0.5 text-[13px]">
+            {rs.accounts.filter(a => a.blocked).map(a => (
+              <div key={a.account_id} className="num">
+                <b>{a.name}</b>: today {fmt(a.day_realized)}{a.floor != null ? ` (floor ${fmt(a.floor)})` : ""}
+              </div>
+            ))}
+          </div>
+          <div className="mt-1 text-[11px] opacity-80">
+            Resets at UTC midnight. To disarm now: Settings → Risk &amp; Limits (set the daily-loss limit to 0, or turn limits off).
+          </div>
         </div>
       )}
       {rl && !rl.enabled && (
-        <div className="rounded-lg px-4 py-2.5 text-sm font-medium bg-short/15 text-short border border-short/30">
-          ⚠️ RISK LIMITS OFF — the account is trading with no daily-loss cap or per-signal ceiling.
-          Enable them in Configuration → Risk &amp; Limits.
+        <div className="rounded-lg px-4 py-2.5 text-sm font-medium bg-warn/15 text-warn border border-warn/30">
+          ⚠️ Risk limits OFF — no daily-loss cap or per-signal ceiling (the kill-switch still works).
+          Enable them in Settings → Risk &amp; Limits.
         </div>
       )}
 

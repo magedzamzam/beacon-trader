@@ -77,33 +77,58 @@ export default function Risk() {
 
 function RiskLimitsCard() {
   const [cfg, setCfg] = useState(null);
+  const [status, setStatus] = useState(null);
   const [saved, setSaved] = useState(false);
   const [err, setErr] = useState(null);
-  useEffect(() => { api.riskLimits().then(setCfg).catch(e => setErr(e.message)); }, []);
+  const loadStatus = () => api.riskStatus().then(setStatus).catch(() => {});
+  useEffect(() => { api.riskLimits().then(setCfg).catch(e => setErr(e.message)); loadStatus(); }, []);
   if (!cfg) return null;
   const set = (k, v) => { setCfg(c => ({ ...c, [k]: v })); setSaved(false); };
   const num = (k, v) => set(k, v === "" ? "" : Number(v));
   const save = async () => {
-    try { setCfg(await api.saveRiskLimits(cfg)); setSaved(true); } catch (e) { setErr(e.message); }
+    try { setCfg(await api.saveRiskLimits(cfg)); setSaved(true); loadStatus(); } catch (e) { setErr(e.message); }
   };
+  const disarm = async () => {   // one-click: fully disable the daily floor
+    try { setCfg(await api.saveRiskLimits({ ...cfg, daily_loss_limit: 0 })); setSaved(true); loadStatus(); }
+    catch (e) { setErr(e.message); }
+  };
+  const blockedAccts = (status?.accounts || []).filter(a => a.blocked);
   return (
     <Card>
       <div className="px-4 py-3 border-b border-edge flex items-center justify-between">
         <div className="text-sm font-medium">Risk limits &amp; kill switch</div>
         <div className="flex items-center gap-2">
-          {!cfg.enabled && <Badge tone="short">limits off</Badge>}
-          {cfg.trading_halted && <Badge tone="warn">trading halted</Badge>}
+          {status?.blocked && <Badge tone="short">trading blocked</Badge>}
+          {!cfg.enabled && <Badge tone="warn">limits off</Badge>}
+          {cfg.trading_halted && <Badge tone="warn">halted</Badge>}
           {saved && <span className="text-xs text-long">Saved</span>}
         </div>
       </div>
       <div className="p-4 space-y-4">
         <ErrorNote>{err}</ErrorNote>
+
+        {status?.blocked && (
+          <div className="rounded-lg px-3 py-2 text-xs bg-short/15 text-short border border-short/30">
+            <div className="font-medium">Trading is currently blocked:</div>
+            {blockedAccts.map(a => (
+              <div key={a.account_id} className="num mt-0.5"><b>{a.name}</b> — {a.reason}</div>
+            ))}
+            <button onClick={disarm} className="mt-1.5 underline">Set daily-loss limit to 0 (disarm now)</button>
+          </div>
+        )}
+
         <div className="flex flex-wrap gap-x-8 gap-y-3">
           <label className="flex items-center gap-2 text-sm">Enforce limits
             <Toggle checked={!!cfg.enabled} onChange={v => set("enabled", v)} /></label>
           <label className="flex items-center gap-2 text-sm">
             <span className={cfg.trading_halted ? "text-warn font-medium" : ""}>Kill switch — halt all new trades</span>
             <Toggle checked={!!cfg.trading_halted} onChange={v => set("trading_halted", v)} /></label>
+        </div>
+        <div className="text-[11px] text-muted -mt-2">
+          Turning <b>Enforce limits</b> off disables the daily-loss floor and every cap (the kill-switch is a
+          separate button that still halts when on). All limits are stored here — nothing is hardcoded.
+          To disarm only the floor while keeping caps, set the daily-loss limit to <b>0</b>.
+          {status?.configured === false && " No risk_limits saved yet — a conservative fail-safe is active until you Save."}
         </div>
         <div className={`grid grid-cols-1 sm:grid-cols-2 gap-3 ${cfg.enabled ? "" : "opacity-60"}`}>
           <Field label="Daily loss limit (account ccy)">

@@ -21,31 +21,37 @@ def test_risk_limits_disabled_is_noop():
                              cfg={"enabled": False}) is None
 
 
-def test_failsafe_daily_floor_applies_when_disabled():
-    # Master switch OFF but a daily_loss_limit is set: the hard floor still fires.
-    # (Real 2026-07-10 case: risk_limits.enabled=false, daily_loss_limit=5000,
-    # account already down past the floor.)
+def test_disabled_master_switch_disables_daily_floor():
+    # #65: a PRESENT risk_limits row with enabled:false honours the operator —
+    # the daily-loss floor does NOT fire, even far past the (still-set) limit.
     cfg = {"enabled": False, "daily_loss_limit": 5000}
-    assert "daily loss limit" in risk_limit_reason(
-        planned_risk=10, day_realized=-6000, open_risk_symbol=0,
-        open_risk_account=0, cfg=cfg)
-    # not yet breached -> allowed (opt-in checks stay off)
-    assert risk_limit_reason(planned_risk=10, day_realized=-100, open_risk_symbol=0,
+    assert risk_limit_reason(planned_risk=10, day_realized=-6000, open_risk_symbol=0,
                              open_risk_account=0, cfg=cfg) is None
 
 
-def test_failsafe_killswitch_applies_when_disabled():
+def test_killswitch_is_explicit_and_halts_even_when_disabled():
+    # The kill-switch is the one explicit "STOP" flag — it must not be silently
+    # disarmed by the master switch. trading_halted:true halts regardless of enabled.
     cfg = {"enabled": False, "trading_halted": True, "daily_loss_limit": 5000}
     assert "halted" in risk_limit_reason(
-        planned_risk=10, day_realized=0, open_risk_symbol=0,
-        open_risk_account=0, cfg=cfg)
+        planned_risk=10, day_realized=0, open_risk_symbol=0, open_risk_account=0, cfg=cfg)
 
 
-def test_disabled_without_floor_is_still_noop():
-    # No daily_loss_limit + no kill-switch + disabled -> unchanged no-op contract.
-    assert risk_limit_reason(planned_risk=99999, day_realized=-99999,
-                             open_risk_symbol=0, open_risk_account=0,
-                             cfg={"enabled": False}) is None
+def test_missing_config_uses_failsafe_default():
+    # #19 preserved: an UN-configured install (no risk_limits row) still fails
+    # safe — the caller passes DEFAULT_RISK_LIMITS, which is enabled with a floor.
+    from beacon_core.execution.guard import DEFAULT_RISK_LIMITS
+    assert DEFAULT_RISK_LIMITS["enabled"] is True and DEFAULT_RISK_LIMITS["daily_loss_limit"] > 0
+    assert "daily loss limit" in risk_limit_reason(
+        planned_risk=10, day_realized=-99999, open_risk_symbol=0,
+        open_risk_account=0, cfg=dict(DEFAULT_RISK_LIMITS))
+
+
+def test_daily_loss_limit_zero_disables_floor():
+    # enabled but daily_loss_limit:0 -> floor is off (the documented workaround).
+    cfg = {"enabled": True, "daily_loss_limit": 0}
+    assert risk_limit_reason(planned_risk=10, day_realized=-99999, open_risk_symbol=0,
+                             open_risk_account=0, cfg=cfg) is None
 
 
 def test_per_signal_ceiling():

@@ -61,21 +61,23 @@ def risk_limit_reason(*, planned_risk, day_realized, open_risk_symbol,
     pr = _dec(planned_risk)
     daily = abs(_dec(cfg.get("daily_loss_limit")))
 
-    # --- Fail-safe floor: ALWAYS honored, even if the master switch is off ---
-    # A mis-set `enabled: false` must never fully disarm capital protection, so
-    # the manual kill-switch and the daily-loss circuit breaker apply regardless
-    # of `enabled`. Added after the 2026-07-10 PM run found `risk_limits.enabled`
-    # left false while the account bled well past its daily floor. Only these two
-    # hard limits are unconditional; the per-signal ceiling and open-risk caps
-    # below remain opt-in via the master switch (unchanged behaviour).
-    if cfg.get("trading_halted"):                 # manual kill-switch
+    # --- Kill-switch: the one explicit "STOP" flag; halts whenever set, so a big
+    # red button is never silently disarmed by the master switch. (#65 keeps this
+    # explicit-flag-gated; nothing else is unconditional.)
+    if cfg.get("trading_halted"):
         return "trading is halted (kill switch on)"
-    if daily > 0 and _dec(day_realized) <= -daily:
-        return f"daily loss limit reached (today {_dec(day_realized)} <= -{daily})"
 
-    # --- Opt-in limits: only when the master switch is on ---
+    # --- Master switch (#65): when the operator has explicitly turned limits OFF,
+    # NOTHING below blocks — the daily-loss floor and every cap are opt-in. A
+    # MISSING `risk_limits` row is the only fail-safe case (#19): the caller then
+    # passes DEFAULT_RISK_LIMITS, which has `enabled: True`, so an un-configured
+    # install is still protected. Present + enabled:false honours the operator.
     if not cfg.get("enabled"):
         return None
+
+    # --- Daily-loss circuit breaker (only when enabled; daily_loss_limit:0 = off) ---
+    if daily > 0 and _dec(day_realized) <= -daily:
+        return f"daily loss limit reached (today {_dec(day_realized)} <= -{daily})"
 
     pct = cfg.get("per_signal_max_pct_of_daily")
     if daily > 0 and pct:
