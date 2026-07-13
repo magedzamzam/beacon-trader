@@ -33,8 +33,19 @@ export function Badge({ children, tone = "muted", dot }) {
   );
 }
 
-export function Table({ children }) {
-  return <div className="overflow-x-auto"><table className="w-full border-separate border-spacing-0">{children}</table></div>;
+// `minW` gives the inner table a minimum width so `overflow-x-auto` actually
+// engages on a narrow (mobile) viewport instead of the browser crushing columns
+// to fit (#68). Wide tables opt into a larger value; desktop is unaffected
+// (`w-full` still fills the container above the min-width). Inline style is
+// deliberate — Tailwind JIT can't emit `min-w-[<dynamic>]` from a runtime prop.
+export function Table({ children, minW = 640 }) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full border-separate border-spacing-0" style={{ minWidth: `${minW}px` }}>
+        {children}
+      </table>
+    </div>
+  );
 }
 export function Th({ children, right }) {
   return <th className={`px-4 py-2.5 text-[11px] uppercase tracking-wider text-muted font-medium border-b border-edge ${right ? "text-right" : "text-left"}`}>{children}</th>;

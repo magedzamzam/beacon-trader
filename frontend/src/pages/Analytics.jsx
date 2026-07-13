@@ -74,7 +74,7 @@ export default function Analytics() {
         </div>
         {!rep ? <Empty>Loading…</Empty>
           : !rep.by_channel_regime?.length ? <Empty>No labelled analytics yet — accrues as signals capture and trades close.</Empty> : (
-          <Table>
+          <Table minW={860}>
             <thead><tr className="border-b border-edge">
               <Th>Channel</Th><Th>Regime</Th><Th right>n</Th><Th right>Win%</Th>
               <Th right>90% CI</Th><Th right>Expectancy</Th>

@@ -67,7 +67,7 @@ export default function Signals() {
       <Card>
         <div className="px-4 py-3 border-b border-edge text-sm font-medium">Signal feed</div>
         {!data.length ? <Empty>No signals received yet.</Empty> : (
-          <Table>
+          <Table minW={920}>
             <thead><tr>
               <Th>#</Th><Th>Provider</Th><Th>Symbol</Th><Th>Side</Th><Th right>Entry</Th><Th right>SL</Th>
               <Th>TPs</Th><Th>Type</Th><Th>Status</Th><Th>AI</Th><Th right>Actions</Th>

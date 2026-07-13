@@ -62,7 +62,7 @@ export default function Positions() {
 
       <Card>
         {!rows.length ? <Empty>No open positions.</Empty> : (
-          <Table>
+          <Table minW={860}>
             <thead><tr>
               <Th><input type="checkbox" checked={!!allSelected} onChange={toggleAll} /></Th>
               <Th>Trade</Th><Th>Symbol</Th><Th>Channel</Th><Th>Side</Th><Th>Type</Th><Th right>TP#</Th>

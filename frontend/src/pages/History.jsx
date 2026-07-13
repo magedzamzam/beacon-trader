@@ -14,7 +14,7 @@ export default function History() {
   return (
     <Card>
       <div className="px-4 py-3 border-b border-edge text-sm font-medium">Closed legs</div>
-      <Table>
+      <Table minW={820}>
         <thead><tr className="border-b border-edge">
           <Th>Trade</Th><Th>Symbol</Th><Th>Channel</Th><Th>Side</Th><Th right>TP#</Th>
           <Th right>Entry</Th><Th right>Close</Th><Th>Outcome</Th><Th right>P&L</Th>
