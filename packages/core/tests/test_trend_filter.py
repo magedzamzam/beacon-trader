@@ -1,7 +1,8 @@
 """Trend-alignment entry filter (#48): alignment logic + skip/desize decisions.
 Pure (no DB/broker) — the executor wires the 4h EMA fetch around this."""
 from beacon_core.execution.trend_filter import (DEFAULT_TREND_FILTER,
-                                                trend_filter_cfg, is_aligned, decide)
+                                                trend_filter_cfg, is_aligned, decide,
+                                                alignment_from_features)
 
 
 def test_alignment_semantics():
@@ -51,6 +52,31 @@ def test_cfg_overlays_only_known_keys():
     assert cfg["enabled"] is True and cfg["timeframe"] == "1d"
     assert "bogus" not in cfg
     assert cfg["ema_period"] == DEFAULT_TREND_FILTER["ema_period"]  # untouched default
+
+
+def test_alignment_from_features():
+    # #72 metric: classify a persisted signal_features snapshot by the 4h EMA200
+    # `above` flag. SELL below EMA = aligned; BUY below EMA = counter.
+    feats = {"4h": {"ema_200": {"value": 4200.0, "above": False}, "_price": 4180.0}}
+    assert alignment_from_features(feats, "SELL") is True     # down-trend, SELL aligns
+    assert alignment_from_features(feats, "BUY") is False     # down-trend, BUY counters
+    up = {"4h": {"ema_200": {"value": 4100.0, "above": True}}}
+    assert alignment_from_features(up, "BUY") is True
+    assert alignment_from_features(up, "SELL") is False
+    # honours a non-default timeframe/period the live filter may be set to
+    assert alignment_from_features({"1d": {"ema_100": {"above": True}}},
+                                   "BUY", timeframe="1d", ema_period=100) is True
+
+
+def test_alignment_from_features_unknown_is_none():
+    # fail-open: missing tf / missing EMA / missing `above` -> None (excluded).
+    assert alignment_from_features(None, "BUY") is None
+    assert alignment_from_features({}, "BUY") is None
+    assert alignment_from_features({"4h": {}}, "BUY") is None            # EMA not captured
+    assert alignment_from_features({"4h": {"ema_200": {"value": 1.0}}},  # no `above`
+                                   "BUY") is None
+    assert alignment_from_features({"1h": {"ema_200": {"above": True}}}, # wrong tf
+                                   "BUY") is None
 
 
 if __name__ == "__main__":

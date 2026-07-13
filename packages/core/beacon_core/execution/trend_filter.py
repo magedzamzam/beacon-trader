@@ -41,6 +41,22 @@ def is_aligned(direction: str, above: bool) -> bool:
     return bool(above) if direction == "BUY" else (not bool(above))
 
 
+def alignment_from_features(features, direction: str,
+                            timeframe: str = "4h", ema_period: int = 200):
+    """Classify a persisted signal-time TA snapshot as trend-aligned / counter
+    (#72 metric): read the `above` flag of the EMA at `timeframe` (captured by
+    `ta.compute_timeframe`) and compare against `direction`. Returns True
+    (aligned), False (counter) or None when the EMA wasn't captured — the same
+    fail-open definition the live filter uses, so the report matches placement."""
+    tf = (features or {}).get(timeframe)
+    if not isinstance(tf, dict):
+        return None
+    ema = tf.get("ema_%d" % int(ema_period))
+    if not isinstance(ema, dict) or ema.get("above") is None:
+        return None
+    return is_aligned(direction, ema.get("above"))
+
+
 def _clamp_factor(v) -> float:
     try:
         f = float(v)

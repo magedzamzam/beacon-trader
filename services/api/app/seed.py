@@ -100,10 +100,15 @@ async def main():
         strat_cfg.setdefault("default_sl_rules", DEFAULT_SL_RULES)
         await set_setting(s, "strategy", strat_cfg)
 
-        # Trend-alignment entry filter (#48) — seeded DISABLED (A/B flag). Flip
-        # entry_filters.trend_alignment.enabled to roll it out on demand.
+        # Trend-alignment entry filter (#48) — ENABLED as the #72 rollout on demo:
+        # counter-trend entries held 93% of the ledger loss (2026-07-13, n=135)
+        # while aligned entries were ~breakeven, and 07-13 confirmed it prospectively.
+        # setdefault so re-seeding never clobbers an operator who later tunes or
+        # disables it — fully reversible from the Risk page (PUT /entry-filters).
+        # The library DEFAULT stays off (opt-in A/B contract); this is the
+        # deployment's initial rollout value, not a standing directional bias.
         ef_cfg = dict(await get_setting(s, "entry_filters", {}) or {})
-        ef_cfg.setdefault("trend_alignment", dict(DEFAULT_TREND_FILTER))
+        ef_cfg.setdefault("trend_alignment", {**DEFAULT_TREND_FILTER, "enabled": True})
         await set_setting(s, "entry_filters", ef_cfg)
 
         # Entry/planner config (#67) — the market-on-receipt chase guard etc.

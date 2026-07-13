@@ -204,6 +204,76 @@ async def structure_outcome_report(session, frm=None, to=None) -> dict:
     }
 
 
+async def trend_alignment_outcome_report(session, frm=None, to=None, *,
+                                         timeframe="4h", ema_period=200) -> dict:
+    """The aligned-vs-counter split as a first-class metric (#72): win-rate,
+    net PnL and expectancy for trend-ALIGNED vs COUNTER-trend entries, overall
+    and per channel, with Beta-Binomial credible intervals. Classifies each
+    labelled trade from its persisted `signal_features` (price vs `timeframe`
+    EMA`ema_period` at signal time) — the exact definition the live filter (#48)
+    gates on — joined to trades.realized_pl. Unknown-trend signals are excluded
+    (the filter fails open on them). Read-only; nothing gates on this."""
+    from collections import defaultdict
+    from sqlalchemy import select
+    from ..db.models import SignalFeature, Signal, Source, Trade
+    from ..execution.trend_filter import alignment_from_features
+
+    q = (select(Source.name, Signal.direction, SignalFeature.features, Trade.realized_pl)
+         .join(Signal, Signal.id == SignalFeature.signal_id)
+         .join(Trade, Trade.signal_id == SignalFeature.signal_id)
+         .outerjoin(Source, Source.id == Signal.source_id))
+    if frm is not None:
+        q = q.where(Signal.created_at >= frm)
+    if to is not None:
+        q = q.where(Signal.created_at < to)
+    rows = (await session.execute(q)).all()
+
+    def _cell():
+        return {"n": 0, "wins": 0, "pl": 0.0}
+
+    overall = defaultdict(_cell)                       # "aligned" | "counter"
+    by_channel = defaultdict(lambda: defaultdict(_cell))
+    n_class = wins_class = n_unknown = 0
+
+    for name, direction, feats, pl in rows:
+        if pl is None:
+            continue
+        aligned = alignment_from_features(feats, direction, timeframe, ema_period)
+        if aligned is None:                            # trend unknown -> fail-open, excluded
+            n_unknown += 1
+            continue
+        pl = float(pl)
+        win = pl > 0
+        key = "aligned" if aligned else "counter"
+        for b in (overall[key], by_channel[name or "Unattributed"][key]):
+            b["n"] += 1
+            b["wins"] += 1 if win else 0
+            b["pl"] += pl
+        n_class += 1
+        wins_class += 1 if win else 0
+
+    base = (wins_class / n_class) if n_class else 0.5
+
+    def _fmt(b):
+        post = posterior(b["wins"], b["n"], base)
+        return {"n": b["n"], "win_rate": round(b["wins"] / b["n"], 4),
+                "net": round(b["pl"], 2), "expectancy": round(b["pl"] / b["n"], 4),
+                "ci_low": round(post["ci_low"], 4), "ci_high": round(post["ci_high"], 4)}
+
+    return {
+        "timeframe": timeframe, "ema_period": ema_period,
+        "n_labelled": n_class, "n_unknown_trend": n_unknown, "base_rate": round(base, 4),
+        "overall": {k: _fmt(v) for k, v in overall.items() if v["n"]},
+        "by_channel": {ch: {k: _fmt(v) for k, v in m.items() if v["n"]}
+                       for ch, m in by_channel.items()},
+        "note": ("Trend-alignment (price vs %s EMA%d at signal time) vs outcome — "
+                 "SHADOW metric (#72). 'counter' = entry fighting the higher-TF "
+                 "trend; #48 filter skips/de-sizes these. Unknown-trend signals "
+                 "excluded (filter fails open). Small-n: trust the credible interval."
+                 % (timeframe, ema_period)),
+    }
+
+
 def _zone_proximity_band(sm: dict, direction: str):
     """(proximity_band, adverse) from a structure_magnet block: how close is the
     nearest magnet zone, and is it on the ADVERSE side (BUY into a zone above /

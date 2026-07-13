@@ -103,6 +103,7 @@ export const api = {
   saveAnalyticsConfig: (c) => req("/analytics/config", { method: "PUT", body: JSON.stringify(c) }),
   analyticsCorrelation: (range = {}) => req(`/analytics/correlation${_perfQs("", range)}`),
   analyticsStructure: (range = {}) => req(`/analytics/structure${_perfQs("", range)}`),
+  analyticsTrendAlignment: (range = {}) => req(`/analytics/trend-alignment${_perfQs("", range)}`),
   signalAnalytics: (id) => req(`/analytics/signal/${id}`),
   structureMap: (symbol = "XAUUSD") => req(`/analytics/structure/map?symbol=${encodeURIComponent(symbol)}`),
   structureRecompute: () => req("/analytics/structure/recompute", { method: "POST" }),

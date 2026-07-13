@@ -7,12 +7,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from beacon_core.analysis.report import (channel_regime_report,
                                          structure_outcome_report,
-                                         structure_magnet_outcome_report)
+                                         structure_magnet_outcome_report,
+                                         trend_alignment_outcome_report)
 from beacon_core.analysis.sidecar import load_config
 from beacon_core.analysis import structure_map as struct_map
 from beacon_core.analysis.structure import DEFAULT_STRUCTURE
 from beacon_core.db.models import SignalAnalytics
-from beacon_core.settings_store import set_setting
+from beacon_core.execution.trend_filter import trend_filter_cfg
+from beacon_core.settings_store import get_setting, set_setting
 from beacon_core.timeutil import parse_iso_utc
 from ..deps import get_db
 from ..auth import require_token
@@ -58,6 +60,19 @@ async def structure(date_from: str = None, date_to: str = None,
     inside an unfilled Fair Value Gap / unmitigated Order Block vs not, per
     channel and regime with credible intervals. Shadow only."""
     return await structure_outcome_report(db, parse_iso_utc(date_from), parse_iso_utc(date_to))
+
+
+@router.get("/trend-alignment")
+async def trend_alignment(date_from: str = None, date_to: str = None,
+                          db: AsyncSession = Depends(get_db)):
+    """Aligned-vs-counter split as a first-class metric (#72): win-rate, net PnL
+    and expectancy for trend-aligned vs counter-trend entries, overall and per
+    channel, with credible intervals. Classified from persisted signal_features
+    using the SAME timeframe/EMA the live #48 filter gates on. Shadow only."""
+    cfg = trend_filter_cfg(await get_setting(db, "entry_filters", {}))
+    return await trend_alignment_outcome_report(
+        db, parse_iso_utc(date_from), parse_iso_utc(date_to),
+        timeframe=cfg["timeframe"], ema_period=int(cfg["ema_period"]))
 
 
 @router.get("/structure/outcome")

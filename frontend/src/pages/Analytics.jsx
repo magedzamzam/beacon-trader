@@ -18,6 +18,7 @@ export default function Analytics() {
   const [err, setErr] = useState(null);
   const range = useRange("all");
 
+  const [trend, setTrend] = useState(null);
   const [map, setMap] = useState(null);
   const [price, setPrice] = useState(null);
   const [mapBusy, setMapBusy] = useState(false);
@@ -33,9 +34,10 @@ export default function Analytics() {
     catch (e) { setErr(e.message); } finally { setMapBusy(false); }
   };
   useEffect(() => {
-    setRep(null); setStruct(null);
+    setRep(null); setStruct(null); setTrend(null);
     api.analyticsCorrelation(range.range).then(setRep).catch(e => setErr(e.message));
     api.analyticsStructure(range.range).then(setStruct).catch(e => setErr(e.message));
+    api.analyticsTrendAlignment(range.range).then(setTrend).catch(e => setErr(e.message));
   }, [range.fromIso, range.toIso]);
 
   const toggle = async (v) => {
@@ -67,6 +69,8 @@ export default function Analytics() {
       <StructureMapCard map={map} price={price} busy={mapBusy} onRecompute={recompute} />
 
       <RangeFilter state={range} variant="coarse" />
+
+      <TrendAlignmentCard trend={trend} />
 
       <Card>
         <div className="px-4 py-3 border-b border-edge text-sm font-medium">
@@ -119,6 +123,52 @@ export default function Analytics() {
       <StructureCard title="Fair Value Gap — inside vs outside" rows={struct?.fvg} ready={!!struct} />
       <StructureCard title="Order Block — inside vs outside" rows={struct?.ob} ready={!!struct} />
     </div>
+  );
+}
+
+// Trend-alignment vs outcome (#72): the aligned-vs-counter split the #48 filter
+// gates on, as a first-class metric. 'counter' is the population the enabled
+// filter skips/de-sizes — this card is how we watch that the edge holds.
+function TrendAlignmentCard({ trend }) {
+  const ORDER = ["aligned", "counter"];
+  const rows = trend ? ORDER.filter(k => trend.overall?.[k]) : [];
+  return (
+    <Card>
+      <div className="px-4 py-3 border-b border-edge text-sm font-medium flex items-center gap-2 flex-wrap">
+        Trend alignment vs outcome
+        {trend && <span className="text-muted font-normal">
+          · {trend.timeframe?.toUpperCase()} EMA{trend.ema_period} · {trend.n_labelled} labelled
+          {trend.n_unknown_trend ? ` · ${trend.n_unknown_trend} trend-unknown` : ""}</span>}
+      </div>
+      {!trend ? <Empty>Loading…</Empty>
+        : !rows.length ? <Empty>No labelled trades with a captured {trend.timeframe?.toUpperCase()} trend yet — accrues as signals capture and trades close.</Empty> : (
+        <Table minW={720}>
+          <thead><tr className="border-b border-edge">
+            <Th>Alignment</Th><Th right>n</Th><Th right>Win%</Th>
+            <Th right>90% CI</Th><Th right>Net</Th><Th right>Expectancy</Th>
+          </tr></thead>
+          <tbody>
+            {rows.map(k => {
+              const r = trend.overall[k];
+              return (
+                <tr key={k} className="border-b border-edge/60">
+                  <Td><Badge tone={k === "aligned" ? "long" : "short"}>{k}</Badge></Td>
+                  <Td right mono>{r.n}</Td>
+                  <Td right mono>{fmt(r.win_rate * 100, 0)}%</Td>
+                  <Td right mono>{fmt(r.ci_low * 100, 0)}–{fmt(r.ci_high * 100, 0)}%</Td>
+                  <Td right mono><span className={r.net >= 0 ? "text-long" : "text-short"}>{fmt(r.net)}</span></Td>
+                  <Td right mono><span className={r.expectancy >= 0 ? "text-long" : "text-short"}>{fmt(r.expectancy)}</span></Td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </Table>
+      )}
+      <div className="px-4 py-2 text-[11px] text-muted">
+        Counter-trend = entry fighting the higher-TF trend; the enabled #48 filter skips or de-sizes these.
+        Shadow metric — the filter itself acts at placement. Small samples shrink toward the base rate.
+      </div>
+    </Card>
   );
 }
 
