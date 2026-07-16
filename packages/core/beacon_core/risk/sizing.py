@@ -107,3 +107,31 @@ def size_legs(legs: List[PlannedLeg], *, equity: Decimal, risk: RiskConfig,
 def plan_total_risk(legs: List[PlannedLeg]) -> Decimal:
     """Worst-case cash lost if the shared SL takes every open leg."""
     return sum((l.risk_cash for l in legs if l.valid and l.risk_cash), Decimal(0))
+
+
+def cap_total_risk(legs: List[PlannedLeg], *, cap: Decimal, instrument: InstrumentSpec,
+                   fx_factor: Decimal = Decimal(1)) -> Decimal:
+    """Per-signal risk cap (#78): scale every valid leg's lot down proportionally
+    so the summed worst-case-to-SL risk does not exceed `cap` (account currency).
+
+    A multi-entry × multi-TP `per_tp` fanout risks each leg independently, so its
+    aggregate can be several × the intended single-unit risk. This bounds it. Legs
+    that fall below min_lot after scaling are dropped (invalidated). No-op when the
+    plan is already under the cap, or cap <= 0 (disabled). Returns the new total —
+    always <= the original. Only ever REDUCES exposure (never sizes up)."""
+    total = plan_total_risk(legs)
+    if cap <= 0 or total <= 0 or total <= cap:
+        return total
+    scale = cap / total
+    for leg in legs:
+        if not (leg.valid and leg.lot):
+            continue
+        lot = _round_lot(leg.lot * scale, instrument.lot_step)
+        if lot < instrument.min_lot:
+            leg.valid = False
+            leg.skip_reason = "risk-cap scaled below min lot"
+            continue
+        leg.lot = lot
+        distance = abs(leg.entry - leg.sl)
+        leg.risk_cash = (lot * distance * instrument.value_per_point) / fx_factor
+    return plan_total_risk(legs)

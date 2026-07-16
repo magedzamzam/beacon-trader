@@ -13,7 +13,8 @@ router = APIRouter(prefix="/risk-limits", tags=["risk-limits"],
                    dependencies=[Depends(require_token)])
 
 _FLOATS = ("daily_loss_limit", "per_signal_max_pct_of_daily",
-           "max_open_risk_per_account", "max_open_risk_per_symbol")
+           "max_open_risk_per_account", "max_open_risk_per_symbol",
+           "max_signal_risk_pct")       # per-signal risk cap (#78)
 
 
 def _sanitize(cfg: dict | None) -> dict:

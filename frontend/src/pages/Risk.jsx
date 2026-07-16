@@ -141,6 +141,9 @@ function RiskLimitsCard() {
             <Input type="number" value={cfg.max_open_risk_per_account} onChange={e => num("max_open_risk_per_account", e.target.value)} /></Field>
           <Field label="Max open risk / symbol">
             <Input type="number" value={cfg.max_open_risk_per_symbol} onChange={e => num("max_open_risk_per_symbol", e.target.value)} /></Field>
+          <Field label="Per-signal risk cap (% equity)" hint="#78 · one signal's whole fanout (all entry×TP legs) is scaled to ≤ this % of equity · 0 = off">
+            <Input type="number" step="0.25" value={cfg.max_signal_risk_pct ?? 2.0}
+              onChange={e => num("max_signal_risk_pct", e.target.value)} /></Field>
         </div>
         <div className="flex justify-end"><Button onClick={save}>Save risk limits</Button></div>
       </div>

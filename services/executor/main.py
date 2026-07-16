@@ -32,7 +32,8 @@ from beacon_core.execution.planner import build_plan, DEFAULT_PLANNER
 from beacon_core.execution.guard import (should_auto_execute, risk_limit_reason,
                                           DEFAULT_RISK_LIMITS)
 from beacon_core.execution.trend_filter import trend_filter_cfg, decide as trend_decide
-from beacon_core.risk.sizing import RiskConfig, InstrumentSpec, size_legs, plan_total_risk
+from beacon_core.risk.sizing import (RiskConfig, InstrumentSpec, size_legs,
+                                      plan_total_risk, cap_total_risk)
 from beacon_core.ta import capture as ta_capture
 from beacon_core.trading_hours import service as th_service
 from beacon_core.ta.registry import TF_RESOLUTION
@@ -350,19 +351,46 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         )
         size_legs(plan.legs, equity=equity, risk=risk, instrument=instrument,
                   fx_factor=fx_factor)
-        valid = plan.valid_legs
-        if not valid:
-            log.info("signal %s acct %s: no legs survived sizing", sig.id, acct.id)
-            return
 
-        planned_risk = plan_total_risk(plan.legs)   # worst-case loss, account ccy
-
-        # --- Risk-limit enforcement (independent of the AI gate) ---
+        # Risk-limit config, loaded here because it also carries the per-signal cap.
         rl_cfg = await get_setting(session, "risk_limits", None)
         if not rl_cfg:                              # never configured -> fail SAFE, not open
             rl_cfg = dict(DEFAULT_RISK_LIMITS)
             log.warning("RISK-LIMITS-DEFAULTED: no risk_limits setting; applying "
                         "conservative defaults (%s)", rl_cfg)
+
+        # --- per-signal risk cap (#78) ---
+        # Bound this signal's whole fanout (every entry × TP leg) to
+        # max_signal_risk_pct of equity, scaling all legs down proportionally. A
+        # per_tp allocation risks each leg independently, so a 2-entry × 5-TP
+        # signal can stack to several × the intended single-unit risk; this caps
+        # it at the source (complements the #77 news gate and the #73 breaker).
+        try:
+            _cap_pct = Decimal(str(rl_cfg.get("max_signal_risk_pct", 0) or 0))
+        except (ArithmeticError, ValueError, TypeError):
+            _cap_pct = Decimal(0)
+        if _cap_pct > 0:
+            _cap = equity * _cap_pct / Decimal(100)
+            _before = plan_total_risk(plan.legs)
+            if _cap > 0 and _before > _cap:
+                _after = cap_total_risk(plan.legs, cap=_cap, instrument=instrument,
+                                        fx_factor=fx_factor)
+                log.warning("signal %s acct %s: per-signal risk cap %.2f%% of equity — "
+                            "scaled planned risk %s -> %s", sig.id, acct.id,
+                            float(_cap_pct), _before, _after)
+                session.add(Event(kind="entry_filtered", payload={
+                    "signal_id": sig.id, "account_id": acct.id, "reason": "risk_cap_scaled",
+                    "cap_pct": str(_cap_pct), "planned_before": str(_before),
+                    "planned_after": str(_after)}))
+
+        valid = plan.valid_legs
+        if not valid:
+            log.info("signal %s acct %s: no legs survived sizing/cap", sig.id, acct.id)
+            return
+
+        planned_risk = plan_total_risk(plan.legs)   # worst-case loss, account ccy
+
+        # --- Risk-limit enforcement (independent of the AI gate) ---
         # risk_limit_reason() self-gates on cfg (#65): a present row with
         # enabled:false blocks nothing except the explicit kill-switch; a MISSING
         # row uses DEFAULT_RISK_LIMITS above (enabled) so an un-configured install

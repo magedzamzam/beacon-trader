@@ -21,6 +21,12 @@ DEFAULT_RISK_LIMITS = {
     "per_signal_max_pct_of_daily": 0.5,
     "max_open_risk_per_account": 2500,
     "max_open_risk_per_symbol": 2500,
+    # Per-signal risk cap (#78): a single signal's summed worst-case-to-SL risk
+    # (all entry×TP legs) may not exceed this % of account equity — legs are
+    # scaled down proportionally if it would. Bounds per_tp leg-stacking at the
+    # source. 0 disables. Sized above a normal even/1% plan so it only bites
+    # stacked fanouts.
+    "max_signal_risk_pct": 2.0,
 }
 
 
