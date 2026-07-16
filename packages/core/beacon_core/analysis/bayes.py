@@ -22,26 +22,37 @@ LABEL_SIGNAL_QUALITY = "signal_quality"   # channel reached TP1+ vs SL (setup ou
 LABELS = (LABEL_BOT_REALIZED, LABEL_SIGNAL_QUALITY)
 
 
-def signal_quality_label(claims) -> Optional[bool]:
+def time_link_confidence(gap_hours: float, max_hours: int) -> float:
+    """Confidence of a time-proximity claim→signal link (#63): decays linearly
+    from 0.7 (immediate follow-up) to 0.3 (at the max_hours edge). A direct
+    Telegram reply link scores 1.0 (assigned by the reconciler, not here). Pure."""
+    span = max(1, max_hours)
+    return round(max(0.3, 0.7 - 0.4 * (max(0.0, gap_hours) / span)), 3)
+
+
+def signal_quality_label(claims, *, min_confidence: float = 0.0) -> Optional[bool]:
     """The channel's OWN signal-quality outcome from its claim rows (#63), a label
     independent of our execution (fills, stops, TTL). `claims` is the list of
     SignalClaim-like rows for ONE signal, each exposing max_tp_claimed:int,
-    sl_claimed:bool, all_tp:bool.
+    sl_claimed:bool, all_tp:bool, claim_confidence:float|None.
 
       win  (True)  = the channel claimed TP1+ reached (the setup worked)
       loss (False) = SL claimed with no TP reached (the setup failed)
       None         = no actionable claim, OR contradictory claims (all-TP AND SL)
                      — excluded from the label, never counted as a loss.
 
-    The contradictory-claim exclusion is the available proxy for the issue's
-    'exclude low-confidence links': a signal carrying both an all-TP and an SL
-    claim is an ambiguous/likely-mislinked outcome. A per-link confidence score
-    would need a schema field on signal_claims (follow-up)."""
-    if not claims:
+    `min_confidence` drops weakly-linked claims (a time-proximity match rather than
+    a reply) before labelling — the excludes-low-confidence-links guard. A NULL
+    confidence (pre-#63 row) is treated as unknown and NOT excluded, so historical
+    data isn't silently dropped."""
+    usable = [c for c in (claims or [])
+              if (getattr(c, "claim_confidence", None) is None
+                  or float(getattr(c, "claim_confidence")) >= min_confidence)]
+    if not usable:
         return None
-    max_tp = max((int(getattr(c, "max_tp_claimed", 0) or 0) for c in claims), default=0)
-    all_tp = any(bool(getattr(c, "all_tp", False)) for c in claims)
-    sl = any(bool(getattr(c, "sl_claimed", False)) for c in claims)
+    max_tp = max((int(getattr(c, "max_tp_claimed", 0) or 0) for c in usable), default=0)
+    all_tp = any(bool(getattr(c, "all_tp", False)) for c in usable)
+    sl = any(bool(getattr(c, "sl_claimed", False)) for c in usable)
     if all_tp and sl:
         return None                       # contradictory -> ambiguous, exclude
     if max_tp >= 1 or all_tp:

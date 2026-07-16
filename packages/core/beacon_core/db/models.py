@@ -205,6 +205,10 @@ class SignalClaim(Base):
     max_tp_claimed: Mapped[int] = mapped_column(Integer, default=0)
     sl_claimed: Mapped[bool] = mapped_column(Boolean, default=False)
     all_tp: Mapped[bool] = mapped_column(Boolean, default=False)
+    # How confidently this outcome message was linked to its signal (#63): 1.0 for
+    # a direct Telegram reply, lower for a time-proximity match. NULL on pre-#63
+    # rows -> treated as "unknown", never excluded for lack of data.
+    claim_confidence: Mapped[float | None] = mapped_column(Numeric(4, 3), nullable=True)
     claimed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)

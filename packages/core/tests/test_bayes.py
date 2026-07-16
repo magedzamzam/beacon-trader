@@ -5,8 +5,9 @@ from beacon_core.analysis import bayes as B
 
 
 class _Claim:                    # SignalClaim-shaped stub
-    def __init__(self, max_tp=0, sl=False, all_tp=False):
+    def __init__(self, max_tp=0, sl=False, all_tp=False, conf=None):
         self.max_tp_claimed, self.sl_claimed, self.all_tp = max_tp, sl, all_tp
+        self.claim_confidence = conf
 
 
 def test_signal_quality_label():
@@ -21,6 +22,24 @@ def test_signal_quality_label():
     assert sq([]) is None and sq(None) is None
     assert sq([_Claim()]) is None                      # no actionable outcome
     assert sq([_Claim(all_tp=True, sl=True)]) is None  # contradictory -> ambiguous
+
+
+def test_signal_quality_label_min_confidence():
+    sq = B.signal_quality_label
+    # a low-confidence (time-proximity) win is dropped above the threshold...
+    assert sq([_Claim(max_tp=1, conf=0.5)], min_confidence=0.9) is None
+    assert sq([_Claim(max_tp=1, conf=1.0)], min_confidence=0.9) is True   # reply link kept
+    # NULL confidence (pre-#63 rows) is never excluded for lack of data
+    assert sq([_Claim(max_tp=1, conf=None)], min_confidence=0.9) is True
+    # default threshold 0.0 keeps everything (back-compat)
+    assert sq([_Claim(sl=True, conf=0.3)]) is False
+
+
+def test_time_link_confidence_decays():
+    assert B.time_link_confidence(0, 12) == 0.7       # immediate follow-up
+    assert B.time_link_confidence(12, 12) == 0.3      # at the edge -> floor
+    assert 0.3 < B.time_link_confidence(6, 12) < 0.7  # mid-range decays
+    assert B.time_link_confidence(999, 12) == 0.3     # clamped to floor
 
 
 def test_signal_quality_label_is_independent_of_execution():

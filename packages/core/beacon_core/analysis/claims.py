@@ -8,6 +8,7 @@ import datetime as dt
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from .bayes import time_link_confidence
 from ..db.models import SignalClaim, TelegramMessage
 from ..logging import get_logger
 from ..parsing.outcomes import parse_outcome
@@ -19,17 +20,19 @@ _HWM_KEY = "reconcile_hwm"
 
 
 async def _resolve_signal(session, msg: TelegramMessage, max_hours: int):
-    """Resolve an outcome message to its signal: prefer the Telegram reply link,
-    else the most recent signal in the same chat within `max_hours` before it."""
+    """Resolve an outcome message to its signal, returning (signal_id, confidence).
+    Prefer the Telegram reply link (confidence 1.0); else the most recent signal in
+    the same chat within `max_hours` before it (confidence decays with the time
+    gap). (None, None) when it can't be resolved."""
     if msg.reply_to_message_id:
         parent = (await session.execute(select(TelegramMessage).where(
             TelegramMessage.chat_id == msg.chat_id,
             TelegramMessage.message_id == msg.reply_to_message_id))).scalars().first()
         if parent and parent.signal_id:
-            return parent.signal_id
+            return parent.signal_id, 1.0            # explicit reply -> high confidence
 
     if msg.message_date is None:
-        return None
+        return None, None
     lo = msg.message_date - dt.timedelta(hours=max_hours)
     parent = (await session.execute(select(TelegramMessage).where(
         TelegramMessage.chat_id == msg.chat_id,
@@ -37,7 +40,11 @@ async def _resolve_signal(session, msg: TelegramMessage, max_hours: int):
         TelegramMessage.message_date <= msg.message_date,
         TelegramMessage.message_date >= lo)
         .order_by(TelegramMessage.message_date.desc()))).scalars().first()
-    return parent.signal_id if parent else None
+    if not parent:
+        return None, None
+    gap_h = (msg.message_date - parent.message_date).total_seconds() / 3600.0 \
+        if parent.message_date else float(max_hours)
+    return parent.signal_id, time_link_confidence(gap_h, max_hours)
 
 
 async def link_claims(session, *, max_hours: int = 12, full: bool = False,
@@ -56,15 +63,15 @@ async def link_claims(session, *, max_hours: int = 12, full: bool = False,
         outcome = parse_outcome(m.text or "")
         if not outcome:
             continue
-        sig_id = await _resolve_signal(session, m, max_hours)
+        sig_id, confidence = await _resolve_signal(session, m, max_hours)
         if sig_id is None:
             continue
         res = await session.execute(
             pg_insert(SignalClaim).values(
                 signal_id=sig_id, source_id=m.source_id, message_id=m.id,
                 max_tp_claimed=outcome["max_tp"], sl_claimed=outcome["sl_hit"],
-                all_tp=outcome["all_tp"], claimed_at=m.message_date,
-                raw_text=(m.text or "")[:2000])
+                all_tp=outcome["all_tp"], claim_confidence=confidence,
+                claimed_at=m.message_date, raw_text=(m.text or "")[:2000])
             .on_conflict_do_nothing(constraint="uq_signal_claim_msg"))
         added += res.rowcount or 0
 
