@@ -12,3 +12,6 @@ frontend/dist/
 build/
 *.egg-info/
 .venv/
+
+# Local analysis scratchpad (never commit)
+scratchpad/
