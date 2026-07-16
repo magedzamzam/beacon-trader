@@ -21,8 +21,10 @@ export default function Analysis() {
   const [minN, setMinN] = useState(5);
   const range = useRange("all");
 
-  const load = () => { setData(null); setErr(null);
-    api.bayesAnalysis(minN, range.range).then(setData).catch(e => setErr(e.message)); };
+  const [gate, setGate] = useState(null);
+  const load = () => { setData(null); setErr(null); setGate(null);
+    api.bayesAnalysis(minN, range.range).then(setData).catch(e => setErr(e.message));
+    api.bayesGateReport(minN, range.range).then(setGate).catch(() => setGate(null)); };
   // refetch on range change; the "Apply" button refetches on a min-n change
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [range.fromIso, range.toIso]);
 
@@ -32,6 +34,7 @@ export default function Analysis() {
       <RangeFilter state={range} variant="coarse" />
       {err && <ErrorNote>{err}</ErrorNote>}
       {!err && data && <ExecutionTaxCard tax={data.execution_tax} />}
+      {!err && gate && <BayesGateCard gate={gate} />}
       {!err && !data && <Card><Empty>Loading…</Empty></Card>}
       {!err && data && !data.ready && (
         <Card><Empty>{data.message || "Not enough data yet."} The Bayesian analysis
@@ -102,6 +105,51 @@ export default function Analysis() {
       </Card>
       </>)}
     </div>
+  );
+}
+
+// Learned-P(win) execution gate (#64) — SHADOW / log-only: what the gate WOULD
+// skip/de-size, scored by the trades' ACTUAL realized outcomes. Go live only once
+// would_skip expectancy is clearly worse than would_allow.
+function BayesGateCard({ gate }) {
+  if (!gate) return null;
+  const ORDER = ["skip", "desize", "allow", "observe"];
+  const LABEL = { skip: "would skip", desize: "would de-size", allow: "would allow", observe: "observe-only" };
+  const live = gate.acts_live;
+  return (
+    <Card>
+      <div className="px-4 py-3 border-b border-edge text-sm font-medium flex items-center gap-2 flex-wrap">
+        Learned-P(win) gate
+        <Badge tone={live ? "warn" : "muted"}>{live ? "LIVE" : "shadow · log-only"}</Badge>
+        {gate.ready && <span className="text-muted font-normal">· {gate.n_scored} scored · signal-quality base {pct(gate.signal_quality_base)}</span>}
+      </div>
+      <div className="px-4 py-2 text-[11px] text-muted border-b border-edge">
+        Shadow (#64): buckets are what the gate <b>would</b> do from the signal-quality P(win) + its
+        credible interval; the win-rate / expectancy are the <b>actual</b> realized outcomes of those
+        trades. Enable live only once <b>would-skip</b> expectancy is clearly worse than <b>would-allow</b>
+        at n ≥ min-trades. In-sample — treat as directional.
+      </div>
+      {!gate.ready ? <Empty>{gate.message || "Not enough labelled trades yet."}</Empty> : (
+        <Table minW={640}>
+          <thead><tr className="border-b border-edge">
+            <Th>Gate decision</Th><Th right>n</Th><Th right>Actual win%</Th><Th right>Actual expectancy</Th>
+          </tr></thead>
+          <tbody>
+            {ORDER.filter(k => gate.would[k]?.n).map(k => {
+              const b = gate.would[k];
+              return (
+                <tr key={k} className="border-b border-edge/60">
+                  <Td><Badge tone={k === "skip" ? "short" : k === "allow" ? "long" : "muted"}>{LABEL[k]}</Badge></Td>
+                  <Td right mono>{b.n}</Td>
+                  <Td right mono>{pct(b.actual_win_rate)} <span className="text-muted">({pct(b.ci_low)}–{pct(b.ci_high)})</span></Td>
+                  <Td right mono><span className={b.actual_expectancy >= 0 ? "text-long" : "text-short"}>{b.actual_expectancy}</span></Td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </Table>
+      )}
+    </Card>
   );
 }
 

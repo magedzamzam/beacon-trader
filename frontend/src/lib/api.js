@@ -81,6 +81,15 @@ export const api = {
     if (to) p.set("date_to", to);
     return req(`/analysis/bayes?${p.toString()}`);
   },
+  // learned-P(win) execution gate (#64) — shadow / log-only
+  bayesGateReport: (minN = 5, { from, to } = {}) => {
+    const p = new URLSearchParams({ min_n: minN });
+    if (from) p.set("date_from", from);
+    if (to) p.set("date_to", to);
+    return req(`/analysis/bayes-gate/report?${p.toString()}`);
+  },
+  bayesGateConfig: () => req("/analysis/bayes-gate/config"),
+  saveBayesGateConfig: (c) => req("/analysis/bayes-gate/config", { method: "PUT", body: JSON.stringify(c) }),
   // trading hours: sessions / news blackout / holidays
   tradingHoursStatus: () => req("/trading-hours/status"),
   tradingHoursConfig: () => req("/trading-hours/config"),

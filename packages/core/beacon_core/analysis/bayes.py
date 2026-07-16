@@ -256,4 +256,19 @@ def score(model: dict, features: dict) -> Optional[dict]:
         contribs.append({"condition": c, "lr": lr, "n": cn})
     p = 1.0 / (1.0 + math.exp(-logit))
     contribs.sort(key=lambda x: abs(x["lr"]), reverse=True)
-    return {"p_win": p, "contributors": contribs[:8]}
+    # Effective sample size behind this score = the smallest evidence among the
+    # matched conditions (the weakest link), or the full model when only the base
+    # rate applies. Drives the per-signal credible interval the #64 gate acts on.
+    n_eff = min((c["n"] for c in contribs), default=model.get("n", 0))
+    return {"p_win": p, "n_eff": n_eff, "contributors": contribs[:8]}
+
+
+def score_interval(p_win: float, n_eff: int, base_rate: float,
+                   cred: float = 0.90) -> Tuple[float, float]:
+    """A per-signal credible interval for p_win (#64): a Beta posterior centred on
+    p_win with weight = the effective sample size behind the score, so a p_win
+    resting on thin evidence gets a wide interval the gate must respect."""
+    n = max(0, int(n_eff))
+    wins = int(round(max(0.0, min(1.0, p_win)) * n))
+    post = posterior(wins, n, base_rate, cred=cred)
+    return post["ci_low"], post["ci_high"]

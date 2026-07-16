@@ -19,6 +19,7 @@ from beacon_core.db.models import Account, Broker, Source, SymbolMap
 from beacon_core.execution.guard import DEFAULT_RISK_LIMITS
 from beacon_core.strategy.rules import DEFAULT_SL_RULES
 from beacon_core.execution.trend_filter import DEFAULT_TREND_FILTER
+from beacon_core.execution.bayes_gate import DEFAULT_BAYES_GATE
 from beacon_core.execution.planner import DEFAULT_PLANNER
 from beacon_core.analysis.sidecar import DEFAULT_ANALYTICS
 from beacon_core.analysis.structure import DEFAULT_STRUCTURE
@@ -110,6 +111,15 @@ async def main():
         ef_cfg = dict(await get_setting(s, "entry_filters", {}) or {})
         ef_cfg.setdefault("trend_alignment", {**DEFAULT_TREND_FILTER, "enabled": True})
         await set_setting(s, "entry_filters", ef_cfg)
+
+        # Learned-P(win) execution gate (#64) — seeded SHADOW (enabled:false,
+        # mode:log_only). It computes what it WOULD skip/de-size and the
+        # would-block report scores it; it does not touch execution until an
+        # operator flips enabled+mode=active after the evidence separates.
+        bg_cfg = dict(await get_setting(s, "bayes_gate", {}) or {})
+        for k, v in DEFAULT_BAYES_GATE.items():
+            bg_cfg.setdefault(k, v)
+        await set_setting(s, "bayes_gate", bg_cfg)
 
         # Entry/planner config (#67) — the market-on-receipt chase guard etc.
         # Seeded so it's visible/editable from the Risk page; safe defaults apply
