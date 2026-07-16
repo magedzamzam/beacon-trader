@@ -204,6 +204,81 @@ async def structure_outcome_report(session, frm=None, to=None) -> dict:
     }
 
 
+async def execution_tax_report(session, frm=None, to=None) -> dict:
+    """Per-channel win-rate under BOTH labels (#63), computed on the signals that
+    carry both: the channel's SIGNAL-QUALITY outcome (its own claims — TP1+ vs SL,
+    independent of our fills/stops) and our BOT-REALIZED outcome (realized_pl>0).
+    The GAP = signal_quality_wr − bot_realized_wr is the *execution tax*: setups
+    that worked but we didn't capture. Beta-Binomial credible intervals. Shadow /
+    read-only — nothing gates on this; it sizes the execution-fix backlog."""
+    from collections import defaultdict
+    from sqlalchemy import select
+    from ..db.models import Signal, Source, Trade, SignalClaim
+    from .bayes import signal_quality_label
+
+    tq = (select(Trade.signal_id, Trade.realized_pl, Source.name)
+          .join(Signal, Signal.id == Trade.signal_id)
+          .outerjoin(Source, Source.id == Signal.source_id)
+          .where(Trade.status == "closed"))
+    if frm is not None:
+        tq = tq.where(Signal.created_at >= frm)
+    if to is not None:
+        tq = tq.where(Signal.created_at < to)
+    trows = (await session.execute(tq)).all()
+
+    sids = [sid for sid, pl, _ in trows if pl is not None and sid is not None]
+    claims_by = defaultdict(list)
+    if sids:
+        for c in (await session.execute(
+                select(SignalClaim).where(SignalClaim.signal_id.in_(sids)))).scalars().all():
+            claims_by[c.signal_id].append(c)
+
+    def _cell():
+        return {"n": 0, "sq_wins": 0, "br_wins": 0}
+
+    by_chan = defaultdict(_cell)
+    overall = _cell()
+    for sid, pl, name in trows:
+        if pl is None:
+            continue
+        sq = signal_quality_label(claims_by.get(sid))
+        if sq is None:                       # no clean channel outcome -> excluded
+            continue
+        br = float(pl) > 0
+        for cell in (by_chan[name or "Unattributed"], overall):
+            cell["n"] += 1
+            cell["sq_wins"] += 1 if sq else 0
+            cell["br_wins"] += 1 if br else 0
+
+    on = overall["n"]
+    base_sq = (overall["sq_wins"] / on) if on else 0.5
+    base_br = (overall["br_wins"] / on) if on else 0.5
+
+    def _fmt(cell):
+        n = cell["n"]
+        if not n:
+            return None
+        sq, br = posterior(cell["sq_wins"], n, base_sq), posterior(cell["br_wins"], n, base_br)
+        return {"n": n,
+                "signal_quality_wr": round(cell["sq_wins"] / n, 4),
+                "sq_ci": [round(sq["ci_low"], 4), round(sq["ci_high"], 4)],
+                "bot_realized_wr": round(cell["br_wins"] / n, 4),
+                "br_ci": [round(br["ci_low"], 4), round(br["ci_high"], 4)],
+                "execution_tax": round((cell["sq_wins"] - cell["br_wins"]) / n, 4)}
+
+    by_channel = [{"channel": c, **_fmt(cell)} for c, cell in by_chan.items() if cell["n"]]
+    by_channel.sort(key=lambda r: -r["execution_tax"])       # biggest tax first
+
+    return {
+        "n_labelled": on, "overall": _fmt(overall), "by_channel": by_channel,
+        "note": ("Execution tax (#63) — signal-quality WR (channel claims: TP1+ "
+                 "vs SL) minus bot-realized WR (realized_pl>0), on signals with "
+                 "both labels. A positive gap = the setup worked but our execution "
+                 "didn't capture it (fills #25 / TTL #40 / stops). Shadow only. "
+                 "Ambiguous/contradictory claims are excluded, not counted as loss."),
+    }
+
+
 async def trend_alignment_outcome_report(session, frm=None, to=None, *,
                                          timeframe="4h", ema_period=200) -> dict:
     """The aligned-vs-counter split as a first-class metric (#72): win-rate,

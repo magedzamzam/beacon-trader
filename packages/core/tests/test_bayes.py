@@ -4,6 +4,31 @@ import random
 from beacon_core.analysis import bayes as B
 
 
+class _Claim:                    # SignalClaim-shaped stub
+    def __init__(self, max_tp=0, sl=False, all_tp=False):
+        self.max_tp_claimed, self.sl_claimed, self.all_tp = max_tp, sl, all_tp
+
+
+def test_signal_quality_label():
+    sq = B.signal_quality_label
+    assert sq([_Claim(max_tp=1)]) is True             # reached TP1 -> quality win
+    assert sq([_Claim(max_tp=3)]) is True
+    assert sq([_Claim(all_tp=True)]) is True
+    assert sq([_Claim(sl=True)]) is False             # SL, no TP -> quality loss
+    # aggregates across multiple claim rows for one signal
+    assert sq([_Claim(sl=True), _Claim(max_tp=2)]) is True   # a TP was reached
+    # exclusions -> None (never counted as a loss)
+    assert sq([]) is None and sq(None) is None
+    assert sq([_Claim()]) is None                      # no actionable outcome
+    assert sq([_Claim(all_tp=True, sl=True)]) is None  # contradictory -> ambiguous
+
+
+def test_signal_quality_label_is_independent_of_execution():
+    # Same channel outcome (TP1 hit) regardless of what our bot realized — that's
+    # the whole point of the dual label (#63).
+    assert B.signal_quality_label([_Claim(max_tp=1)]) is True
+
+
 def test_betainc_known_values():
     assert abs(B.betainc(1, 1, 0.37) - 0.37) < 1e-6      # I_x(1,1) == x
     assert abs(B.betainc(2, 2, 0.5) - 0.5) < 1e-6        # symmetric

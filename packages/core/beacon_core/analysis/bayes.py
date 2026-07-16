@@ -15,6 +15,41 @@ from typing import Dict, List, Optional, Tuple
 _FPMIN = 1e-300
 _EPS = 3e-12
 
+# Selectable learning targets (#63): the channel's own signal-quality outcome vs
+# our bot's execution outcome. The gap between them per channel is the execution tax.
+LABEL_BOT_REALIZED = "bot_realized"       # trade.realized_pl > 0 (execution outcome)
+LABEL_SIGNAL_QUALITY = "signal_quality"   # channel reached TP1+ vs SL (setup outcome)
+LABELS = (LABEL_BOT_REALIZED, LABEL_SIGNAL_QUALITY)
+
+
+def signal_quality_label(claims) -> Optional[bool]:
+    """The channel's OWN signal-quality outcome from its claim rows (#63), a label
+    independent of our execution (fills, stops, TTL). `claims` is the list of
+    SignalClaim-like rows for ONE signal, each exposing max_tp_claimed:int,
+    sl_claimed:bool, all_tp:bool.
+
+      win  (True)  = the channel claimed TP1+ reached (the setup worked)
+      loss (False) = SL claimed with no TP reached (the setup failed)
+      None         = no actionable claim, OR contradictory claims (all-TP AND SL)
+                     — excluded from the label, never counted as a loss.
+
+    The contradictory-claim exclusion is the available proxy for the issue's
+    'exclude low-confidence links': a signal carrying both an all-TP and an SL
+    claim is an ambiguous/likely-mislinked outcome. A per-link confidence score
+    would need a schema field on signal_claims (follow-up)."""
+    if not claims:
+        return None
+    max_tp = max((int(getattr(c, "max_tp_claimed", 0) or 0) for c in claims), default=0)
+    all_tp = any(bool(getattr(c, "all_tp", False)) for c in claims)
+    sl = any(bool(getattr(c, "sl_claimed", False)) for c in claims)
+    if all_tp and sl:
+        return None                       # contradictory -> ambiguous, exclude
+    if max_tp >= 1 or all_tp:
+        return True                       # reached TP1+ -> quality win
+    if sl:
+        return False                      # SL, no TP -> quality loss
+    return None                           # nothing actionable claimed -> exclude
+
 
 # ---- regularized incomplete beta + inverse (for credible intervals) -------
 def _betacf(a: float, b: float, x: float) -> float:

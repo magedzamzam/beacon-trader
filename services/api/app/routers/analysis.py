@@ -4,7 +4,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from beacon_core.analysis import bayes as B
 from beacon_core.analysis import feature_vector as FV
-from beacon_core.db.models import SignalFeature, SignalAnalytics, AiAssessment, Trade
+from beacon_core.analysis.report import execution_tax_report
+from beacon_core.db.models import (SignalFeature, SignalAnalytics, AiAssessment,
+                                   Trade, SignalClaim)
 from beacon_core.timeutil import parse_iso_utc
 from ..deps import get_db
 from ..auth import require_token
@@ -13,12 +15,15 @@ router = APIRouter(prefix="/analysis", tags=["analysis"],
                    dependencies=[Depends(require_token)])
 
 
-async def _model(db: AsyncSession, min_n: int, frm=None, to=None):
-    """Label closed trades by realized P&L > 0 and build the Bayesian model over
-    the UNIFIED per-signal feature vector (#62) — TA + analytics + structure/
-    magnets + AI + session — not just the TA snapshot. Optional [frm, to) window
-    (#58) anchored on Trade.created_at (entry/signal time; Trade has no close ts).
-    Point-in-time: reads persisted per-signal rows, never a fresh recompute."""
+async def _model(db: AsyncSession, min_n: int, frm=None, to=None, *,
+                 label: str = B.LABEL_BOT_REALIZED):
+    """Build the Bayesian model over the UNIFIED per-signal feature vector (#62)
+    under a selectable label (#63):
+      - bot_realized  (default): trade.realized_pl > 0 — did WE make money?
+      - signal_quality: the channel's own claims (TP1+ vs SL) — was the SETUP good,
+        independent of our execution? Ambiguous/no-claim signals are excluded.
+    Optional [frm, to) window (#58) on Trade.created_at. Point-in-time: reads
+    persisted per-signal rows, never a fresh recompute."""
     q = select(Trade).where(Trade.status == "closed")
     if frm is not None:
         q = q.where(Trade.created_at >= frm)
@@ -37,13 +42,27 @@ async def _model(db: AsyncSession, min_n: int, frm=None, to=None):
         elif r.kind == "execution_review":
             ai_exec[r.signal_id] = r
 
+    claims_by: dict = {}
+    if label == B.LABEL_SIGNAL_QUALITY:
+        sids = [t.signal_id for t in trades if t.signal_id is not None]
+        if sids:
+            for c in (await db.execute(select(SignalClaim).where(
+                    SignalClaim.signal_id.in_(sids)))).scalars().all():
+                claims_by.setdefault(c.signal_id, []).append(c)
+
     examples = []
     for t in trades:
         sid = t.signal_id
         if sid not in sf_by and sid not in sa_by:   # nothing captured -> skip the row
             continue
+        if label == B.LABEL_SIGNAL_QUALITY:
+            win = B.signal_quality_label(claims_by.get(sid))
+            if win is None:                         # no clean channel outcome -> excluded
+                continue
+        else:
+            win = float(t.realized_pl or 0) > 0
         fv = FV.from_rows(sf_by.get(sid), sa_by.get(sid), ai_sig.get(sid), ai_exec.get(sid))
-        examples.append((fv, float(t.realized_pl or 0) > 0))
+        examples.append((fv, win))
     return B.build_model(examples, min_n=min_n)
 
 
@@ -59,10 +78,25 @@ async def bayes(min_n: int = 5, limit: int = 100, date_from: str = None,
     """Per-condition Beta-Binomial win-rate table (credible intervals shrink thin
     samples toward the base rate) + Naive-Bayes P(win) for recent signals.
     Optional date range (#58) anchored on trade entry time."""
-    model = await _model(db, min_n, parse_iso_utc(date_from), parse_iso_utc(date_to))
+    frm, to = parse_iso_utc(date_from), parse_iso_utc(date_to)
+    # Two labels (#63): bot_realized (top-level, back-compat) + signal_quality.
+    model = await _model(db, min_n, frm, to, label=B.LABEL_BOT_REALIZED)
+    sq_model = await _model(db, min_n, frm, to, label=B.LABEL_SIGNAL_QUALITY)
+    tax = await execution_tax_report(db, frm, to)
+
+    def _label_block(m):
+        if not m.get("ready"):
+            return {"ready": False, "n": m.get("n", 0)}
+        return {"ready": True, "n": m["n"], "wins": m["wins"], "losses": m["losses"],
+                "base_rate": round(m["base_rate"], 4), "min_n": m["min_n"],
+                "conditions": [_round_cond(c) for c in m["conditions"][:limit]]}
+
     if not model.get("ready"):
         return {"ready": False, "n": 0,
-                "message": "No closed trades with captured features yet."}
+                "message": "No closed trades with captured features yet.",
+                "labels": {B.LABEL_BOT_REALIZED: _label_block(model),
+                           B.LABEL_SIGNAL_QUALITY: _label_block(sq_model)},
+                "execution_tax": tax}
 
     recent = []
     rows = (await db.execute(select(SignalFeature)
@@ -79,7 +113,11 @@ async def bayes(min_n: int = 5, limit: int = 100, date_from: str = None,
             "losses": model["losses"], "base_rate": round(model["base_rate"], 4),
             "min_n": model["min_n"],
             "conditions": [_round_cond(c) for c in model["conditions"][:limit]],
-            "recent": recent}
+            "recent": recent,
+            # #63: both labels side-by-side + the per-channel execution tax.
+            "labels": {B.LABEL_BOT_REALIZED: _label_block(model),
+                       B.LABEL_SIGNAL_QUALITY: _label_block(sq_model)},
+            "execution_tax": tax}
 
 
 @router.get("/bayes/score/{signal_id}")

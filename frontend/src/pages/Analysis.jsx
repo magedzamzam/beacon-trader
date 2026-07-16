@@ -31,6 +31,7 @@ export default function Analysis() {
     <div className="space-y-4">
       <RangeFilter state={range} variant="coarse" />
       {err && <ErrorNote>{err}</ErrorNote>}
+      {!err && data && <ExecutionTaxCard tax={data.execution_tax} />}
       {!err && !data && <Card><Empty>Loading…</Empty></Card>}
       {!err && data && !data.ready && (
         <Card><Empty>{data.message || "Not enough data yet."} The Bayesian analysis
@@ -101,5 +102,46 @@ export default function Analysis() {
       </Card>
       </>)}
     </div>
+  );
+}
+
+// Execution tax (#63): per-channel signal-quality WR (channel claims) vs
+// bot-realized WR (our P&L). A positive gap = the setup worked but our execution
+// didn't capture it — the backlog-sizing view.
+function ExecutionTaxCard({ tax }) {
+  if (!tax || !tax.n_labelled) return null;
+  const rows = tax.by_channel || [];
+  const taxTone = (g) => (g > 0.05 ? "warn" : g < -0.05 ? "long" : "muted");
+  return (
+    <Card>
+      <div className="px-4 py-3 border-b border-edge text-sm font-medium flex items-center gap-2 flex-wrap">
+        Execution tax · signal-quality vs bot-realized
+        <span className="text-muted font-normal">· {tax.n_labelled} dual-labelled signals</span>
+      </div>
+      <div className="px-4 py-2 text-[11px] text-muted border-b border-edge">
+        Signal-quality WR (the channel's own TP1+/SL claims) minus bot-realized WR (our realized P&amp;L).
+        A positive <b>tax</b> means the setup worked but execution didn't capture it (fills / TTL / stops) —
+        that's the fix-the-execution backlog, not a bad channel. Credible intervals shrink thin samples.
+      </div>
+      {!rows.length ? <Empty>No signals carry both a channel claim and a closed trade yet.</Empty> : (
+        <Table minW={720}>
+          <thead><tr className="border-b border-edge">
+            <Th>Channel</Th><Th right>n</Th><Th right>Signal-quality WR</Th>
+            <Th right>Bot-realized WR</Th><Th right>Execution tax</Th>
+          </tr></thead>
+          <tbody>
+            {rows.map((r, i) => (
+              <tr key={i} className="border-b border-edge/60">
+                <Td>{r.channel}</Td>
+                <Td right mono>{r.n}</Td>
+                <Td right mono>{pct(r.signal_quality_wr)} <span className="text-muted">({pct(r.sq_ci[0])}–{pct(r.sq_ci[1])})</span></Td>
+                <Td right mono>{pct(r.bot_realized_wr)} <span className="text-muted">({pct(r.br_ci[0])}–{pct(r.br_ci[1])})</span></Td>
+                <Td right mono><Badge tone={taxTone(r.execution_tax)}>{spct(r.execution_tax)}</Badge></Td>
+              </tr>
+            ))}
+          </tbody>
+        </Table>
+      )}
+    </Card>
   );
 }
