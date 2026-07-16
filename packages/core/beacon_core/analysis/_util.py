@@ -9,6 +9,11 @@ from __future__ import annotations
 
 from typing import List, Optional
 
+# overlay_config now lives at the package root so the execution layer can share
+# it without crossing the research boundary (#75). Re-exported here so analysis
+# call sites keep importing it from `_util`.
+from ..confutil import overlay_config  # noqa: F401
+
 
 def bars_col(bars, key: str) -> List[float]:
     """One OHLCV column as floats, skipping any bar missing that key."""
@@ -31,16 +36,6 @@ def dig_num(d, *path):
     the originals exactly, including that a bool — an int subclass — passes.)"""
     v = dig(d, *path)
     return v if isinstance(v, (int, float)) else None
-
-
-def overlay_config(defaults: dict, stored) -> dict:
-    """A copy of `defaults` overlaid with the known keys from a stored config."""
-    cfg = dict(defaults)
-    if isinstance(stored, dict):
-        for k in defaults:
-            if k in stored:
-                cfg[k] = stored[k]
-    return cfg
 
 
 def adverse_side(direction: str, side: Optional[str]) -> bool:

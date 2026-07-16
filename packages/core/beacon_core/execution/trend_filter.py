@@ -13,6 +13,8 @@ directional bias. Fail-open: a missing/unknown trend never blocks a trade.
 """
 from __future__ import annotations
 
+from ..confutil import overlay_config   # layer-neutral known-keys overlay (#75)
+
 # Stored under the `entry_filters` setting as `entry_filters.trend_alignment`.
 DEFAULT_TREND_FILTER = {
     "enabled": False,          # A/B flag — opt in per deployment
@@ -26,13 +28,7 @@ DEFAULT_TREND_FILTER = {
 def trend_filter_cfg(entry_filters) -> dict:
     """The effective trend-alignment config: defaults overlaid with the stored
     `entry_filters.trend_alignment` block (only known keys)."""
-    cfg = dict(DEFAULT_TREND_FILTER)
-    ta = (entry_filters or {}).get("trend_alignment")
-    if isinstance(ta, dict):
-        for k in DEFAULT_TREND_FILTER:
-            if k in ta:
-                cfg[k] = ta[k]
-    return cfg
+    return overlay_config(DEFAULT_TREND_FILTER, (entry_filters or {}).get("trend_alignment"))
 
 
 def is_aligned(direction: str, above: bool) -> bool:
