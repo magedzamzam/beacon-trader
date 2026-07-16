@@ -36,7 +36,7 @@ from beacon_core.risk.sizing import RiskConfig, InstrumentSpec, size_legs, plan_
 from beacon_core.ta import capture as ta_capture
 from beacon_core.trading_hours import service as th_service
 from beacon_core.ta.registry import TF_RESOLUTION
-from beacon_core.ta.indicators import ema as _ema
+from beacon_core.ta.indicators import ema as _ema, ema_full as _ema_full, atr as _atr
 from beacon_core import notifications as notify
 
 log = get_logger("executor")
@@ -81,22 +81,38 @@ def _to_parsed(sig: Signal) -> ParsedSignal:
     )
 
 
-async def _trend_above(adapter, epic: str, tf_cfg: dict, price: float):
-    """price vs the configured trend EMA (True = above / up-trend). Returns None
-    on any failure (fail-open — a missing indicator never blocks a trade). #48."""
-    resolution = TF_RESOLUTION.get(tf_cfg.get("timeframe", "4h"))
+async def _trend_read(adapter, epic: str, timeframe: str, ema_period: int,
+                      price: float, slope_lookback: int = 0):
+    """(above, slope, dist_atr) for the trend EMA at `timeframe`, or (None,None,
+    None) on any failure (fail-open — a missing indicator never blocks a trade).
+    above=price>EMA (#48); slope=EMA_now − EMA `slope_lookback` bars ago (#79);
+    dist_atr=|price−EMA| in ATR(14) units (#79)."""
+    resolution = TF_RESOLUTION.get(timeframe)
     if not resolution:
-        return None
+        return None, None, None
     try:
         bars = await adapter.get_bars(epic, resolution, max_bars=250)
     except Exception as exc:
         log.info("trend-filter bars failed (%s/%s): %s", epic, resolution, exc)
-        return None
+        return None, None, None
+    highs = [float(b["h"]) for b in bars if b.get("h") is not None]
+    lows = [float(b["l"]) for b in bars if b.get("l") is not None]
     closes = [float(b["c"]) for b in bars if b.get("c") is not None]
-    val = _ema(closes, int(tf_cfg.get("ema_period", 200)))
+    series = _ema_full(closes, int(ema_period))
+    val = series[-1] if series else None
     if val is None:
-        return None
-    return price > val
+        return None, None, None
+    above = price > val
+    slope = None
+    if slope_lookback > 0 and len(series) > slope_lookback \
+            and series[-1 - slope_lookback] is not None:
+        slope = series[-1] - series[-1 - slope_lookback]
+    dist_atr = None
+    if len(highs) == len(closes) == len(lows) and len(closes) >= 15:
+        a = _atr(highs, lows, closes, 14)
+        if a and a > 0:
+            dist_atr = abs(price - val) / a
+    return above, slope, dist_atr
 
 
 async def _accounts_for(session, source: Source):
@@ -244,8 +260,18 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         trend_size_factor = Decimal("1")
         tf_cfg = trend_filter_cfg(await get_setting(session, "entry_filters", {}))
         if tf_cfg.get("enabled"):
-            _above = await _trend_above(adapter, smap.broker_epic, tf_cfg, float(current))
-            _action, _factor, _aligned = trend_decide(tf_cfg, parsed.direction, _above)
+            _above, _slope, _dist = await _trend_read(
+                adapter, smap.broker_epic, tf_cfg.get("timeframe", "4h"),
+                int(tf_cfg.get("ema_period", 200)), float(current),
+                slope_lookback=int(tf_cfg.get("slope_lookback", 0) or 0))
+            _htf = None
+            if tf_cfg.get("require_htf_concordance"):     # #79: only fetch when asked
+                _htf, _, _ = await _trend_read(
+                    adapter, smap.broker_epic, tf_cfg.get("htf_timeframe", "1h"),
+                    int(tf_cfg.get("ema_period", 200)), float(current))
+            _action, _factor, _aligned = trend_decide(
+                tf_cfg, parsed.direction, _above,
+                slope=_slope, dist_atr=_dist, htf_above=_htf)
             if _action == "skip":
                 log.info("signal %s acct %s: SKIP counter-trend (%s EMA%s)",
                          sig.id, acct.id, tf_cfg.get("timeframe"), tf_cfg.get("ema_period"))

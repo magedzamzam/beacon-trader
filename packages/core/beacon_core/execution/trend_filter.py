@@ -22,6 +22,16 @@ DEFAULT_TREND_FILTER = {
     "ema_period": 200,         # trend EMA period
     "mode": "skip",            # skip | desize
     "desize_factor": 0.25,     # counter-trend size multiplier when mode == desize
+    # --- confirmation (#79): don't call a signal "aligned" on raw price-vs-EMA
+    # alone. The lagging 4h EMA200 mis-scored losing SELLs as aligned at the
+    # 07-14 regime turn. An aligned read must ALSO be confirmed by these checks.
+    # Each check is fail-open: it only fires when its input is available, so
+    # missing data never turns into a false suppression.
+    "require_slope": True,       # EMA must slope with the trade (BUY:up / SELL:down)
+    "min_dist_atr": 0.5,         # price must be >= this many ATR beyond the EMA (skip the chop band)
+    "require_htf_concordance": False,  # optional: a second TF must agree on side
+    "htf_timeframe": "1h",       # the concordance timeframe (when the check is on)
+    "slope_lookback": 10,        # bars back to measure EMA slope (executor-side)
 }
 
 
@@ -61,20 +71,48 @@ def _clamp_factor(v) -> float:
     return max(0.0, min(1.0, f))
 
 
-def decide(cfg: dict, direction: str, above) -> tuple:
+def _confirms(cfg: dict, direction: str, slope, dist_atr, htf_above) -> bool:
+    """Whether a price-aligned read is CONFIRMED by the enabled #79 checks.
+
+    Each check applies only when its config flag is on AND its input is present —
+    a missing input (None) is fail-open (never converts to a suppression). This
+    is what stops the lagging-EMA regime-turn blind spot: a SELL that is 'aligned'
+    only because the slow EMA hasn't flipped fails the rising-slope / distance
+    checks and is no longer green-lit."""
+    if cfg.get("require_slope") and slope is not None:
+        slope_ok = (slope > 0) if direction == "BUY" else (slope < 0)
+        if not slope_ok:
+            return False
+    md = cfg.get("min_dist_atr")
+    if md and dist_atr is not None and dist_atr < float(md):
+        return False
+    if cfg.get("require_htf_concordance") and htf_above is not None:
+        if not is_aligned(direction, htf_above):
+            return False
+    return True
+
+
+def decide(cfg: dict, direction: str, above, *, slope=None, dist_atr=None,
+           htf_above=None) -> tuple:
     """Return (action, size_factor, aligned).
 
     action: 'allow' | 'skip'. size_factor multiplies the risk budget (1.0 for a
     full-size entry). aligned: True/False, or None when the trend is unknown.
 
+    An entry is treated as safely ALIGNED only when price-vs-EMA agrees AND the
+    #79 confirmation passes (slope / distance / HTF, each fail-open). A price-
+    aligned but UNCONFIRMED read (the regime-turn danger zone) is suppressed just
+    like a counter-trend one. When no confirmation inputs are supplied (all None),
+    behaviour is identical to the original raw price-vs-EMA filter.
+
     Disabled config or an unknown trend (`above is None`) always allows at full
     size — the filter never blocks on a missing indicator."""
     if not cfg.get("enabled") or above is None:
         return "allow", 1.0, None
-    aligned = is_aligned(direction, above)
+    aligned = is_aligned(direction, above) and _confirms(cfg, direction, slope, dist_atr, htf_above)
     if aligned:
         return "allow", 1.0, True
-    # Counter-trend.
+    # Counter-trend OR price-aligned-but-unconfirmed.
     if cfg.get("mode") == "desize":
         f = _clamp_factor(cfg.get("desize_factor", DEFAULT_TREND_FILTER["desize_factor"]))
         if f > 0.0:

@@ -54,6 +54,49 @@ def test_cfg_overlays_only_known_keys():
     assert cfg["ema_period"] == DEFAULT_TREND_FILTER["ema_period"]  # untouched default
 
 
+def test_confirmation_backward_compatible_without_inputs():
+    # No confirmation inputs (all None) -> identical to the raw price-vs-EMA filter.
+    cfg = trend_filter_cfg({"trend_alignment": {"enabled": True, "mode": "skip"}})
+    assert decide(cfg, "SELL", False) == ("allow", 1.0, True)   # price-aligned, no inputs
+    assert decide(cfg, "BUY", False) == ("skip", 0.0, False)    # price-counter
+
+
+def test_confirmation_slope_regime_turn():
+    # 07-14: SELL with price BELOW the lagging 4h EMA200 (above=False -> price says
+    # 'aligned') BUT the EMA is RISING (slope>0) -> unconfirmed -> suppressed.
+    cfg = trend_filter_cfg({"trend_alignment": {"enabled": True, "mode": "skip",
+                                                "require_slope": True, "min_dist_atr": 0}})
+    assert decide(cfg, "SELL", False, slope=+1.0) == ("skip", 0.0, False)   # rising EMA kills the SELL
+    assert decide(cfg, "SELL", False, slope=-1.0) == ("allow", 1.0, True)   # falling EMA confirms
+    assert decide(cfg, "BUY", True, slope=+1.0) == ("allow", 1.0, True)     # up & rising -> confirmed
+    assert decide(cfg, "BUY", True, slope=-1.0) == ("skip", 0.0, False)     # up but falling -> unconfirmed
+
+
+def test_confirmation_distance_chop_band():
+    cfg = trend_filter_cfg({"trend_alignment": {"enabled": True, "mode": "skip",
+                                                "require_slope": False, "min_dist_atr": 0.5}})
+    # aligned but sitting in the chop band (< 0.5 ATR from EMA) -> suppressed
+    assert decide(cfg, "SELL", False, dist_atr=0.2) == ("skip", 0.0, False)
+    assert decide(cfg, "SELL", False, dist_atr=1.0) == ("allow", 1.0, True)
+    # missing ATR -> fail-open (no suppression on that check)
+    assert decide(cfg, "SELL", False, dist_atr=None) == ("allow", 1.0, True)
+
+
+def test_confirmation_htf_concordance():
+    cfg = trend_filter_cfg({"trend_alignment": {"enabled": True, "mode": "skip",
+        "require_slope": False, "min_dist_atr": 0, "require_htf_concordance": True}})
+    # 4h says SELL-aligned (price below) but the HTF reads price ABOVE -> discord -> suppress
+    assert decide(cfg, "SELL", False, htf_above=True) == ("skip", 0.0, False)
+    assert decide(cfg, "SELL", False, htf_above=False) == ("allow", 1.0, True)
+
+
+def test_confirmation_desize_on_unconfirmed():
+    cfg = trend_filter_cfg({"trend_alignment": {"enabled": True, "mode": "desize",
+        "desize_factor": 0.25, "require_slope": True, "min_dist_atr": 0}})
+    action, factor, aligned = decide(cfg, "SELL", False, slope=+1.0)   # unconfirmed
+    assert action == "allow" and factor == 0.25 and aligned is False
+
+
 def test_alignment_from_features():
     # #72 metric: classify a persisted signal_features snapshot by the 4h EMA200
     # `above` flag. SELL below EMA = aligned; BUY below EMA = counter.

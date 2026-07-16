@@ -228,6 +228,9 @@ function TrendFilterCard() {
           ({cfg.timeframe} EMA{cfg.ema_period}). Counter-trend entries held ~95% of the
           book's realized loss. Off by default — validated over a single bearish window,
           so A/B it and re-verify when the trend flips (fail-open on missing data).
+          <b> Confirmation (#79):</b> an "aligned" read must also pass the EMA-slope and
+          ATR-distance checks below, so a lagging EMA can't green-light the wrong side at
+          a regime turn. Re-backtest with confirmation on before enabling.
         </p>
         <div className="flex flex-wrap gap-x-8 gap-y-3">
           <label className="flex items-center gap-2 text-sm">Enable filter
@@ -247,6 +250,17 @@ function TrendFilterCard() {
           <Field label="De-size factor" hint="counter-trend size × this (desize mode)">
             <Input type="number" step="0.05" min="0" max="1" value={cfg.desize_factor}
               onChange={e => set("desize_factor", Number(e.target.value))} /></Field>
+          <Field label="Min distance (ATR)" hint="#79 · price must be ≥ this many ATR beyond the EMA (skip the chop band)">
+            <Input type="number" step="0.1" min="0" value={cfg.min_dist_atr ?? 0.5}
+              onChange={e => set("min_dist_atr", Number(e.target.value))} /></Field>
+          <Field label="HTF concordance TF" hint="#79 · timeframe that must agree when concordance is on">
+            <Input value={cfg.htf_timeframe ?? "1h"} onChange={e => set("htf_timeframe", e.target.value)} /></Field>
+        </div>
+        <div className={`flex flex-wrap gap-x-8 gap-y-2 ${cfg.enabled ? "" : "opacity-60"}`}>
+          <label className="flex items-center gap-2 text-xs text-muted">Require EMA slope (#79)
+            <Toggle checked={cfg.require_slope ?? true} onChange={v => set("require_slope", v)} /></label>
+          <label className="flex items-center gap-2 text-xs text-muted">Require HTF concordance
+            <Toggle checked={cfg.require_htf_concordance ?? false} onChange={v => set("require_htf_concordance", v)} /></label>
         </div>
         <div className="flex justify-end"><Button onClick={save}>Save entry filter</Button></div>
       </div>

@@ -29,6 +29,21 @@ def _sanitize_trend(cfg: dict | None) -> dict:
         out["desize_factor"] = max(0.0, min(1.0, float(cfg.get("desize_factor", 0.25))))
     except (TypeError, ValueError):
         out["desize_factor"] = DEFAULT_TREND_FILTER["desize_factor"]
+    # confirmation (#79)
+    out["require_slope"] = bool(cfg.get("require_slope", DEFAULT_TREND_FILTER["require_slope"]))
+    out["require_htf_concordance"] = bool(
+        cfg.get("require_htf_concordance", DEFAULT_TREND_FILTER["require_htf_concordance"]))
+    try:
+        out["min_dist_atr"] = max(0.0, min(10.0, float(cfg.get("min_dist_atr", 0.5))))
+    except (TypeError, ValueError):
+        out["min_dist_atr"] = DEFAULT_TREND_FILTER["min_dist_atr"]
+    try:
+        out["slope_lookback"] = max(0, min(200, int(cfg.get("slope_lookback", 10))))
+    except (TypeError, ValueError):
+        out["slope_lookback"] = DEFAULT_TREND_FILTER["slope_lookback"]
+    out["htf_timeframe"] = (cfg.get("htf_timeframe")
+                            if cfg.get("htf_timeframe") in TF_RESOLUTION
+                            else DEFAULT_TREND_FILTER["htf_timeframe"])
     return out
 
 
