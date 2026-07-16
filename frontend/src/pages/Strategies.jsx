@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { GitBranch, Trash2, LogIn, Filter, LogOut, Plus } from "lucide-react";
 import { Card, Table, Th, Td, Badge, Empty } from "../components/ui";
 import { Field, Input, Select, Toggle, Button, ErrorNote } from "../components/form";
+import SlRulesEditor from "../components/SlRulesEditor";
 import { api } from "../lib/api";
 
 /**
@@ -25,7 +26,7 @@ const BLANK = () => ({
   entry: { ttl_minutes: "", honor_market_hint: true, chase_tolerance_r: "", chase_tolerance_atr: "", beyond_tolerance: "limit", max_tp_distance_pct: "" },
   trend: { enabled: false, timeframe: "4h", ema_period: 200, mode: "skip", desize_factor: 0.25, require_slope: true, min_dist_atr: 0.5 },
   rules: [],
-  exit: { sl_json: "", cancel_pending_on_stop: true },
+  exit: { sl_rules: [], cancel_pending_on_stop: true },
 });
 const num = (v) => (v === "" || v == null ? undefined : Number(v));
 const INPUT = "w-full bg-panel2 border border-edge rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-beacon";
@@ -62,7 +63,7 @@ export default function Strategies() {
       entry: { ...BLANK().entry, ...Object.fromEntries(Object.entries(ep).map(([k, v]) => [k, v ?? ""])) },
       trend: { ...BLANK().trend, ...(ef.trend_alignment || {}) },
       rules: Array.isArray(ef.rules) ? ef.rules : [],
-      exit: { sl_json: xp.sl_rules ? JSON.stringify(xp.sl_rules, null, 2) : "",
+      exit: { sl_rules: Array.isArray(xp.sl_rules) ? xp.sl_rules : [],
               cancel_pending_on_stop: xp.cancel_pending_on_stop !== false },
     });
   };
@@ -70,9 +71,7 @@ export default function Strategies() {
 
   const save = async () => {
     setErr(null); setSaved(false);
-    let sl_rules = null;
-    const t = (form.exit.sl_json || "").trim();
-    if (t) { try { sl_rules = JSON.parse(t); } catch { setErr("Exit sl_rules is not valid JSON."); return; } }
+    const sl_rules = form.exit.sl_rules.length ? form.exit.sl_rules : null;   // [] = inherit default
     const entry_policy = {
       ttl_minutes: num(form.entry.ttl_minutes), honor_market_hint: form.entry.honor_market_hint,
       chase_tolerance_r: num(form.entry.chase_tolerance_r), chase_tolerance_atr: num(form.entry.chase_tolerance_atr),
@@ -201,17 +200,17 @@ export default function Strategies() {
 
         {tab === "exit" && (
           <div className="p-4 space-y-3">
-            <p className="text-[11px] text-muted">The stop-loss ratchet + cancel-pending behaviour. Snapshotted at entry, so this trade's arm is frozen. Empty ⇒ the channel / global default.</p>
+            <p className="text-[11px] text-muted">The stop-loss ratchet + cancel-pending behaviour. Snapshotted at entry, so this trade's arm is frozen. No rules ⇒ the channel / global default.</p>
             <label className="flex items-center gap-2 text-sm">Cancel pending orders on stop
               <Toggle checked={form.exit.cancel_pending_on_stop} onChange={(v) => setSub("exit", "cancel_pending_on_stop", v)} /></label>
-            <div>
-              <div className="flex items-center gap-2 flex-wrap mb-1.5"><span className="text-xs text-muted">sl_rules (JSON) — presets:</span>
-                {Object.keys(SL_PRESETS).map((n) => (
-                  <button key={n} onClick={() => setSub("exit", "sl_json", JSON.stringify(SL_PRESETS[n], null, 2))} className="text-[11px] px-2 py-0.5 rounded-full border border-edge text-muted hover:border-beacon hover:text-beacon">{n}</button>
-                ))}</div>
-              <textarea value={form.exit.sl_json} onChange={(e) => setSub("exit", "sl_json", e.target.value)} rows={8} spellCheck={false}
-                placeholder="[] or leave empty for the channel/global default" className={`${INPUT} font-mono text-xs`} />
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-xs text-muted">Presets:</span>
+              {Object.keys(SL_PRESETS).map((n) => (
+                <button key={n} onClick={() => setSub("exit", "sl_rules", SL_PRESETS[n].map((r) => ({ ...r })))}
+                  className="text-[11px] px-2 py-0.5 rounded-full border border-edge text-muted hover:border-beacon hover:text-beacon">{n}</button>
+              ))}
             </div>
+            <SlRulesEditor rules={form.exit.sl_rules} onChange={(v) => setSub("exit", "sl_rules", v)} />
           </div>
         )}
       </Card>
