@@ -153,6 +153,25 @@ class ExecutionStrategy(Base):
                                                     default=_now, onupdate=_now)
 
 
+class AccountSourceRisk(Base):
+    """Per-(account, source) RISK override (#84). Risk lives on Risk & Limits, not
+    in the execution strategy — this is the per-channel risk sizing for a specific
+    account. Resolution: this override -> the account's own risk_config (the
+    overall per-account risk) -> conservative default. `risk_config` is the same
+    RiskConfig shape used on accounts (basis / value / allocation / per_tp_percent)."""
+    __tablename__ = "account_source_risk"
+    __table_args__ = (UniqueConstraint("account_id", "source_id",
+                                       name="uq_account_source_risk"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), index=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("sources.id"), index=True)
+    risk_config: Mapped[dict] = mapped_column(JSON, default=dict)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True),
+                                                    default=_now, onupdate=_now)
+
+
 class Leg(Base):
     """One broker order/position: a single (entry, tp) with the shared SL."""
     __tablename__ = "legs"

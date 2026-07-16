@@ -4,7 +4,20 @@ from decimal import Decimal
 
 from beacon_core.execution.planner import PlannedLeg
 from beacon_core.risk.sizing import (InstrumentSpec, RiskConfig, size_legs,
-                                     plan_total_risk, cap_total_risk)
+                                     plan_total_risk, cap_total_risk, resolve_risk_config)
+
+
+def test_resolve_risk_config_fallback():
+    acct = {"basis": "capital_percent", "value": "1.0", "allocation": "even"}
+    ovr = {"basis": "capital_percent", "value": "0.5", "allocation": "even"}
+    # enabled non-empty override wins
+    assert resolve_risk_config(ovr, True, acct) == ovr
+    # disabled or empty override -> account risk
+    assert resolve_risk_config(ovr, False, acct) == acct
+    assert resolve_risk_config({}, True, acct) == acct
+    assert resolve_risk_config(None, True, acct) == acct
+    # nothing -> {} (RiskConfig.from_dict then applies conservative defaults)
+    assert resolve_risk_config(None, True, None) == {}
 
 INSTR = InstrumentSpec(value_per_point=Decimal("1"), min_lot=Decimal("0.01"),
                        lot_step=Decimal("0.01"))

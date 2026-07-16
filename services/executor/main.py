@@ -22,7 +22,7 @@ from beacon_core.logging import get_logger
 from beacon_core.health import run_health_server
 from beacon_core.db.base import Session, init_models
 from beacon_core.db.models import (Account, Event, Leg, Signal, Source, Trade,
-                                   ExecutionStrategy)
+                                   ExecutionStrategy, AccountSourceRisk)
 from beacon_core.execution import strategy as ST
 from beacon_core.brokers import build_adapter, symbol_map
 from beacon_core.brokers import fx
@@ -35,7 +35,7 @@ from beacon_core.execution.guard import (should_auto_execute, risk_limit_reason,
                                           DEFAULT_RISK_LIMITS)
 from beacon_core.execution.trend_filter import trend_filter_cfg, decide as trend_decide
 from beacon_core.risk.sizing import (RiskConfig, InstrumentSpec, size_legs,
-                                      plan_total_risk, cap_total_risk)
+                                      plan_total_risk, cap_total_risk, resolve_risk_config)
 from beacon_core.ta import capture as ta_capture
 from beacon_core.trading_hours import service as th_service
 from beacon_core.ta.registry import TF_RESOLUTION
@@ -373,7 +373,18 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                 return
             filter_factor = Decimal(str(_ff))
 
-        risk = RiskConfig.from_dict(source.risk_config or acct.risk_config or {})
+        # Risk sizing (#84): per-(account, source) override -> [legacy source
+        # risk_config] -> account risk_config. Risk relocated to Risk & Limits; the
+        # source.risk_config fallback keeps sizing unchanged until it's cleared
+        # (migrated into an override), so this deploy is non-breaking.
+        _risk_override = (await session.execute(select(AccountSourceRisk).where(
+            AccountSourceRisk.account_id == acct.id,
+            AccountSourceRisk.source_id == sig.source_id))).scalar_one_or_none() \
+            if sig.source_id else None
+        risk = RiskConfig.from_dict(resolve_risk_config(
+            (_risk_override.risk_config if _risk_override else None),
+            (_risk_override.enabled if _risk_override else True),
+            (source.risk_config if source and source.risk_config else None) or acct.risk_config))
         size_factor = trend_size_factor * session_size_factor * filter_factor  # combined
         if size_factor != 1:
             risk.value = risk.value * size_factor

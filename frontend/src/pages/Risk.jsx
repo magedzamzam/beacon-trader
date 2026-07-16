@@ -32,6 +32,7 @@ export default function Risk() {
       <RiskLimitsCard />
       <EntryGuardCard />
       <TrendFilterCard />
+      <AccountSourceRiskCard accounts={accounts} sources={sources} />
       <Card>
         <div className="px-4 py-3 border-b border-edge text-sm font-medium">Account limits</div>
         {!accounts.length ? <Empty>No accounts. Add one under Brokers.</Empty> : (
@@ -49,26 +50,6 @@ export default function Risk() {
             </tbody>
           </Table>
         )}
-      </Card>
-
-      <Card>
-        <div className="px-4 py-3 border-b border-edge text-sm font-medium">Per-source overrides</div>
-        {!sources.length ? <Empty>No sources.</Empty> : (
-          <Table>
-            <thead><tr className="border-b border-edge"><Th>Source</Th><Th>Override</Th></tr></thead>
-            <tbody>
-              {sources.map(s => (
-                <tr key={s.id} className="border-b border-edge/60">
-                  <Td>{s.name}</Td>
-                  <Td><span className="text-xs num text-muted">
-                    {s.risk_config && Object.keys(s.risk_config).length ? summarize(s.risk_config) : "inherits account"}
-                  </span></Td>
-                </tr>
-              ))}
-            </tbody>
-          </Table>
-        )}
-        <div className="px-4 py-2 text-[11px] text-muted border-t border-edge">Edit source overrides under Sources.</div>
       </Card>
 
       {edit && <RiskModal account={edit} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); load(); }} />}
@@ -287,5 +268,86 @@ function RiskModal({ account, onClose, onSaved }) {
         <Button onClick={save}>Save</Button>
       </div>
     </Modal>
+  );
+}
+
+// Per-(account, source) risk override (#84) — risk relocated here from Sources.
+// The overall per-account risk stays in "Account limits" above; this is the
+// per-channel sizing for a specific account. Resolution: override -> account risk.
+function AccountSourceRiskCard({ accounts = [], sources = [] }) {
+  const [rows, setRows] = useState([]);
+  const [form, setForm] = useState({ account_id: "", source_id: "", enabled: true,
+    risk_config: { basis: "capital_percent", value: "1.0", allocation: "even" } });
+  const [err, setErr] = useState(null);
+  const [saved, setSaved] = useState(false);
+
+  const load = () => api.riskOverrides().then(setRows).catch((e) => setErr(e.message));
+  useEffect(() => { load(); }, []);
+  const acctName = (id) => accounts.find((a) => String(a.id) === String(id))?.name || `#${id}`;
+  const srcName = (id) => sources.find((s) => String(s.id) === String(id))?.name || `#${id}`;
+  const set = (k, v) => { setForm((f) => ({ ...f, [k]: v })); setSaved(false); };
+
+  const save = async () => {
+    setErr(null); setSaved(false);
+    if (!form.account_id || !form.source_id) { setErr("Pick an account and a source."); return; }
+    try {
+      await api.saveRiskOverride({ account_id: +form.account_id, source_id: +form.source_id,
+        enabled: form.enabled, risk_config: form.risk_config });
+      setSaved(true); load();
+    } catch (e) { setErr(e.message); }
+  };
+  const edit = (r) => { setSaved(false); setForm({ account_id: String(r.account_id),
+    source_id: String(r.source_id), enabled: r.enabled,
+    risk_config: (r.risk_config && Object.keys(r.risk_config).length) ? r.risk_config
+      : { basis: "capital_percent", value: "1.0", allocation: "even" } }); };
+  const del = async (id) => { try { await api.deleteRiskOverride(id); load(); } catch (e) { setErr(e.message); } };
+
+  return (
+    <Card>
+      <div className="px-4 py-3 border-b border-edge text-sm font-medium">Per-(account × source) risk
+        <span className="text-muted font-normal"> · overrides the account's own risk for one channel</span></div>
+      <div className="p-4 space-y-3">
+        <ErrorNote>{err}</ErrorNote>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <Field label="Account">
+            <select value={form.account_id} onChange={(e) => set("account_id", e.target.value)}
+              className="bg-panel2 border border-edge rounded-lg px-2.5 py-1.5 text-sm w-full outline-none focus:border-beacon">
+              <option value="">— pick —</option>
+              {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select></Field>
+          <Field label="Signal source">
+            <select value={form.source_id} onChange={(e) => set("source_id", e.target.value)}
+              className="bg-panel2 border border-edge rounded-lg px-2.5 py-1.5 text-sm w-full outline-none focus:border-beacon">
+              <option value="">— pick —</option>
+              {sources.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select></Field>
+          <Field label="Enabled"><Toggle checked={form.enabled} onChange={(v) => set("enabled", v)} label={form.enabled ? "on" : "off"} /></Field>
+        </div>
+        <RiskConfigEditor value={form.risk_config} onChange={(v) => set("risk_config", v)} />
+        <div className="flex items-center justify-end gap-3">
+          {saved && <span className="text-xs text-long">Saved</span>}
+          <Button onClick={save}>Save risk override</Button>
+        </div>
+      </div>
+      {rows.length > 0 && (
+        <Table>
+          <thead><tr className="border-b border-edge"><Th>Account</Th><Th>Source</Th><Th>Risk</Th><Th>State</Th><Th right></Th></tr></thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.id} className="border-b border-edge/60">
+                <Td>{acctName(r.account_id)}</Td>
+                <Td>{srcName(r.source_id)}</Td>
+                <Td className="text-xs">{summarize(r.risk_config)}</Td>
+                <Td><Badge tone={r.enabled ? "long" : "muted"}>{r.enabled ? "on" : "off"}</Badge></Td>
+                <Td right>
+                  <button onClick={() => edit(r)} className="text-xs text-beacon hover:underline mr-3">edit</button>
+                  <button onClick={() => del(r.id)} className="text-xs text-short hover:underline">remove</button>
+                </Td>
+              </tr>
+            ))}
+          </tbody>
+        </Table>
+      )}
+    </Card>
   );
 }

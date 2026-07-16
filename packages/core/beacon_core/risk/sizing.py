@@ -44,6 +44,16 @@ class RiskConfig:
         )
 
 
+def resolve_risk_config(override_cfg, override_enabled, account_cfg) -> dict:
+    """Effective RiskConfig dict for a trade (#84): the per-(account,source) risk
+    override wins when enabled AND non-empty, else the account's overall risk_config,
+    else {} (RiskConfig.from_dict then applies conservative defaults). Sources no
+    longer carry risk — it all resolves here from Risk & Limits config."""
+    if override_enabled and override_cfg:
+        return dict(override_cfg)
+    return dict(account_cfg or {})
+
+
 @dataclass
 class InstrumentSpec:
     value_per_point: Decimal            # money per 1.0 price move per 1.0 size

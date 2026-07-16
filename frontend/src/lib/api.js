@@ -102,6 +102,10 @@ export const api = {
     req(`/strategies/resolve?account_id=${accountId}&source_id=${sourceId}`),
   saveStrategy: (body) => req("/strategies", { method: "PUT", body: JSON.stringify(body) }),
   deleteStrategy: (id) => req(`/strategies/${id}`, { method: "DELETE" }),
+  // per-(account, source) risk overrides (#84) — risk lives on Risk & Limits
+  riskOverrides: () => req("/risk-limits/overrides"),
+  saveRiskOverride: (body) => req("/risk-limits/overrides", { method: "PUT", body: JSON.stringify(body) }),
+  deleteRiskOverride: (id) => req(`/risk-limits/overrides/${id}`, { method: "DELETE" }),
   bayesGateConfig: () => req("/analysis/bayes-gate/config"),
   saveBayesGateConfig: (c) => req("/analysis/bayes-gate/config", { method: "PUT", body: JSON.stringify(c) }),
   // trading hours: sessions / news blackout / holidays
