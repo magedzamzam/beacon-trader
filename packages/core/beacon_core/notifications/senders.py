@@ -14,21 +14,40 @@ import html
 _TELEGRAM_LIMIT = 4096
 
 
+def build_telegram_body(subject: str, text: str) -> str:
+    """Assemble the HTML message body for Telegram (parse_mode=HTML), guaranteed
+    <= _TELEGRAM_LIMIT chars and with balanced <b>/<pre> tags and whole entities.
+
+    HTML parse mode + escaping every interpolated value: legacy Markdown 400s on
+    ordinary content (a channel named "@Gold_Signals_VIP*" has unbalanced _ / *),
+    which — since delivery is best-effort — silently dropped the alert (#39).
+
+    Oversized detail is fitted by trimming the RAW text and escaping AFTER, so
+    HTML entities never split and the tags stay balanced. The old guard (#39
+    length limit) char-sliced the already-assembled HTML, cutting mid-<pre> or
+    mid-entity into malformed HTML that Telegram 400s on and silently drops — the
+    exact failure #39 was created to fix (#76). _head is bounded (built only from
+    symbol/direction/label/P&L in dispatch.format_message)."""
+    _head = html.escape(subject or "")
+    body = f"<b>{_head}</b>"
+    _detail = (text or "").strip()
+    if _detail:
+        _budget = _TELEGRAM_LIMIT - len(body) - len("\n<pre></pre>\n…(truncated)")
+        _esc = html.escape(_detail)
+        if len(_esc) > _budget:
+            while _detail and len(html.escape(_detail)) > _budget:
+                _detail = _detail[:-1]
+            _esc = html.escape(_detail) + "\n…(truncated)"
+        body += f"\n<pre>{_esc}</pre>"              # monospace -> columns align
+    return body
+
+
 async def send_telegram(cfg: dict, subject: str, text: str) -> None:
     import httpx
     token, chat = cfg.get("bot_token"), cfg.get("chat_id")
     if not token or not chat:
         raise ValueError("Telegram needs a bot_token and chat_id")
-    # HTML parse mode + escape every interpolated value: legacy Markdown 400s on
-    # ordinary content (a channel named "@Gold_Signals_VIP*" has unbalanced _ / *),
-    # which — since delivery is best-effort — silently dropped the alert (#39).
-    _head = html.escape(subject or "")
-    _detail = html.escape(text or "")
-    body = f"<b>{_head}</b>"
-    if _detail.strip():
-        body += f"\n<pre>{_detail}</pre>"          # monospace -> columns align
-    if len(body) > _TELEGRAM_LIMIT:                 # graceful degradation, not a 400 drop
-        body = body[:_TELEGRAM_LIMIT - 24] + "…\n(truncated)"
+    body = build_telegram_body(subject, text)
     async with httpx.AsyncClient(timeout=15.0) as c:
         r = await c.post(
             f"https://api.telegram.org/bot{token}/sendMessage",

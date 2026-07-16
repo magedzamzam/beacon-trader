@@ -1,5 +1,38 @@
 """Unit tests for the notification channels/routing config (pure — no DB/crypto)."""
+import re
+
 from beacon_core.notifications import config as N
+from beacon_core.notifications.senders import build_telegram_body, _TELEGRAM_LIMIT
+
+
+def _tags_balanced(body: str) -> bool:
+    opened, closed = re.findall(r"<(\w+)>", body), re.findall(r"</(\w+)>", body)
+    return opened == closed        # same tags, same order (b, pre)
+
+
+def test_telegram_body_normal_is_unchanged():
+    # short messages: <b>subject</b> + <pre>detail</pre>, byte-for-byte as before.
+    assert build_telegram_body("Daily summary", "TP1 — tp_hit") == \
+        "<b>Daily summary</b>\n<pre>TP1 — tp_hit</pre>"
+    assert build_telegram_body("Daily summary", "") == "<b>Daily summary</b>"
+    assert build_telegram_body("Daily summary", "   ") == "<b>Daily summary</b>"
+
+
+def test_telegram_body_oversized_stays_valid():
+    # 5 KB detail: must fit the limit AND stay balanced (the #76 regression).
+    body = build_telegram_body("broker_error", "A" * 5000)
+    assert len(body) <= _TELEGRAM_LIMIT
+    assert _tags_balanced(body)                       # </pre> not lost
+    assert body.endswith("…(truncated)</pre>")
+
+
+def test_telegram_body_oversized_with_entities_not_split():
+    # payload full of < & > — escaping AFTER trim means no bisected entity.
+    body = build_telegram_body("broker_error", "<b>&x" * 1500)
+    assert len(body) <= _TELEGRAM_LIMIT
+    assert _tags_balanced(body)
+    assert "&am" not in body.replace("&amp;", "")     # no dangling half-entity
+    assert "<pre>" in body and body.endswith("</pre>")
 
 
 def test_catalog_shape():
