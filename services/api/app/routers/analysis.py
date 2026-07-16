@@ -18,7 +18,7 @@ router = APIRouter(prefix="/analysis", tags=["analysis"],
 
 
 async def _model(db: AsyncSession, min_n: int, frm=None, to=None, *,
-                 label: str = B.LABEL_BOT_REALIZED):
+                 label: str = B.LABEL_BOT_REALIZED, account_id: int | None = None):
     """Build the Bayesian model over the UNIFIED per-signal feature vector (#62)
     under a selectable label (#63):
       - bot_realized  (default): trade.realized_pl > 0 — did WE make money?
@@ -27,6 +27,8 @@ async def _model(db: AsyncSession, min_n: int, frm=None, to=None, *,
     Optional [frm, to) window (#58) on Trade.created_at. Point-in-time: reads
     persisted per-signal rows, never a fresh recompute."""
     q = select(Trade).where(Trade.status == "closed")
+    if account_id is not None:                  # #83: per-account A/B slice
+        q = q.where(Trade.account_id == account_id)
     if frm is not None:
         q = q.where(Trade.created_at >= frm)
     if to is not None:
@@ -76,15 +78,18 @@ def _round_cond(c: dict) -> dict:
 
 @router.get("/bayes")
 async def bayes(min_n: int = 5, limit: int = 100, date_from: str = None,
-                date_to: str = None, db: AsyncSession = Depends(get_db)):
+                date_to: str = None, account_id: int | None = None,
+                db: AsyncSession = Depends(get_db)):
     """Per-condition Beta-Binomial win-rate table (credible intervals shrink thin
     samples toward the base rate) + Naive-Bayes P(win) for recent signals.
-    Optional date range (#58) anchored on trade entry time."""
+    Optional date range (#58) anchored on trade entry time. `account_id` slices
+    the bot-realized label to one account for the per-account A/B (#83); the
+    signal-quality label and the feature capture are account-independent."""
     frm, to = parse_iso_utc(date_from), parse_iso_utc(date_to)
     # Two labels (#63): bot_realized (top-level, back-compat) + signal_quality.
-    model = await _model(db, min_n, frm, to, label=B.LABEL_BOT_REALIZED)
-    sq_model = await _model(db, min_n, frm, to, label=B.LABEL_SIGNAL_QUALITY)
-    tax = await execution_tax_report(db, frm, to)
+    model = await _model(db, min_n, frm, to, label=B.LABEL_BOT_REALIZED, account_id=account_id)
+    sq_model = await _model(db, min_n, frm, to, label=B.LABEL_SIGNAL_QUALITY, account_id=account_id)
+    tax = await execution_tax_report(db, frm, to, account_id=account_id)
 
     def _label_block(m):
         if not m.get("ready"):
@@ -122,21 +127,24 @@ async def bayes(min_n: int = 5, limit: int = 100, date_from: str = None,
             "execution_tax": tax}
 
 
-async def _bayes_gate_report(db, min_n, frm, to):
+async def _bayes_gate_report(db, min_n, frm, to, account_id=None):
     """Would-block vs actual (#64): score every closed labelled trade on the
     SIGNAL-QUALITY model, run the gate ladder to see what it WOULD do (skip /
     de-size / allow / observe), and report each bucket's ACTUAL bot-realized
     win-rate + expectancy. The evidence for going live: the would-skip bucket
     should have materially worse realized expectancy than would-allow. In-sample
-    (overfitting caveat — that's why the gate ships log-only until this separates)."""
+    (overfitting caveat — that's why the gate ships log-only until this separates).
+    `account_id` slices to one account for the per-account A/B (#83)."""
     cfg = BG.gate_cfg(await get_setting(db, "bayes_gate", None))
-    model = await _model(db, min_n, frm, to, label=B.LABEL_SIGNAL_QUALITY)
+    model = await _model(db, min_n, frm, to, label=B.LABEL_SIGNAL_QUALITY, account_id=account_id)
     if not model.get("ready"):
         return {"ready": False, "config": cfg, "acts_live": BG.acts_live(cfg),
                 "message": "Signal-quality model not ready (need more labelled trades)."}
     base = model["base_rate"]
 
     tq = select(Trade).where(Trade.status == "closed")
+    if account_id is not None:
+        tq = tq.where(Trade.account_id == account_id)
     if frm is not None:
         tq = tq.where(Trade.created_at >= frm)
     if to is not None:
@@ -207,9 +215,11 @@ async def bayes_gate_config_put(body: dict, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/bayes-gate/report")
-async def bayes_gate_report(min_n: int = 5, date_from: str = None,
-                            date_to: str = None, db: AsyncSession = Depends(get_db)):
-    return await _bayes_gate_report(db, min_n, parse_iso_utc(date_from), parse_iso_utc(date_to))
+async def bayes_gate_report(min_n: int = 5, date_from: str = None, date_to: str = None,
+                            account_id: int | None = None,
+                            db: AsyncSession = Depends(get_db)):
+    return await _bayes_gate_report(db, min_n, parse_iso_utc(date_from),
+                                    parse_iso_utc(date_to), account_id=account_id)
 
 
 @router.get("/bayes/score/{signal_id}")

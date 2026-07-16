@@ -7,7 +7,7 @@ from beacon_core.logging import get_logger
 from .routers import (accounts, ai, analysis, analytics, auth, brokers, dashboard,
                       entry_filters, events, health, legs, market, messages,
                       notifications, performance, planner, reconciliation, risk, signals,
-                      sources, symbols, ta, trades, trading_hours)
+                      source_account_policies, sources, symbols, ta, trades, trading_hours)
 
 log = get_logger("api")
 
@@ -54,7 +54,7 @@ for r in (auth.router, health.router, dashboard.router, brokers.router,
           messages.router, events.router, ai.router, ta.router,
           analysis.router, trading_hours.router, notifications.router,
           reconciliation.router, risk.router, planner.router, entry_filters.router,
-          analytics.router):
+          analytics.router, source_account_policies.router):
     app.include_router(r)
 
 

@@ -15,7 +15,7 @@ const liftTone = (l) => (l > 0.05 ? "long" : l < -0.05 ? "short" : "muted");
  * win-rate table (credible intervals shrink thin samples toward the base rate)
  * plus a Naive-Bayes P(win) score for recent signals.
  */
-export default function Analysis() {
+export default function Analysis({ account = "" }) {
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
   const [minN, setMinN] = useState(5);
@@ -23,10 +23,10 @@ export default function Analysis() {
 
   const [gate, setGate] = useState(null);
   const load = () => { setData(null); setErr(null); setGate(null);
-    api.bayesAnalysis(minN, range.range).then(setData).catch(e => setErr(e.message));
-    api.bayesGateReport(minN, range.range).then(setGate).catch(() => setGate(null)); };
-  // refetch on range change; the "Apply" button refetches on a min-n change
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [range.fromIso, range.toIso]);
+    api.bayesAnalysis(minN, range.range, account).then(setData).catch(e => setErr(e.message));
+    api.bayesGateReport(minN, range.range, account).then(setGate).catch(() => setGate(null)); };
+  // refetch on range OR account change (#83 per-account A/B); "Apply" refetches on min-n
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [range.fromIso, range.toIso, account]);
 
   const base = data?.base_rate;
   return (

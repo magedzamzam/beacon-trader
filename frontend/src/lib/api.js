@@ -74,20 +74,32 @@ export const api = {
   taCatalog: () => req("/ta/catalog"),
   taConfig: () => req("/ta/config"),
   saveTaConfig: (c) => req("/ta/config", { method: "PUT", body: JSON.stringify(c) }),
-  // Bayesian correlation of captured features with outcomes
-  bayesAnalysis: (minN = 5, { from, to } = {}) => {
+  // Bayesian correlation of captured features with outcomes (account_id -> #83 A/B slice)
+  bayesAnalysis: (minN = 5, { from, to } = {}, accountId = "") => {
     const p = new URLSearchParams({ min_n: minN });
     if (from) p.set("date_from", from);
     if (to) p.set("date_to", to);
+    if (accountId) p.set("account_id", accountId);
     return req(`/analysis/bayes?${p.toString()}`);
   },
   // learned-P(win) execution gate (#64) — shadow / log-only
-  bayesGateReport: (minN = 5, { from, to } = {}) => {
+  bayesGateReport: (minN = 5, { from, to } = {}, accountId = "") => {
     const p = new URLSearchParams({ min_n: minN });
     if (from) p.set("date_from", from);
     if (to) p.set("date_to", to);
+    if (accountId) p.set("account_id", accountId);
     return req(`/analysis/bayes-gate/report?${p.toString()}`);
   },
+  // per-(source, account) execution-policy overrides (#83 A/B)
+  abPolicies: (sourceId = "", accountId = "") => {
+    const p = new URLSearchParams();
+    if (sourceId) p.set("source_id", sourceId);
+    if (accountId) p.set("account_id", accountId);
+    const qs = p.toString();
+    return req(`/source-account-policies${qs ? `?${qs}` : ""}`);
+  },
+  saveAbPolicy: (body) => req("/source-account-policies", { method: "PUT", body: JSON.stringify(body) }),
+  deleteAbPolicy: (id) => req(`/source-account-policies/${id}`, { method: "DELETE" }),
   bayesGateConfig: () => req("/analysis/bayes-gate/config"),
   saveBayesGateConfig: (c) => req("/analysis/bayes-gate/config", { method: "PUT", body: JSON.stringify(c) }),
   // trading hours: sessions / news blackout / holidays

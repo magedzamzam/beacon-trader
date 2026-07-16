@@ -28,6 +28,7 @@ import Brokers from "../pages/Brokers";
 import Sources from "../pages/Sources";
 import Symbols from "../pages/Symbols";
 import Risk from "../pages/Risk";
+import Strategies from "../pages/Strategies";
 import Currency from "../pages/settings/Currency";
 import TradingHours from "../pages/TradingHours";
 import AI from "../pages/AI";
@@ -90,7 +91,7 @@ export const PAGES = {
   analytics: Analytics, analysis: Analysis, reconciliation: Reconciliation,
   performance: Performance,
   brokers: Brokers, sources: Sources, symbols: Symbols, integrations: PLACEHOLDERS.integrations,
-  risk: Risk, currency: Currency, strategies: PLACEHOLDERS.strategies, hours: TradingHours,
+  risk: Risk, currency: Currency, strategies: Strategies, hours: TradingHours,
   ai: AI, indicators: Indicators, notifications: Notifications,
   general: PLACEHOLDERS.general, users: PLACEHOLDERS.users, api: PLACEHOLDERS.api,
   compliance: PLACEHOLDERS.compliance, backups: PLACEHOLDERS.backups,

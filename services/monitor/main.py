@@ -24,7 +24,8 @@ from beacon_core.logging import get_logger
 from beacon_core.health import run_health_server
 from beacon_core.db.base import Session, init_models
 from beacon_core.db.models import (Account, Broker, Event, Leg, PositionActivity,
-                                   Signal, Source, Trade)
+                                   Signal, Source, SourceAccountPolicy, Trade)
+from beacon_core.execution.policy import resolve_sl_rules
 from beacon_core.brokers import build_adapter, symbol_map
 from beacon_core.brokers.types import AuthError, ModifyPositionRequest
 from beacon_core.strategy.rules import PositionCtx, evaluate, DEFAULT_SL_RULES
@@ -89,10 +90,25 @@ async def _rules_for(session, trade) -> tuple[list, dict, int]:
     sig = await session.get(Signal, trade.signal_id)
     source = await session.get(Source, sig.source_id) if sig and sig.source_id else None
     strat = (source.strategy if source else {}) or {}
-    rules = strat.get("sl_rules")
-    if not rules:                       # no per-source rules -> global default ladder
-        cfg = await get_setting(session, "strategy", {}) or {}
-        rules = cfg.get("default_sl_rules") or DEFAULT_SL_RULES
+
+    # #83: manage each trade by the sl_rules SNAPSHOT stamped at entry — this is
+    # what makes the per-account A/B point-in-time (arm frozen at entry, immune to
+    # later policy edits). Trades placed before #83 have no snapshot -> resolve
+    # account-aware live: (source,account) override -> source -> global default.
+    if getattr(trade, "sl_rules", None):
+        return trade.sl_rules, strat, effective_entry_ttl_min(strat)
+
+    policy = None
+    if sig and sig.source_id:
+        policy = (await session.execute(select(SourceAccountPolicy).where(
+            SourceAccountPolicy.source_id == sig.source_id,
+            SourceAccountPolicy.account_id == trade.account_id))).scalar_one_or_none()
+    gcfg = await get_setting(session, "strategy", {}) or {}
+    rules, _origin = resolve_sl_rules(
+        override_rules=(policy.sl_rules if policy else None),
+        override_enabled=(policy.enabled if policy else True),
+        source_rules=strat.get("sl_rules"),
+        global_default=gcfg.get("default_sl_rules"))
     return rules, strat, effective_entry_ttl_min(strat)
 
 

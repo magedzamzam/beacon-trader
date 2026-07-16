@@ -21,7 +21,9 @@ from beacon_core.config import (CH_SIGNAL_VALID, CH_TRADE_OPENED, get_settings,
 from beacon_core.logging import get_logger
 from beacon_core.health import run_health_server
 from beacon_core.db.base import Session, init_models
-from beacon_core.db.models import Account, Event, Leg, Signal, Source, Trade
+from beacon_core.db.models import (Account, Event, Leg, Signal, Source, Trade,
+                                   SourceAccountPolicy)
+from beacon_core.execution.policy import resolve_sl_rules, resolve_entry_ttl
 from beacon_core.brokers import build_adapter, symbol_map
 from beacon_core.brokers import fx
 from beacon_core.tasks import spawn_bg
@@ -476,16 +478,40 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                 except Exception as exc:             # AI must never break execution
                     log.warning("AI execution review failed: %s", exc)
 
+        # Resolve the per-(source, account) execution policy (#83) and SNAPSHOT
+        # the effective sl_rules onto the trade — point-in-time, so this trade's
+        # A/B arm is frozen at entry and later config edits can't rewrite history.
+        # An enabled override wins; else source default; else global default.
+        policy = (await session.execute(select(SourceAccountPolicy).where(
+            SourceAccountPolicy.source_id == sig.source_id,
+            SourceAccountPolicy.account_id == acct.id))).scalar_one_or_none() \
+            if sig.source_id else None
+        _gstrat = await get_setting(session, "strategy", {}) or {}
+        _sl_rules, _origin = resolve_sl_rules(
+            override_rules=(policy.sl_rules if policy else None),
+            override_enabled=(policy.enabled if policy else True),
+            source_rules=(source.strategy or {}).get("sl_rules") if source else None,
+            global_default=_gstrat.get("default_sl_rules"))
+        _policy_id = policy.id if (policy and policy.enabled and policy.sl_rules) else None
+
         trade = Trade(signal_id=sig.id, account_id=acct.id, symbol=parsed.symbol,
                       direction=parsed.direction, status="open",
-                      planned_risk=planned_risk)
+                      planned_risk=planned_risk,
+                      sl_rules=_sl_rules, sl_policy_id=_policy_id)
         session.add(trade)
         await session.flush()
+        if _policy_id:
+            log.info("signal %s acct %s: A/B policy #%s (%s) applied", sig.id, acct.id,
+                     _policy_id, policy.label or "override")
 
         # Broker-enforced expiry for any working (LIMIT/STOP) leg (#40): the
         # per-channel TTL, clamped to a safe range, so an unfilled entry can't
-        # rest as GTC and fill hours late at a stale price.
-        good_till = utcnow() + timedelta(minutes=effective_entry_ttl_min(source.strategy))
+        # rest as GTC and fill hours late at a stale price. A per-(source,account)
+        # override TTL wins when set (#83).
+        _ttl_strat = resolve_entry_ttl(
+            override_ttl=(policy.entry_ttl_minutes if policy else None),
+            source_strategy=source.strategy if source else {})
+        good_till = utcnow() + timedelta(minutes=effective_entry_ttl_min(_ttl_strat))
 
         placed = 0
         for pleg in valid:

@@ -104,9 +104,48 @@ class Trade(Base):
     status: Mapped[str] = mapped_column(String(16), default="open")  # open|closed|partial
     planned_risk: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)
     realized_pl: Mapped[Decimal] = mapped_column(NUM, default=Decimal("0"))
+    # Per-(source,account) execution-policy attribution (#83): the sl_rules this
+    # trade actually ran under, SNAPSHOT at entry (point-in-time — immune to later
+    # policy edits, so an A/B arm's exit logic is frozen for valid attribution).
+    # sl_policy_id names the override arm that produced it (NULL = source/global
+    # default). Both NULL on trades placed before #83 -> monitor resolves live.
+    sl_policy_id: Mapped[int | None] = mapped_column(
+        ForeignKey("source_account_policies.id"), nullable=True)
+    sl_rules: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
     signal: Mapped["Signal"] = relationship(back_populates="trades")
     legs: Mapped[list["Leg"]] = relationship(back_populates="trade")
+
+
+class SourceAccountPolicy(Base):
+    """Per-(source, account) execution-policy override (#83).
+
+    SL rules live on the source and are shared across every account it maps to,
+    so a signal fanned out to accounts A and B ran IDENTICAL ratchet logic. This
+    override lets the SAME signal execute with DIFFERENT stop/ratchet (and, in
+    Phase 2, entry) logic per account — a regime-free parallel A/B of exit rules
+    (identical signal, market, instant; only the rule differs).
+
+    Resolution order (see execution/policy.resolve_sl_rules): this override ->
+    source.strategy.sl_rules -> global strategy.default_sl_rules -> DEFAULT_SL_RULES.
+    `entry_policy` is the Phase-2 slot (delayed ENTRY STOP / bounded-chase #67) —
+    plumbed but unused in Phase 1, so that A/B needs no schema change."""
+    __tablename__ = "source_account_policies"
+    __table_args__ = (UniqueConstraint("source_id", "account_id",
+                                       name="uq_source_account_policy"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("sources.id"), index=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), index=True)
+    sl_rules: Mapped[dict | None] = mapped_column(JSON, nullable=True)     # overrides source sl_rules
+    entry_ttl_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    entry_policy: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # Phase 2 (entry A/B)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    label: Mapped[str | None] = mapped_column(String(64), nullable=True)    # A/B arm name
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)                # bumps on edit (attribution)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True),
+                                                    default=_now, onupdate=_now)
 
 
 class Leg(Base):

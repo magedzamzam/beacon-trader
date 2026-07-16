@@ -51,6 +51,12 @@ async def init_models() -> None:
             "ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE signals "
             "ADD COLUMN IF NOT EXISTS reinitiated_from INTEGER",   # re-initiate clone link (#66)
+            "ALTER TABLE signal_claims "
+            "ADD COLUMN IF NOT EXISTS claim_confidence numeric(4,3)",  # claim link confidence (#63)
+            "ALTER TABLE trades "
+            "ADD COLUMN IF NOT EXISTS sl_policy_id INTEGER",       # #83 A/B policy attribution
+            "ALTER TABLE trades "
+            "ADD COLUMN IF NOT EXISTS sl_rules JSON",              # #83 point-in-time sl_rules snapshot
         ):
             try:
                 await conn.exec_driver_sql(stmt)

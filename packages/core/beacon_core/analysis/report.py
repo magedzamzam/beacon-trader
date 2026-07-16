@@ -204,7 +204,7 @@ async def structure_outcome_report(session, frm=None, to=None) -> dict:
     }
 
 
-async def execution_tax_report(session, frm=None, to=None) -> dict:
+async def execution_tax_report(session, frm=None, to=None, account_id=None) -> dict:
     """Per-channel win-rate under BOTH labels (#63), computed on the signals that
     carry both: the channel's SIGNAL-QUALITY outcome (its own claims — TP1+ vs SL,
     independent of our fills/stops) and our BOT-REALIZED outcome (realized_pl>0).
@@ -220,6 +220,8 @@ async def execution_tax_report(session, frm=None, to=None) -> dict:
           .join(Signal, Signal.id == Trade.signal_id)
           .outerjoin(Source, Source.id == Signal.source_id)
           .where(Trade.status == "closed"))
+    if account_id is not None:                  # #83: per-account A/B slice
+        tq = tq.where(Trade.account_id == account_id)
     if frm is not None:
         tq = tq.where(Signal.created_at >= frm)
     if to is not None:
