@@ -122,6 +122,19 @@ async def entry_blackout(session, now: Optional[dt.datetime] = None) -> Optional
         return None
 
 
+async def session_risk_multiplier(session, now: Optional[dt.datetime] = None) -> float:
+    """The combined session risk multiplier to apply to a new entry right now
+    (#81), from the configured session windows (reuses trading_hours.sessions).
+    Fail-open: 1.0 (full size) on any error / missing tz db — never over- nor
+    under-sizes on a glitch."""
+    try:
+        cfg = await load_config(session)
+        return sessions.risk_multiplier(cfg["sessions"], now or utcnow())
+    except Exception as exc:
+        log.warning("session risk multiplier failed (fail-open x1.0): %s", exc)
+        return 1.0
+
+
 async def status(session) -> dict:
     cfg = await load_config(session)
     now = utcnow()

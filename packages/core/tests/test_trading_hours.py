@@ -109,6 +109,34 @@ def test_sanitize_config_defaults():
     assert [s["id"] for s in cfg2["sessions"]] == ["ok"]
 
 
+def test_session_risk_mult_sanitized_and_clamped():
+    # #81: risk_mult defaults to 1.0, is clamped to [0,1], and survives round-trip.
+    cfg = SVC.sanitize_config({"sessions": [
+        {"id": "a", "tz": "UTC", "start": "00:00", "end": "23:59", "risk_mult": 0.5},
+        {"id": "b", "tz": "UTC", "start": "00:00", "end": "23:59", "risk_mult": 9},   # clamp -> 1.0
+        {"id": "c", "tz": "UTC", "start": "00:00", "end": "23:59"}]})                  # default -> 1.0
+    mults = {s["id"]: s["risk_mult"] for s in cfg["sessions"]}
+    assert mults == {"a": 0.5, "b": 1.0, "c": 1.0}
+
+
+def test_session_risk_multiplier_overlap_if_tz_available():
+    try:
+        from beacon_core.trading_hours import sessions as S
+        # 14:00 UTC July (DST): London + New York both active (overlap). Defaults
+        # give NY risk_mult 0.5 -> combined 1.0 x 0.5 = 0.5.
+        now = dt.datetime(2026, 7, 7, 14, 0, tzinfo=dt.timezone.utc)
+        st = S.status(S.DEFAULT_SESSIONS, now)
+    except Exception:
+        return
+    if st["active"] == []:            # tz fell back to UTC (no tzdata) — skip
+        return
+    if "London" in st["active"] and "New York" in st["active"]:
+        assert abs(st["risk_multiplier"] - 0.5) < 1e-9
+    # a deep-Asian-only hour should be full size
+    asia = S.risk_multiplier(S.DEFAULT_SESSIONS, dt.datetime(2026, 7, 7, 1, 0, tzinfo=dt.timezone.utc))
+    assert asia == 1.0
+
+
 def test_sessions_math_if_tz_available():
     try:
         from beacon_core.trading_hours import sessions as S

@@ -332,18 +332,32 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             session.add(Event(kind="entry_chase_guard",
                               payload={"signal_id": sig.id, "account_id": acct.id,
                                        "current_price": str(current), "decisions": _guarded}))
+        # Session risk multiplier (#81): de-size entries in the higher-loss
+        # London/NY overlap window while keeping London/Asian full. Config-driven
+        # (trading_hours.sessions[].risk_mult); fail-open x1.0.
+        session_size_factor = Decimal(str(await th_service.session_risk_multiplier(session)))
+
         risk = RiskConfig.from_dict(source.risk_config or acct.risk_config or {})
-        if trend_size_factor < 1:                       # counter-trend de-size (#48)
-            risk.value = risk.value * trend_size_factor
+        size_factor = trend_size_factor * session_size_factor   # combined pre-sizing de-size
+        if size_factor < 1:
+            risk.value = risk.value * size_factor
             if risk.per_tp_percent:
-                risk.per_tp_percent = {k: v * trend_size_factor
+                risk.per_tp_percent = {k: v * size_factor
                                        for k, v in risk.per_tp_percent.items()}
+        if trend_size_factor < 1:                       # counter-trend de-size (#48)
             log.info("signal %s acct %s: de-sized counter-trend x%s",
                      sig.id, acct.id, trend_size_factor)
             session.add(Event(kind="entry_filtered",
                               payload={"signal_id": sig.id, "account_id": acct.id,
                                        "reason": "counter_trend_desize", "aligned": False,
                                        "factor": str(trend_size_factor)}))
+        if session_size_factor < 1:                     # session concentration de-size (#81)
+            log.info("signal %s acct %s: de-sized session x%s",
+                     sig.id, acct.id, session_size_factor)
+            session.add(Event(kind="entry_filtered",
+                              payload={"signal_id": sig.id, "account_id": acct.id,
+                                       "reason": "session_desize",
+                                       "factor": str(session_size_factor)}))
         instrument = InstrumentSpec(
             value_per_point=Decimal(str(smap.value_per_point)),
             min_lot=Decimal(str(smap.min_lot)),

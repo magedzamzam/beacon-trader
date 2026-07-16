@@ -68,6 +68,9 @@ export default function TradingHours() {
                     <input value={s.start} onChange={e => setSession(i, "start", e.target.value)} className={`w-16 ${smallInput}`} /></label>
                   <label className="text-xs text-muted flex items-center gap-1">end
                     <input value={s.end} onChange={e => setSession(i, "end", e.target.value)} className={`w-16 ${smallInput}`} /></label>
+                  <label className="text-xs text-muted flex items-center gap-1" title="#81 · risk size × this while active (1 = full, 0.5 = half). London/NY overlap multiplies.">risk ×
+                    <input type="number" step="0.05" min="0" max="1" value={s.risk_mult ?? 1}
+                      onChange={e => setSession(i, "risk_mult", +e.target.value)} className={`w-14 ${smallInput}`} /></label>
                   <div className="ml-auto"><Toggle checked={s.enabled} onChange={v => setSession(i, "enabled", v)} label={s.enabled ? "on" : "off"} /></div>
                 </div>
               ))}

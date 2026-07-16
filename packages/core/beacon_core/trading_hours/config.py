@@ -31,10 +31,14 @@ def sanitize_config(cfg: Optional[dict]) -> dict:
     for s in (cfg.get("sessions") or DEFAULT_CONFIG["sessions"]):
         if not all(k in s for k in ("id", "tz", "start", "end")):
             continue
+        try:                                     # risk_mult (#81): de-size only, 0..1
+            rm = max(0.0, min(1.0, float(s.get("risk_mult", 1.0))))
+        except (TypeError, ValueError):
+            rm = 1.0
         out["sessions"].append({
             "id": str(s["id"]), "label": s.get("label", s["id"]),
             "tz": str(s["tz"]), "start": str(s["start"]), "end": str(s["end"]),
-            "enabled": bool(s.get("enabled", True))})
+            "enabled": bool(s.get("enabled", True)), "risk_mult": rm})
     if not out["sessions"]:
         out["sessions"] = list(sessions.DEFAULT_SESSIONS)
 
