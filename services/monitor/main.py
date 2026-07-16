@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from beacon_core.ai import service as ai_service
 from beacon_core.bus import Bus
@@ -23,9 +23,9 @@ from beacon_core.config import CH_TRADE_EVENT, get_settings, effective_entry_ttl
 from beacon_core.logging import get_logger
 from beacon_core.health import run_health_server
 from beacon_core.db.base import Session, init_models
-from beacon_core.db.models import (Account, Broker, Event, Leg, PositionActivity,
-                                   Signal, Source, SourceAccountPolicy, Trade)
-from beacon_core.execution.policy import resolve_sl_rules
+from beacon_core.db.models import (Account, Broker, Event, ExecutionStrategy, Leg,
+                                   PositionActivity, Signal, Source, Trade)
+from beacon_core.execution import strategy as ST
 from beacon_core.brokers import build_adapter, symbol_map
 from beacon_core.brokers.types import AuthError, ModifyPositionRequest
 from beacon_core.strategy.rules import PositionCtx, evaluate, DEFAULT_SL_RULES
@@ -89,26 +89,33 @@ async def _open_trades(session):
 async def _rules_for(session, trade) -> tuple[list, dict, int]:
     sig = await session.get(Signal, trade.signal_id)
     source = await session.get(Source, sig.source_id) if sig and sig.source_id else None
-    strat = (source.strategy if source else {}) or {}
+    strat = dict((source.strategy if source else {}) or {})
 
-    # #83: manage each trade by the sl_rules SNAPSHOT stamped at entry — this is
-    # what makes the per-account A/B point-in-time (arm frozen at entry, immune to
-    # later policy edits). Trades placed before #83 have no snapshot -> resolve
-    # account-aware live: (source,account) override -> source -> global default.
+    # Resolve the ExecutionStrategy for this trade's (account, source) scope — only
+    # the ≤4 rows whose scope could match (#84).
+    strategy = None
+    if sig and sig.source_id is not None:
+        rows = (await session.execute(select(ExecutionStrategy).where(
+            or_(ExecutionStrategy.account_id.is_(None),
+                ExecutionStrategy.account_id == trade.account_id),
+            or_(ExecutionStrategy.source_id.is_(None),
+                ExecutionStrategy.source_id == sig.source_id)))).scalars().all()
+        strategy = ST.resolve_strategy(rows, trade.account_id, sig.source_id)
+
+    # cancel_pending_on_stop is part of the exit pillar (live-resolved; a boolean op
+    # flag, no need to freeze it): strategy.exit_policy -> source -> default True.
+    strat["cancel_pending_on_stop"] = ST.cancel_pending_on_stop(
+        strategy, source_strategy=strat, default=True)
+
+    # Manage each trade by the exit-rules SNAPSHOT stamped at entry — this is what
+    # makes the per-account A/B point-in-time (arm frozen at entry, immune to later
+    # strategy edits). Pre-snapshot trades resolve live: strategy.exit_policy ->
+    # source -> global default.
     if getattr(trade, "sl_rules", None):
         return trade.sl_rules, strat, effective_entry_ttl_min(strat)
-
-    policy = None
-    if sig and sig.source_id:
-        policy = (await session.execute(select(SourceAccountPolicy).where(
-            SourceAccountPolicy.source_id == sig.source_id,
-            SourceAccountPolicy.account_id == trade.account_id))).scalar_one_or_none()
     gcfg = await get_setting(session, "strategy", {}) or {}
-    rules, _origin = resolve_sl_rules(
-        override_rules=(policy.sl_rules if policy else None),
-        override_enabled=(policy.enabled if policy else True),
-        source_rules=strat.get("sl_rules"),
-        global_default=gcfg.get("default_sl_rules"))
+    rules, _origin = ST.exit_sl_rules(strategy, source_rules=strat.get("sl_rules"),
+                                      global_default=gcfg.get("default_sl_rules"))
     return rules, strat, effective_entry_ttl_min(strat)
 
 

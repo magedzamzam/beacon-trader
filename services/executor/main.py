@@ -22,8 +22,8 @@ from beacon_core.logging import get_logger
 from beacon_core.health import run_health_server
 from beacon_core.db.base import Session, init_models
 from beacon_core.db.models import (Account, Event, Leg, Signal, Source, Trade,
-                                   SourceAccountPolicy)
-from beacon_core.execution.policy import resolve_sl_rules, resolve_entry_ttl
+                                   ExecutionStrategy)
+from beacon_core.execution import strategy as ST
 from beacon_core.brokers import build_adapter, symbol_map
 from beacon_core.brokers import fx
 from beacon_core.tasks import spawn_bg
@@ -257,11 +257,20 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             log.warning("no price for %s; skipping account %s", smap.broker_epic, acct.id)
             return
 
-        # --- trend-alignment entry filter (#48; config `entry_filters`, default off) ---
+        # --- resolve the per-(account, source) ExecutionStrategy (#84) ---
+        # One strategy carries the three pillars (entry / filtration / exit). The
+        # most-specific enabled scope wins; a missing pillar falls back to the
+        # global/source default, so 'no strategy' == today's behaviour.
+        _strategies = (await session.execute(select(ExecutionStrategy))).scalars().all()
+        strategy = ST.resolve_strategy(_strategies, acct.id, sig.source_id)
+        _entry_filters = ST.resolve_entry_filters(
+            strategy, global_filters=await get_setting(session, "entry_filters", {}))
+
+        # --- trend-alignment entry filter (#48/#79; filtration pillar) ---
         # Counter-trend entries (direction fighting the higher-TF trend) held ~95%
         # of the book's realized loss. Skip or de-size them. Fail-open.
         trend_size_factor = Decimal("1")
-        tf_cfg = trend_filter_cfg(await get_setting(session, "entry_filters", {}))
+        tf_cfg = trend_filter_cfg(_entry_filters)
         if tf_cfg.get("enabled"):
             _above, _slope, _dist = await _trend_read(
                 adapter, smap.broker_epic, tf_cfg.get("timeframe", "4h"),
@@ -312,9 +321,15 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                               payload={"account_id": acct.id, "error": str(exc)}))
             return
 
-        planner_cfg = {**DEFAULT_PLANNER, **(await get_setting(session, "planner", {}) or {})}
+        # Entry-strategy pillar (#84): global planner defaults, overlaid with the
+        # per-(account,source) entry_policy (chase guard #67 + TTL). No strategy ->
+        # exactly the global `planner` setting as before.
+        _global_planner = {**DEFAULT_PLANNER, **(await get_setting(session, "planner", {}) or {})}
+        planner_cfg = ST.entry_policy(
+            strategy, global_planner=_global_planner,
+            source_ttl=(source.strategy or {}).get("entry_ttl_minutes") if source else None)
         # Default 0.5 (50%): catches parse-artifact TPs (e.g. tp=1530 vs gold ~4180,
-        # ~60% away) while never tripping a real target. Tune via the `planner` setting.
+        # ~60% away) while never tripping a real target. Tune via the entry policy.
         max_tp_pct = Decimal(str(planner_cfg.get("max_tp_distance_pct", "0.5")))
         plan = build_plan(
             parsed, current_price=current,
@@ -339,9 +354,28 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         # (trading_hours.sessions[].risk_mult); fail-open x1.0.
         session_size_factor = Decimal(str(await th_service.session_risk_multiplier(session)))
 
+        # --- filtration rules (#84 pillar): extensible skip / de-size / up-size ---
+        # The per-(account,source) strategy's rule set (e.g. inside-FVG -> x2, an
+        # NY-overlap -> x0.5) can reject or scale the trade. Rules whose condition
+        # inputs aren't available yet are no-ops (fail-open), so richer conditions
+        # can be added without wiring risk here.
+        filter_factor = Decimal("1")
+        _frules = (_entry_filters or {}).get("rules") or []
+        if _frules:
+            _active = await th_service.active_sessions(session)
+            _ff, _skip, _reasons = ST.apply_filter_rules(_frules, {"sessions": _active})
+            if _skip:
+                log.info("signal %s acct %s: SKIP by filtration (%s)", sig.id, acct.id, _reasons)
+                session.add(Event(kind="entry_filtered", payload={
+                    "signal_id": sig.id, "account_id": acct.id,
+                    "reason": "filtration_skip", "rules": _reasons}))
+                await session.commit()
+                return
+            filter_factor = Decimal(str(_ff))
+
         risk = RiskConfig.from_dict(source.risk_config or acct.risk_config or {})
-        size_factor = trend_size_factor * session_size_factor   # combined pre-sizing de-size
-        if size_factor < 1:
+        size_factor = trend_size_factor * session_size_factor * filter_factor  # combined
+        if size_factor != 1:
             risk.value = risk.value * size_factor
             if risk.per_tp_percent:
                 risk.per_tp_percent = {k: v * size_factor
@@ -360,6 +394,11 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                               payload={"signal_id": sig.id, "account_id": acct.id,
                                        "reason": "session_desize",
                                        "factor": str(session_size_factor)}))
+        if filter_factor != 1:                           # filtration scale (#84)
+            log.info("signal %s acct %s: filtration scale x%s", sig.id, acct.id, filter_factor)
+            session.add(Event(kind="entry_filtered",
+                              payload={"signal_id": sig.id, "account_id": acct.id,
+                                       "reason": "filtration_scale", "factor": str(filter_factor)}))
         instrument = InstrumentSpec(
             value_per_point=Decimal(str(smap.value_per_point)),
             min_lot=Decimal(str(smap.min_lot)),
@@ -478,40 +517,33 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                 except Exception as exc:             # AI must never break execution
                     log.warning("AI execution review failed: %s", exc)
 
-        # Resolve the per-(source, account) execution policy (#83) and SNAPSHOT
-        # the effective sl_rules onto the trade — point-in-time, so this trade's
-        # A/B arm is frozen at entry and later config edits can't rewrite history.
-        # An enabled override wins; else source default; else global default.
-        policy = (await session.execute(select(SourceAccountPolicy).where(
-            SourceAccountPolicy.source_id == sig.source_id,
-            SourceAccountPolicy.account_id == acct.id))).scalar_one_or_none() \
-            if sig.source_id else None
+        # Exit pillar (#84): SNAPSHOT the resolved sl_rules onto the trade —
+        # point-in-time, so this trade's A/B arm is frozen at entry and later
+        # strategy edits can't rewrite history. strategy.exit_policy -> source
+        # default -> global default. Stamp strategy_id for attribution.
         _gstrat = await get_setting(session, "strategy", {}) or {}
-        _sl_rules, _origin = resolve_sl_rules(
-            override_rules=(policy.sl_rules if policy else None),
-            override_enabled=(policy.enabled if policy else True),
+        _sl_rules, _origin = ST.exit_sl_rules(
+            strategy,
             source_rules=(source.strategy or {}).get("sl_rules") if source else None,
             global_default=_gstrat.get("default_sl_rules"))
-        _policy_id = policy.id if (policy and policy.enabled and policy.sl_rules) else None
+        _strategy_id = strategy.id if (strategy is not None and _origin == "strategy") else None
 
         trade = Trade(signal_id=sig.id, account_id=acct.id, symbol=parsed.symbol,
                       direction=parsed.direction, status="open",
                       planned_risk=planned_risk,
-                      sl_rules=_sl_rules, sl_policy_id=_policy_id)
+                      sl_rules=_sl_rules, strategy_id=_strategy_id)
         session.add(trade)
         await session.flush()
-        if _policy_id:
-            log.info("signal %s acct %s: A/B policy #%s (%s) applied", sig.id, acct.id,
-                     _policy_id, policy.label or "override")
+        if _strategy_id:
+            log.info("signal %s acct %s: strategy #%s (%s) applied", sig.id, acct.id,
+                     _strategy_id, strategy.label or "override")
 
-        # Broker-enforced expiry for any working (LIMIT/STOP) leg (#40): the
-        # per-channel TTL, clamped to a safe range, so an unfilled entry can't
-        # rest as GTC and fill hours late at a stale price. A per-(source,account)
-        # override TTL wins when set (#83).
-        _ttl_strat = resolve_entry_ttl(
-            override_ttl=(policy.entry_ttl_minutes if policy else None),
-            source_strategy=source.strategy if source else {})
-        good_till = utcnow() + timedelta(minutes=effective_entry_ttl_min(_ttl_strat))
+        # Broker-enforced expiry for any working (LIMIT/STOP) leg (#40): the entry
+        # TTL from the resolved entry policy (planner_cfg carries ttl_minutes from
+        # the strategy / source / global), clamped to a safe range so an unfilled
+        # entry can't rest as GTC and fill hours late at a stale price.
+        good_till = utcnow() + timedelta(
+            minutes=effective_entry_ttl_min({"entry_ttl_minutes": planner_cfg.get("ttl_minutes")}))
 
         placed = 0
         for pleg in valid:

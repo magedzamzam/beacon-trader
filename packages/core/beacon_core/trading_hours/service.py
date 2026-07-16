@@ -122,6 +122,18 @@ async def entry_blackout(session, now: Optional[dt.datetime] = None) -> Optional
         return None
 
 
+async def active_sessions(session, now: Optional[dt.datetime] = None) -> list:
+    """Labels of the currently-active, enabled trading sessions (#84) — the
+    context the filtration rules' `session_in` condition matches against. Fail-safe
+    to [] on any error."""
+    try:
+        cfg = await load_config(session)
+        return sessions.status(cfg["sessions"], now or utcnow()).get("active", [])
+    except Exception as exc:
+        log.warning("active_sessions failed: %s", exc)
+        return []
+
+
 async def session_risk_multiplier(session, now: Optional[dt.datetime] = None) -> float:
     """The combined session risk multiplier to apply to a new entry right now
     (#81), from the configured session windows (reuses trading_hours.sessions).

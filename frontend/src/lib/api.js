@@ -90,16 +90,18 @@ export const api = {
     if (accountId) p.set("account_id", accountId);
     return req(`/analysis/bayes-gate/report?${p.toString()}`);
   },
-  // per-(source, account) execution-policy overrides (#83 A/B)
-  abPolicies: (sourceId = "", accountId = "") => {
+  // execution strategies (#84): per-(account, source) Entry / Filtration / Exit
+  strategies: (accountId = "", sourceId = "") => {
     const p = new URLSearchParams();
-    if (sourceId) p.set("source_id", sourceId);
     if (accountId) p.set("account_id", accountId);
+    if (sourceId) p.set("source_id", sourceId);
     const qs = p.toString();
-    return req(`/source-account-policies${qs ? `?${qs}` : ""}`);
+    return req(`/strategies${qs ? `?${qs}` : ""}`);
   },
-  saveAbPolicy: (body) => req("/source-account-policies", { method: "PUT", body: JSON.stringify(body) }),
-  deleteAbPolicy: (id) => req(`/source-account-policies/${id}`, { method: "DELETE" }),
+  resolveStrategy: (accountId, sourceId) =>
+    req(`/strategies/resolve?account_id=${accountId}&source_id=${sourceId}`),
+  saveStrategy: (body) => req("/strategies", { method: "PUT", body: JSON.stringify(body) }),
+  deleteStrategy: (id) => req(`/strategies/${id}`, { method: "DELETE" }),
   bayesGateConfig: () => req("/analysis/bayes-gate/config"),
   saveBayesGateConfig: (c) => req("/analysis/bayes-gate/config", { method: "PUT", body: JSON.stringify(c) }),
   // trading hours: sessions / news blackout / holidays

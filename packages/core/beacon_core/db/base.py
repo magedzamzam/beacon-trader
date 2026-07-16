@@ -54,9 +54,9 @@ async def init_models() -> None:
             "ALTER TABLE signal_claims "
             "ADD COLUMN IF NOT EXISTS claim_confidence numeric(4,3)",  # claim link confidence (#63)
             "ALTER TABLE trades "
-            "ADD COLUMN IF NOT EXISTS sl_policy_id INTEGER",       # #83 A/B policy attribution
+            "ADD COLUMN IF NOT EXISTS sl_rules JSON",              # point-in-time exit-rules snapshot (#83)
             "ALTER TABLE trades "
-            "ADD COLUMN IF NOT EXISTS sl_rules JSON",              # #83 point-in-time sl_rules snapshot
+            "ADD COLUMN IF NOT EXISTS strategy_id INTEGER",        # ExecutionStrategy attribution (#84)
         ):
             try:
                 await conn.exec_driver_sql(stmt)

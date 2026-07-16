@@ -2,8 +2,6 @@ import { useEffect, useState } from "react";
 import { Plus, Trash2, Pencil } from "lucide-react";
 import { Table, Card, Th, Td, Badge, Empty } from "../components/ui";
 import { Modal, Field, Input, Select, Toggle, Button, ErrorNote } from "../components/form";
-import RiskConfigEditor from "../components/RiskConfigEditor";
-import SlRulesEditor from "../components/SlRulesEditor";
 import { api } from "../lib/api";
 
 const KIND_LABEL = {
@@ -92,30 +90,23 @@ export default function Sources() {
 
 function SourceModal({ source, accounts, onClose, onSaved }) {
   const s = source || {};
-  const strat = s.strategy || {};
   const [kind, setKind] = useState(s.kind || "telegram");
   const [name, setName] = useState(s.name || "");
   const [externalId, setExternalId] = useState(s.external_id || "");
-  const [ttl, setTtl] = useState(strat.entry_ttl_minutes ?? 60);
-  const [cancelPending, setCancelPending] = useState(strat.cancel_pending_on_stop !== false);
   const [trusted, setTrusted] = useState(s.is_trusted || false);
   const [enabled, setEnabled] = useState(s.enabled_for_trading || false);
   const [accountMap, setAccountMap] = useState(s.account_map || []);
-  const [useRisk, setUseRisk] = useState(!!(s.risk_config && Object.keys(s.risk_config).length));
-  const [risk, setRisk] = useState(s.risk_config && Object.keys(s.risk_config).length
-    ? s.risk_config : { basis: "capital_percent", value: "1.0", allocation: "even" });
-  const [slRules, setSlRules] = useState(strat.sl_rules || []);
   const [err, setErr] = useState(null);
 
   const toggleAcct = (id) => setAccountMap(m => m.includes(id) ? m.filter(x => x !== id) : [...m, id]);
 
   const save = async () => {
+    // A source is now only identity + trust + routing. Entry/Filtration/Exit live
+    // on the Strategies page and risk on Risk & Limits (#84) — we omit strategy/
+    // risk_config here so the PATCH preserves any existing values untouched.
     const payload = {
       kind, name, external_id: externalId || null,
       is_trusted: trusted, enabled_for_trading: enabled,
-      strategy: { entry_ttl_minutes: +ttl, sl_rules: slRules,
-                  cancel_pending_on_stop: cancelPending },
-      risk_config: useRisk ? risk : {},
       account_map: accountMap,
     };
     try {
@@ -144,17 +135,6 @@ function SourceModal({ source, accounts, onClose, onSaved }) {
         <Input mono value={externalId} onChange={e => setExternalId(e.target.value)} />
       </Field>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <Field label="Entry TTL (min)"
-          hint="orders rest as LIMIT; a leg is auto-MARKET if the candle already crossed its entry. Cancels an unfilled limit after N min (0 = never).">
-          <Input type="number" value={ttl} onChange={e => setTtl(e.target.value)} />
-        </Field>
-        <Field label="Cancel pending on stop"
-          hint="once a TP is hit or a stop rule ratchets the SL, cancel this trade's still-unfilled limit entries">
-          <Toggle checked={cancelPending} onChange={setCancelPending} label={cancelPending ? "on" : "off"} />
-        </Field>
-      </div>
-
       <div className="flex gap-6">
         <Field label="Trusted"><Toggle checked={trusted} onChange={setTrusted} /></Field>
         <Field label="Enabled for trading"><Toggle checked={enabled} onChange={setEnabled} /></Field>
@@ -174,17 +154,9 @@ function SourceModal({ source, accounts, onClose, onSaved }) {
         )}
       </div>
 
-      <div>
-        <div className="flex items-center justify-between mb-1.5">
-          <div className="text-xs uppercase tracking-wider text-muted">Risk override</div>
-          <Toggle checked={useRisk} onChange={setUseRisk} label={useRisk ? "custom" : "inherit account"} />
-        </div>
-        {useRisk && <RiskConfigEditor value={risk} onChange={setRisk} />}
-      </div>
-
-      <div>
-        <div className="text-xs uppercase tracking-wider text-muted mb-1.5">Stop-loss rules</div>
-        <SlRulesEditor rules={slRules} onChange={setSlRules} />
+      <div className="text-[11px] text-muted border-t border-edge pt-3">
+        Entry, filtration and exit (SL) rules now live on the <b>Strategies</b> page (per account × source);
+        risk lives on <b>Risk &amp; Limits</b>. A source here is just identity, trust, and routing.
       </div>
 
       <div className="flex justify-end gap-2 pt-2">

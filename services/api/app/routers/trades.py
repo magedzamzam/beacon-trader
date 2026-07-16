@@ -30,7 +30,7 @@ async def list_trades(db: AsyncSession = Depends(get_db), limit: int = 100,
             "symbol": t.symbol, "direction": t.direction, "status": t.status,
             "planned_risk": float(t.planned_risk) if t.planned_risk else None,
             "realized_pl": float(t.realized_pl),
-            "sl_policy_id": t.sl_policy_id,        # #83 A/B arm attribution (NULL = default)
+            "strategy_id": t.strategy_id,          # #84 strategy attribution (NULL = default)
             "legs": [{"id": l.id, "tp_index": l.tp_index, "order_type": l.order_type,
                       "entry": float(l.entry), "tp": float(l.tp), "sl": float(l.sl),
                       "lot": float(l.lot), "status": l.status, "outcome": l.outcome,
@@ -69,7 +69,7 @@ async def trade_detail(trade_id: int, db: AsyncSession = Depends(get_db)):
         "symbol": t.symbol, "direction": t.direction, "status": t.status,
         "planned_risk": float(t.planned_risk) if t.planned_risk else None,
         "realized_pl": float(t.realized_pl),
-        "sl_policy_id": t.sl_policy_id,          # #83 A/B arm attribution
+        "strategy_id": t.strategy_id,            # #84 strategy attribution
         "sl_rules": t.sl_rules,                  # the exact ratchet this trade ran under (snapshot)
         "created_at": t.created_at.isoformat() if t.created_at else None,
         "legs": [{"id": l.id, "tp_index": l.tp_index, "order_type": l.order_type,
