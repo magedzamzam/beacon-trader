@@ -55,6 +55,50 @@ def test_blackout_currency_filter_and_clear():
     assert not C.blackout_status(events, quiet)["in_blackout"]
 
 
+def test_tiered_blackout_major_widens_window(monkeypatch=None):
+    # #77: at T-9m a standard ±3 window is clear, but a MAJOR (CPI) -30/+15
+    # window is active — the 07-14 CPI cluster fired 4-9 min before the print.
+    kws = SVC.DEFAULT_MAJOR_KEYWORDS
+    events = [_ev(30, "high", "USD", "US CPI m/m")]      # print at 12:30
+    t_minus_9 = dt.datetime(2026, 7, 7, 12, 21, tzinfo=dt.timezone.utc)
+    std = C.blackout_status(events, t_minus_9, before_min=3, after_min=3)
+    assert not std["in_blackout"]                       # old behaviour: sailed through
+    maj = C.blackout_status(events, t_minus_9, before_min=3, after_min=3,
+                            major_before_min=30, major_after_min=15, major_keywords=kws)
+    assert maj["in_blackout"] and maj["active"]["tier"] == "major"
+    assert maj["active"]["in_min"] == 9
+
+
+def test_tiered_blackout_non_major_keeps_tight_window():
+    # A high-impact event NOT in the keyword list keeps the ±3 window.
+    events = [_ev(30, "high", "USD", "Retail Sales m/m")]
+    t_minus_9 = dt.datetime(2026, 7, 7, 12, 21, tzinfo=dt.timezone.utc)
+    bl = C.blackout_status(events, t_minus_9, before_min=3, after_min=3,
+                           major_before_min=30, major_after_min=15,
+                           major_keywords=SVC.DEFAULT_MAJOR_KEYWORDS)
+    assert not bl["in_blackout"]                        # not a major -> tight window
+
+
+def test_blackout_backward_compatible_without_major_args():
+    # Omitting major_* reproduces the original single-tier behaviour exactly.
+    events = [_ev(30, "high", "USD", "US CPI")]
+    now = dt.datetime(2026, 7, 7, 12, 21, tzinfo=dt.timezone.utc)
+    assert not C.blackout_status(events, now, before_min=3, after_min=3)["in_blackout"]
+
+
+def test_sanitize_news_tier_backward_compat():
+    # a stored pre-#77 news row (no tier fields) still parses and gets defaults;
+    # major window is never narrower than the standard window.
+    cfg = SVC.sanitize_config({"news": {"enabled": True, "before_min": 5, "after_min": 5}})
+    n = cfg["news"]
+    assert n["gate_entries"] is True
+    assert n["major_before_min"] >= n["before_min"] and n["major_after_min"] >= n["after_min"]
+    assert n["major_keywords"]                          # populated from defaults
+    # an operator narrowing major below standard is lifted to the standard
+    cfg2 = SVC.sanitize_config({"news": {"before_min": 20, "major_before_min": 5}})
+    assert cfg2["news"]["major_before_min"] == 20
+
+
 def test_sanitize_config_defaults():
     cfg = SVC.sanitize_config(None)
     assert cfg["sessions"] and cfg["news"]["enabled"] in (True, False)

@@ -49,10 +49,19 @@ async def fetch_events(url: Optional[str] = None) -> List[dict]:
 
 def blackout_status(events: List[dict], now: dt.datetime, *, impacts=("high",),
                     before_min: int = 3, after_min: int = 3,
-                    currencies: Optional[list] = None) -> dict:
-    """Are we inside a high-impact news window? `events` carry tz-aware `ts`."""
+                    currencies: Optional[list] = None,
+                    major_before_min: Optional[int] = None,
+                    major_after_min: Optional[int] = None,
+                    major_keywords: Optional[list] = None) -> dict:
+    """Are we inside a high-impact news window? `events` carry tz-aware `ts`.
+
+    Tiered (#77): an event whose title matches one of `major_keywords` (CPI/NFP/
+    FOMC-grade) uses the wider `major_before_min`/`major_after_min` window instead
+    of the default ±`before_min`/`after_min`. When the major_* args are omitted,
+    behaviour is identical to the original single-tier window (backward-compatible)."""
     impacts = tuple(i.lower() for i in (impacts or ("high",)))
     ccys = set(c.upper() for c in currencies) if currencies else None
+    kw = tuple(k.lower() for k in (major_keywords or ()) if k)
 
     def _relevant(e):
         if (e.get("impact") or "").lower() not in impacts:
@@ -61,22 +70,39 @@ def blackout_status(events: List[dict], now: dt.datetime, *, impacts=("high",),
             return False
         return True
 
+    def _is_major(e):
+        title = (e.get("title") or "").lower()
+        return bool(kw) and any(k in title for k in kw)
+
+    def _window(major):
+        b = major_before_min if (major and major_before_min is not None) else before_min
+        a = major_after_min if (major and major_after_min is not None) else after_min
+        return b, a
+
     active, nxt = None, None
     for e in events:
         if not _relevant(e) or not e.get("ts"):
             continue
-        start = e["ts"] - dt.timedelta(minutes=before_min)
-        end = e["ts"] + dt.timedelta(minutes=after_min)
+        major = _is_major(e)
+        b, a = _window(major)
+        start = e["ts"] - dt.timedelta(minutes=b)
+        end = e["ts"] + dt.timedelta(minutes=a)
         if start <= now <= end:
-            active = e
+            # A major window wins over a standard one if both are active.
+            if active is None or (major and not active[1]):
+                active = (e, major)
         if e["ts"] > now and (nxt is None or e["ts"] < nxt["ts"]):
             nxt = e
 
-    def _shape(e):
-        if not e:
+    def _shape(pair):
+        if not pair:
             return None
+        e, major = pair if isinstance(pair, tuple) else (pair, _is_major(pair))
+        b, a = _window(major)
         return {"title": e.get("title"), "ccy": e.get("ccy"), "impact": e.get("impact"),
-                "ts": e["ts"].isoformat(),
+                "ts": e["ts"].isoformat(), "tier": "major" if major else "standard",
+                "before_min": b, "after_min": a,
                 "in_min": max(0, int((e["ts"] - now).total_seconds() // 60))}
 
-    return {"in_blackout": active is not None, "active": _shape(active), "next": _shape(nxt)}
+    return {"in_blackout": active is not None, "active": _shape(active),
+            "next": _shape(nxt)}

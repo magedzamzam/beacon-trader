@@ -91,6 +91,37 @@ async def _load_events(session, now):
     return [{"ts": r.ts, "ccy": r.ccy, "impact": r.impact, "title": r.title} for r in rows]
 
 
+def _blackout(events, now, news_cfg: dict) -> dict:
+    """Tiered news-blackout status from a resolved `news` config (#77)."""
+    return calendar.blackout_status(
+        events, now, impacts=news_cfg.get("impacts", ["high"]),
+        before_min=news_cfg.get("before_min", 3), after_min=news_cfg.get("after_min", 3),
+        currencies=news_cfg.get("currencies") or None,
+        major_before_min=news_cfg.get("major_before_min"),
+        major_after_min=news_cfg.get("major_after_min"),
+        major_keywords=news_cfg.get("major_keywords"))
+
+
+async def entry_blackout(session, now: Optional[dt.datetime] = None) -> Optional[dict]:
+    """The active news-blackout window blocking NEW entries right now, or None
+    (#77). Reads the trading_hours config + persisted econ events. Gates only when
+    news.enabled AND news.gate_entries. Does NOT touch open positions. Fail-open:
+    any error / disabled / no active window -> None (never blocks on a glitch)."""
+    try:
+        cfg = await load_config(session)
+        news = cfg.get("news", {})
+        if not news.get("enabled", True) or not news.get("gate_entries", True):
+            return None
+        now = now or utcnow()
+        await maybe_refresh(session)
+        events = await _load_events(session, now)
+        st = _blackout(events, now, news)
+        return st["active"] if st.get("in_blackout") else None
+    except Exception as exc:
+        log.warning("news entry gate failed (fail-open, not blocking): %s", exc)
+        return None
+
+
 async def status(session) -> dict:
     cfg = await load_config(session)
     now = utcnow()
@@ -100,10 +131,7 @@ async def status(session) -> dict:
     if news_cfg.get("enabled", True):
         await maybe_refresh(session)
         events = await _load_events(session, now)
-        news = calendar.blackout_status(
-            events, now, impacts=news_cfg.get("impacts", ["high"]),
-            before_min=news_cfg.get("before_min", 3), after_min=news_cfg.get("after_min", 3),
-            currencies=news_cfg.get("currencies") or None)
+        news = _blackout(events, now, news_cfg)
     else:
         news = {"in_blackout": False, "active": None, "next": None}
 

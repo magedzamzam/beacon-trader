@@ -34,6 +34,7 @@ from beacon_core.execution.guard import (should_auto_execute, risk_limit_reason,
 from beacon_core.execution.trend_filter import trend_filter_cfg, decide as trend_decide
 from beacon_core.risk.sizing import RiskConfig, InstrumentSpec, size_legs, plan_total_risk
 from beacon_core.ta import capture as ta_capture
+from beacon_core.trading_hours import service as th_service
 from beacon_core.ta.registry import TF_RESOLUTION
 from beacon_core.ta.indicators import ema as _ema
 from beacon_core import notifications as notify
@@ -145,6 +146,25 @@ async def handle_signal(signal_id: int) -> None:
         if not accounts:
             log.info("signal %s: no enabled accounts mapped", signal_id)
             sig.status = "skipped"          # terminal: nothing to re-drive (#38)
+            await session.commit()
+            return
+
+        # --- news-blackout entry gate (#77) ---
+        # Block NEW entries inside a high-impact news window (tiered: -30/+15 for
+        # CPI/NFP/FOMC-grade, ±3 otherwise). Market-wide, so gate once per signal
+        # before fanning out to accounts; open positions are untouched. Terminal
+        # SKIP (a post-print re-entry would just chase the spike). Config-driven
+        # (trading_hours.news.gate_entries) and fail-open.
+        blackout = await th_service.entry_blackout(session)
+        if blackout:
+            log.warning("signal %s: SKIP news blackout — %s (%s, T%+dm)", signal_id,
+                        blackout.get("title"), blackout.get("tier"), -blackout.get("in_min", 0))
+            sig.status = "skipped"
+            sig.reject_reason = ("news_blackout: %s" % (blackout.get("title") or "high-impact"))[:128]
+            session.add(Event(kind="entry_filtered", payload={
+                "signal_id": sig.id, "reason": "news_blackout",
+                "event": blackout.get("title"), "impact": blackout.get("impact"),
+                "tier": blackout.get("tier"), "minutes_to_event": blackout.get("in_min")}))
             await session.commit()
             return
 

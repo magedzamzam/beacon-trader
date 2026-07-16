@@ -45,8 +45,10 @@ export default function TradingHours() {
         <div className="lg:col-span-2"><SessionTimeline status={status} /></div>
         <NewsCard status={status} />
       </div>
-      <div className="text-[11px] text-warn">
-        Read-only intelligence for now — configure it below; gating trades on session/news/holiday is a documented follow-up.
+      <div className="text-[11px] text-muted">
+        The <b>news blackout</b> now gates new entries (#77) when <i>gate entries</i> is on — tiered: a wider window
+        for CPI/NFP/FOMC-grade releases, the tight window for other high-impact. Open positions are never touched.
+        Session/holiday gating remains intelligence-only.
       </div>
 
       <Card>
@@ -76,10 +78,15 @@ export default function TradingHours() {
             <div className="text-xs uppercase tracking-wider text-muted mb-2">News blackout</div>
             <div className="flex flex-wrap items-center gap-x-5 gap-y-3">
               <Toggle checked={cfg.news.enabled} onChange={v => setNews("enabled", v)} label={cfg.news.enabled ? "enabled" : "off"} />
+              <Toggle checked={cfg.news.gate_entries ?? true} onChange={v => setNews("gate_entries", v)} label={(cfg.news.gate_entries ?? true) ? "gates entries" : "observe only"} />
               <label className="text-xs text-muted flex items-center gap-1">before (min)
                 <input type="number" min="0" value={cfg.news.before_min} onChange={e => setNews("before_min", +e.target.value)} className={`w-14 ${smallInput}`} /></label>
               <label className="text-xs text-muted flex items-center gap-1">after (min)
                 <input type="number" min="0" value={cfg.news.after_min} onChange={e => setNews("after_min", +e.target.value)} className={`w-14 ${smallInput}`} /></label>
+              <label className="text-xs text-muted flex items-center gap-1">major before
+                <input type="number" min="0" value={cfg.news.major_before_min ?? 30} onChange={e => setNews("major_before_min", +e.target.value)} className={`w-14 ${smallInput}`} /></label>
+              <label className="text-xs text-muted flex items-center gap-1">major after
+                <input type="number" min="0" value={cfg.news.major_after_min ?? 15} onChange={e => setNews("major_after_min", +e.target.value)} className={`w-14 ${smallInput}`} /></label>
               <label className="text-xs text-muted flex items-center gap-1">impacts
                 <input value={cfg.news.impacts.join(",")} placeholder="high"
                   onChange={e => setNews("impacts", e.target.value.split(",").map(x => x.trim().toLowerCase()).filter(Boolean))}
