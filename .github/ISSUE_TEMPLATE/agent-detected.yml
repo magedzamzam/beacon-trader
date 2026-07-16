@@ -1,0 +1,60 @@
+name: "Agent-Detected Issue"
+description: Issue automatically opened by an AI analysis agent after daily platform analysis
+title: "[Agent] "
+labels: ["status: opened-by-agent"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This template is used by AI analysis agents to report issues detected during automated daily analysis.
+  - type: input
+    id: component
+    attributes:
+      label: Affected Component
+      description: Which service/module/package is affected
+      placeholder: e.g. services/execution-engine
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - Critical
+        - High
+        - Medium
+        - Low
+    validations:
+      required: true
+  - type: input
+    id: detected_at
+    attributes:
+      label: Detection Timestamp (UTC)
+      placeholder: "2026-07-16T03:00:00Z"
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Analysis Summary
+      description: What the agent found during analysis
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Logs / Evidence
+      render: shell
+    validations:
+      required: false
+  - type: dropdown
+    id: phase
+    attributes:
+      label: Project Phase
+      options:
+        - Initialization
+        - Stabilization
+        - Enhancement
+        - Production
+    validations:
+      required: true
