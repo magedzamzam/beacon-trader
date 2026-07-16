@@ -1,0 +1,49 @@
+name: "User-Reported Issue"
+description: Report a bug, request, or problem found while using the platform
+title: "[User] "
+labels: ["status: opened-by-user"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened? What did you expect to happen instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: List the steps that led to this issue, if applicable
+    validations:
+      required: false
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - Critical
+        - High
+        - Medium
+        - Low
+    validations:
+      required: true
+  - type: dropdown
+    id: phase
+    attributes:
+      label: Project Phase
+      description: Which phase of the project is this related to
+      options:
+        - Initialization
+        - Stabilization
+        - Enhancement
+        - Production
+    validations:
+      required: true
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Screenshots, logs, or any other useful information
+    validations:
+      required: false
