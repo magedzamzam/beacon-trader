@@ -81,8 +81,32 @@ gh project item-edit --id "$ITEM" --project-id PVT_kwHOA6ZThM4Bdjxy \
   Enhancement `3b678c17` · Production `f8813aef`
 - Gotchas: `gh project item-list` defaults to **30 items** (`--limit 300` when verifying);
   needs the `project` token scope (`gh auth refresh -s project`).
+- The project's **"Auto-add to project"** workflow is already ON, so a new issue lands on the
+  board by itself and gets a **Status**. It **cannot set Phase** (custom field) — the filing
+  agent must still set Phase.
 
 `user-reported.yml` is the maintainer's template — agents use **agent-detected**.
+
+### Status lifecycle — who moves what
+
+| Status | Set by | When |
+|---|---|---|
+| `Opened` | filing agent | issue created |
+| `Accepted` | maintainer | approved for work |
+| `Work in Progress` | **fixing agent** | **when the fix is committed/PR'd — this is where an agent STOPS** |
+| `Completed` | **maintainer only** | after **he** deploys and verifies it on the demo box |
+| `Rejected` / `Duplicated` | either | won't do / dupe |
+
+> **An agent never sets `Completed`.** Finishing the code is not finishing the issue — Beacon
+> only proves out once it's deployed and observed. When you commit a fix, set the item to
+> **Work in Progress** and say so in the issue; Maged flips it to **Completed** after his own
+> deploy + test.
+
+```bash
+# after committing a fix (agent's last step on the board):
+gh project item-edit --id "$ITEM" --project-id PVT_kwHOA6ZThM4Bdjxy \
+  --field-id PVTSSF_lAHOA6ZThM4BdjxyzhYEeNE --single-select-option-id 47fc9ee4   # Work in Progress
+```
 
 ## 4. Tests & CI
 
