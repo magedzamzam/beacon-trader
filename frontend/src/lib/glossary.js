@@ -1,7 +1,7 @@
 /**
  * Glossary (#105) — the single source of plain-language copy for every non-obvious
- * field on the platform. Both the Help page and the inline ⓘ hints read from here,
- * so a tooltip can never drift from the page.
+ * field on the platform. The inline ⓘ (components/HelpHint) renders these, so the
+ * explanation lives exactly where the number is.
  *
  * Copy is sourced from the implementation, NOT from memory:
  *   analysis/bayes.py (posterior/credible interval/score), analysis/estimators.py,
@@ -10,42 +10,23 @@
  *
  * Every entry answers the same four questions:
  *   what · how to read it · what it does NOT mean · when to act
+ * plus an optional `guard` — one of the three platform-wide rules below, shown
+ * highlighted on the fields it actually applies to (there is no separate Help page,
+ * so these must travel with the number they qualify).
  */
 
-// The three rules that matter more than any single number.
-export const GUARDRAILS = [
-  {
-    title: "Shadow analytics never gate a trade",
-    body: "Regime, Hurst, Kalman, VWAP-z, k-NN, structure/magnets and the learned P(win) gate are all measured " +
-          "side-by-side with live trading and do NOT decide anything. They exist to be validated first " +
-          "(measure-before-gate). Only the trend-alignment filter, the news blackout, risk caps and the AI gate " +
-          "can actually stop or resize a trade.",
-  },
-  {
-    title: "Leg-level P&L is unreliable — read trade-level P&L",
-    body: "A single leg's money figure can be distorted by partial fills and broker allocation. Trust the " +
-          "trade-level realized P&L, and use the leg's outcome LABEL (tp_hit / sl_hit / breakeven) rather than " +
-          "its P&L number.",
-  },
-  {
-    title: "Don't act below N ≥ 30 — and raw-N overstates what you have",
-    body: "Every sample here is the same instrument (XAUUSD) and samples cluster by channel, time and direction, " +
-          "so they are correlated: the effective sample size is much smaller than the raw count. A pattern with " +
-          "n=8 is a story, not evidence. The learned gate refuses to act below 30 for exactly this reason.",
-  },
-];
-
-export const SECTIONS = [
-  { id: "bayes", title: "Bayesian Analysis", blurb: "Which conditions actually predict a win — and how much of that is real vs small-sample noise." },
-  { id: "labels", title: "Signal quality vs bot outcome", blurb: "Two different questions: was the SETUP good, and did WE make money on it?" },
-  { id: "analytics", title: "Analytics estimators (shadow)", blurb: "Per-signal market context captured beside every trade. None of it gates." },
-  { id: "structure", title: "Structure & magnets (shadow)", blurb: "Where price sits relative to market structure and the levels that attract it." },
-  { id: "reconciler", title: "Reconciler", blurb: "Did we do what the channel said — and if not, why not?" },
-  { id: "performance", title: "Performance & risk metrics", blurb: "How to read the money numbers." },
-  { id: "risk", title: "Risk & Limits", blurb: "The caps that can stop a trade. Read the master-switch rule carefully." },
-  { id: "strategies", title: "Strategies (Entry / Filtration / Exit)", blurb: "How a signal is entered, filtered and exited — per Account × Source." },
-  { id: "config", title: "Configuration screens", blurb: "What each settings screen is for." },
-];
+// The three rules that matter more than any single number. Attached per-entry via `guard`.
+export const G_SHADOW =
+  "SHADOW — this never gates a trade. It is measured beside live trading so it can be validated first " +
+  "(measure-before-gate). Only the trend-alignment filter, the news blackout, risk caps and the AI gate " +
+  "can actually stop or resize a trade.";
+export const G_N30 =
+  "Don't act below N ≥ 30. Every sample is the same instrument (XAUUSD) and they cluster by channel, time and " +
+  "direction, so they're correlated — the effective sample size is well below the raw count. n=8 is a story, " +
+  "not evidence.";
+export const G_LEG_PNL =
+  "Leg-level P&L is unreliable (partial fills / broker allocation). Read trade-level realized P&L, and use the " +
+  "leg's outcome LABEL (tp_hit / sl_hit / breakeven) rather than its money figure.";
 
 export const GLOSSARY = [
   // ---- Bayesian Analysis ----------------------------------------------------
@@ -62,6 +43,7 @@ export const GLOSSARY = [
     read: "This is the honest estimate. With few samples it sits close to the base rate; as samples accumulate it moves toward the raw win-rate.",
     not: "It does NOT equal the raw win-rate, and that's deliberate — 2 wins out of 2 is reported near the base rate, not as 100%. It is not 'the model being pessimistic', it's the maths refusing to over-read a tiny sample.",
     act: "Prefer it over raw WR — but still don't act on the mean alone; read the credible interval.",
+    guard: G_N30,
   },
   {
     id: "credible_interval", term: "Credible interval (90%) · ci_low / ci_high", section: "bayes",
@@ -69,6 +51,7 @@ export const GLOSSARY = [
     read: "The single most important number on the page is ci_low. **If the interval spans the base rate, there is no evidence of an edge** — the data can't tell that condition apart from average.",
     not: "It is NOT a min/max of observed outcomes, and a high ci_high is NOT a promise. An interval of 40–90% means you know almost nothing.",
     act: "Act only when the LOWER bound clears your threshold. That's what the learned gate does; do the same by eye.",
+    guard: G_N30,
   },
   {
     id: "lift", term: "Lift", section: "bayes",
@@ -76,6 +59,7 @@ export const GLOSSARY = [
     read: "Positive = better than average, negative = worse. Sort by it to find candidates.",
     not: "A positive lift is NOT evidence on its own — a thin sample can show lift while its interval still spans the base rate.",
     act: "Use lift to shortlist, then confirm with ci_low and n.",
+    guard: G_N30,
   },
   {
     id: "raw_wr", term: "n · wins · raw WR", section: "bayes",
@@ -83,6 +67,7 @@ export const GLOSSARY = [
     read: "n is your evidence budget. Raw WR is the headline that feels convincing.",
     not: "Raw WR is the mirage — it is exactly the number that makes 2/2 look like a 100% edge. It carries no notion of uncertainty.",
     act: "Read n first. If n is small, ignore raw WR entirely and look at the interval.",
+    guard: G_N30,
   },
   {
     id: "p_win", term: "p_win", section: "bayes",
@@ -90,6 +75,7 @@ export const GLOSSARY = [
     read: "A relative score — compare it to the base rate. Above = the features lean favourable.",
     not: "It is NOT a calibrated guarantee and it does NOT account for correlated samples. It is not currently allowed to gate any trade.",
     act: "Treat as a hint while the learned gate is in shadow. Confirm against the would-block report before trusting it.",
+    guard: G_SHADOW,
   },
   {
     id: "contributors", term: "Contributors", section: "bayes",
@@ -97,6 +83,7 @@ export const GLOSSARY = [
     read: "The 'why' behind a score. A large contributor with a small n is a red flag, not a finding.",
     not: "They are NOT causes — they're correlations found in a small, correlated sample.",
     act: "Use them to sanity-check that a score rests on something plausible rather than one freak condition.",
+    guard: G_N30,
   },
   {
     id: "min_n", term: "min n · significance", section: "bayes",
@@ -104,6 +91,7 @@ export const GLOSSARY = [
     read: "If a condition you expect is missing, it's below min_n. If the gate says 'observe only', it's below the significance floor.",
     not: "Passing min_n does NOT mean significant — min_n only controls what's displayed.",
     act: "Raise min_n to de-noise the table. Never act on a condition below 30 samples.",
+    guard: G_N30,
   },
 
   // ---- Signal quality vs bot outcome ---------------------------------------
@@ -113,6 +101,7 @@ export const GLOSSARY = [
     read: "This answers 'is this channel any good at picking trades?'. Ambiguous or contradictory claims are excluded, never counted as losses.",
     not: "It is NOT our profit and NOT our fill. A channel can have a great signal-quality WR while we lose money on it.",
     act: "Use it to decide which channels/conditions to TRUST. It's the right label for gating decisions.",
+    guard: G_N30,
   },
   {
     id: "bot_realized_wr", term: "Bot-realized WR", section: "labels",
@@ -120,6 +109,7 @@ export const GLOSSARY = [
     read: "This answers 'did our execution capture it?'. It bundles signal quality AND our fills, stops and TTL together.",
     not: "It is NOT a clean measure of the channel — a good signal we mis-executed shows up here as a losing signal.",
     act: "Use it to size the execution-fix backlog, not to judge a channel's edge.",
+    guard: G_LEG_PNL,
   },
   {
     id: "execution_tax", term: "Execution tax (the gap)", section: "labels",
@@ -127,6 +117,7 @@ export const GLOSSARY = [
     read: "A positive gap means the setup worked but our execution didn't capture it — missed fills, stops too tight, orders expiring.",
     not: "It is NOT a bad-channel signal. A big gap on a good channel is OUR problem to fix, not a reason to disable it.",
     act: "Fix execution where the tax is biggest. Disable/de-size where signal-quality itself is poor.",
+    guard: G_N30,
   },
 
   // ---- Analytics estimators -------------------------------------------------
@@ -136,6 +127,7 @@ export const GLOSSARY = [
     read: "Context for grouping outcomes — 'does this channel only work in trends?'.",
     not: "It does NOT gate anything and is not a forecast of the next move.",
     act: "Use it as a slice in the correlation report; act only at N ≥ 30 per bucket.",
+    guard: G_SHADOW,
   },
   {
     id: "hurst", term: "Hurst exponent", section: "analytics",
@@ -143,6 +135,7 @@ export const GLOSSARY = [
     read: "Above 0.5 = trend-persistent (moves tend to continue); below 0.5 = mean-reverting (moves tend to snap back); ~0.5 = random walk.",
     not: "It does NOT predict direction — only the character of the move. It's noisy on short windows.",
     act: "Shadow only. Treat as weak context until validated over many regimes.",
+    guard: G_SHADOW,
   },
   {
     id: "kalman_slope", term: "Kalman slope", section: "analytics",
@@ -150,6 +143,7 @@ export const GLOSSARY = [
     read: "Sign = trend direction; magnitude = steepness. Less jumpy than a raw EMA difference.",
     not: "NOT a signal to trade, and not a trend-strength percentile.",
     act: "Shadow only — a context feature for the model.",
+    guard: G_SHADOW,
   },
   {
     id: "vwap_z", term: "VWAP deviation (z)", section: "analytics",
@@ -157,6 +151,7 @@ export const GLOSSARY = [
     read: "Positive = above VWAP (extended up), negative = below. Large |z| = stretched from the volume-weighted mean.",
     not: "A stretched z is NOT automatically a reversal — in a strong trend price stays extended.",
     act: "Shadow only. Useful as a slice for 'do we buy extended?'.",
+    guard: G_SHADOW,
   },
   {
     id: "knn", term: "k-NN similarity (win_rate / expectancy)", section: "analytics",
@@ -164,6 +159,7 @@ export const GLOSSARY = [
     read: "'When it looked like this before, here's what happened.' The k is small, so treat it as anecdote-with-numbers.",
     not: "NOT a probability, and highly unreliable at the current sample size — the feature space is far bigger than the data.",
     act: "Shadow only; the weakest of the estimators today. Don't act on it.",
+    guard: G_SHADOW,
   },
   {
     id: "atr_pct", term: "ATR %", section: "analytics",
@@ -171,6 +167,7 @@ export const GLOSSARY = [
     read: "Higher = wider swings, so a fixed-distance stop is more likely to be tagged by noise.",
     not: "NOT a direction or a risk limit.",
     act: "Use it to reason about whether a stop distance is sane relative to volatility.",
+    guard: G_SHADOW,
   },
 
   // ---- Structure ------------------------------------------------------------
@@ -180,6 +177,7 @@ export const GLOSSARY = [
     read: "A structural read of trend per timeframe, independent of any indicator.",
     not: "NOT a trade trigger; structure lags and can flip on one swing.",
     act: "Shadow context. Compare against htf_alignment before reading anything into it.",
+    guard: G_SHADOW,
   },
   {
     id: "htf_alignment", term: "htf_alignment (aligned / counter / mixed)", section: "structure",
@@ -187,6 +185,7 @@ export const GLOSSARY = [
     read: "'counter' means the trade fights the bigger trend — historically the expensive bucket.",
     not: "NOT the same as the trend-alignment ENTRY FILTER (which uses an EMA + slope/ATR confirmation and can actually skip a trade). This one is measurement only.",
     act: "Use the outcome report to decide whether to enable the entry filter — don't infer it from this label alone.",
+    guard: G_SHADOW,
   },
   {
     id: "magnet_zone", term: "Magnet zone & score", section: "structure",
@@ -194,6 +193,7 @@ export const GLOSSARY = [
     read: "Higher score = more overlapping reasons for that level to matter.",
     not: "NOT a guarantee price reaches it, and not a target.",
     act: "Shadow. Use dist_atr to reason about whether a TP sits behind a wall.",
+    guard: G_SHADOW,
   },
   {
     id: "dist_atr", term: "dist_atr", section: "structure",
@@ -201,6 +201,7 @@ export const GLOSSARY = [
     read: "ATR-normalised so it's comparable across volatility regimes. Small = price is right at a level.",
     not: "NOT in pips/points — it's a volatility-relative measure.",
     act: "A small dist_atr on the ADVERSE side (a zone just above a BUY) is the case the shadow magnet filter is designed to catch.",
+    guard: G_SHADOW,
   },
   {
     id: "premium_discount", term: "Premium / discount", section: "structure",
@@ -208,6 +209,7 @@ export const GLOSSARY = [
     read: "Buying in discount / selling in premium is the conventional read.",
     not: "NOT an edge on its own, and the range definition shifts as structure updates.",
     act: "Shadow context only.",
+    guard: G_SHADOW,
   },
 
   // ---- Reconciler -----------------------------------------------------------
@@ -247,6 +249,7 @@ export const GLOSSARY = [
     read: "The one number that says whether a channel makes money per attempt. Negative = it costs you to play.",
     not: "NOT a win-rate. A 70%-win channel can have negative expectancy if the losers are big.",
     act: "This is the primary judgement metric per channel. Read it with n.",
+    guard: G_LEG_PNL,
   },
   {
     id: "r_multiple", term: "R multiple", section: "performance",
@@ -254,6 +257,7 @@ export const GLOSSARY = [
     read: "Normalises across trade sizes and stop distances so channels are comparable.",
     not: "NOT money. A +3R trade on tiny size is still small money.",
     act: "Use R to compare exit rules fairly — it's the right unit for the A/B.",
+    guard: G_LEG_PNL,
   },
   {
     id: "profit_factor", term: "Profit factor (PF)", section: "performance",
@@ -261,6 +265,7 @@ export const GLOSSARY = [
     read: "1.4 means you make 1.40 for every 1.00 you lose.",
     not: "NOT robust at small n — one outlier trade moves it a lot.",
     act: "Sanity-check alongside expectancy and max drawdown.",
+    guard: G_N30,
   },
   {
     id: "payoff", term: "Payoff ratio", section: "performance",
@@ -282,6 +287,7 @@ export const GLOSSARY = [
     read: "Higher is better; useful to compare arms with different volatility.",
     not: "Both are unreliable on a short history and Sharpe punishes upside volatility too.",
     act: "Directional only at this sample size. Don't rank channels by Sharpe yet.",
+    guard: G_N30,
   },
   {
     id: "planned_risk", term: "planned_risk", section: "performance",
@@ -390,4 +396,3 @@ export const GLOSSARY = [
 ];
 
 export const byId = (id) => GLOSSARY.find((g) => g.id === id);
-export const bySection = (sectionId) => GLOSSARY.filter((g) => g.section === sectionId);

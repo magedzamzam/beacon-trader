@@ -3,6 +3,7 @@ import { GitBranch, Trash2, LogIn, Filter, LogOut, Plus } from "lucide-react";
 import { Card, Table, Th, Td, Badge, Empty } from "../components/ui";
 import { Field, Input, Select, Toggle, Button, ErrorNote } from "../components/form";
 import SlRulesEditor from "../components/SlRulesEditor";
+import HelpHint from "../components/HelpHint";
 import { api } from "../lib/api";
 
 /**
@@ -114,7 +115,7 @@ export default function Strategies() {
           </div>
         </div>
         <div className="px-4 py-3 border-b border-edge grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-          <Field label="Account" hint="Any = applies to every account">
+          <Field label={<>Account<HelpHint term="strategy_scope" /></>} hint="Any = applies to every account">
             <Select value={form.account_id} onChange={(e) => setF("account_id", e.target.value)}>
               <option value="">Any account</option>
               {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
@@ -143,7 +144,7 @@ export default function Strategies() {
 
         {tab === "entry" && (
           <div className="p-4 space-y-3">
-            <p className="text-[11px] text-muted">How the entry order is placed — TTL for working orders and the chase-guard (#67). Empty ⇒ the global default. Source-agnostic, so future non-Telegram entry types plug in here.</p>
+            <p className="text-[11px] text-muted"><HelpHint term="entry_policy_help" /> How the entry order is placed — TTL for working orders and the chase-guard (#67). Empty ⇒ the global default. Source-agnostic, so future non-Telegram entry types plug in here.</p>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               <Field label="Entry TTL (min)" hint="working-order expiry"><Input type="number" value={form.entry.ttl_minutes} onChange={(e) => setSub("entry", "ttl_minutes", e.target.value)} /></Field>
               <Field label="Chase tolerance (× |entry−SL|)" hint="how far past the level a MARKET hint may still fill"><Input type="number" step="0.05" value={form.entry.chase_tolerance_r} onChange={(e) => setSub("entry", "chase_tolerance_r", e.target.value)} /></Field>
@@ -160,7 +161,7 @@ export default function Strategies() {
 
         {tab === "filter" && (
           <div className="p-4 space-y-4">
-            <p className="text-[11px] text-muted">Rules that can <b>skip</b>, <b>de-size</b>, or <b>up-size</b> a trade from Analytics / session / structure signals. Fail-open: a rule whose inputs aren't available yet is a no-op.</p>
+            <p className="text-[11px] text-muted"><HelpHint term="filtration_help" /> Rules that can <b>skip</b>, <b>de-size</b>, or <b>up-size</b> a trade from Analytics / session / structure signals. Fail-open: a rule whose inputs aren't available yet is a no-op.</p>
             <div className="rounded-lg border border-edge p-3 space-y-3">
               <div className="flex items-center gap-2 text-sm font-medium">Trend alignment
                 <Toggle checked={form.trend.enabled} onChange={(v) => setSub("trend", "enabled", v)} label={form.trend.enabled ? "on" : "off"} />
@@ -214,7 +215,7 @@ export default function Strategies() {
 
         {tab === "exit" && (
           <div className="p-4 space-y-3">
-            <p className="text-[11px] text-muted">The stop-loss ratchet + cancel-pending behaviour. Snapshotted at entry, so this trade's arm is frozen. No rules ⇒ the channel / global default.</p>
+            <p className="text-[11px] text-muted"><HelpHint term="exit_policy_help" /> The stop-loss ratchet + cancel-pending behaviour. Snapshotted at entry, so this trade's arm is frozen. No rules ⇒ the channel / global default.</p>
             <label className="flex items-center gap-2 text-sm">Cancel pending orders on stop
               <Toggle checked={form.exit.cancel_pending_on_stop} onChange={(v) => setSub("exit", "cancel_pending_on_stop", v)} /></label>
             <div className="flex items-center gap-2 flex-wrap">

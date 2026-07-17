@@ -3,6 +3,7 @@ import { Pencil } from "lucide-react";
 import { Table, Card, Th, Td, Badge, Empty } from "../components/ui";
 import { Modal, Field, Input, Toggle, Button, ErrorNote } from "../components/form";
 import RiskConfigEditor from "../components/RiskConfigEditor";
+import HelpHint from "../components/HelpHint";
 import { api } from "../lib/api";
 
 const summarize = (r) => {
@@ -98,10 +99,10 @@ function RiskLimitsCard() {
         )}
 
         <div className="flex flex-wrap gap-x-8 gap-y-3">
-          <label className="flex items-center gap-2 text-sm">Enforce limits
+          <label className="flex items-center gap-2 text-sm">Enforce limits<HelpHint term="master_switch" />
             <Toggle checked={!!cfg.enabled} onChange={v => set("enabled", v)} /></label>
           <label className="flex items-center gap-2 text-sm">
-            <span className={cfg.trading_halted ? "text-warn font-medium" : ""}>Kill switch — halt all new trades</span>
+            <span className={cfg.trading_halted ? "text-warn font-medium" : ""}>Kill switch — halt all new trades</span><HelpHint term="kill_switch" />
             <Toggle checked={!!cfg.trading_halted} onChange={v => set("trading_halted", v)} /></label>
         </div>
         <div className="text-[11px] text-muted -mt-2">
@@ -111,16 +112,16 @@ function RiskLimitsCard() {
           {status?.configured === false && " No risk_limits saved yet — a conservative fail-safe is active until you Save."}
         </div>
         <div className={`grid grid-cols-1 sm:grid-cols-2 gap-3 ${cfg.enabled ? "" : "opacity-60"}`}>
-          <Field label="Daily loss limit (account ccy)">
+          <Field label={<>Daily loss limit (account ccy)<HelpHint term="daily_loss_limit" /></>}>
             <Input type="number" value={cfg.daily_loss_limit} onChange={e => num("daily_loss_limit", e.target.value)} /></Field>
-          <Field label="Per-signal ceiling (× daily limit)" hint="0.5 = one trade may risk ≤ 50% of the daily cap">
+          <Field label={<>Per-signal ceiling (× daily limit)<HelpHint term="per_signal_max_pct_of_daily" /></>} hint="0.5 = one trade may risk ≤ 50% of the daily cap">
             <Input type="number" step="0.05" value={cfg.per_signal_max_pct_of_daily}
               onChange={e => num("per_signal_max_pct_of_daily", e.target.value)} /></Field>
-          <Field label="Max open risk / account">
+          <Field label={<>Max open risk / account<HelpHint term="max_open_risk" /></>}>
             <Input type="number" value={cfg.max_open_risk_per_account} onChange={e => num("max_open_risk_per_account", e.target.value)} /></Field>
-          <Field label="Max open risk / symbol">
+          <Field label={<>Max open risk / symbol<HelpHint term="max_open_risk" /></>}>
             <Input type="number" value={cfg.max_open_risk_per_symbol} onChange={e => num("max_open_risk_per_symbol", e.target.value)} /></Field>
-          <Field label="Per-signal risk cap (% equity)" hint="#78 · one signal's whole fanout (all entry×TP legs) is scaled to ≤ this % of equity · 0 = off">
+          <Field label={<>Per-signal risk cap (% equity)<HelpHint term="max_signal_risk_pct" /></>} hint="#78 · one signal's whole fanout (all entry×TP legs) is scaled to ≤ this % of equity · 0 = off">
             <Input type="number" step="0.25" value={cfg.max_signal_risk_pct ?? 2.0}
               onChange={e => num("max_signal_risk_pct", e.target.value)} /></Field>
         </div>

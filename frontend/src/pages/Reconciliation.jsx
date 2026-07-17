@@ -20,8 +20,7 @@ const catLabel = (c) => (CAT[c]?.[0] || c);
 const catTone = (c) => (CAT[c]?.[1] || "muted");
 const when = (s) => (s || "").slice(0, 16).replace("T", " ");
 
-export default function Reconciliation({ setView }) {
-  const help = () => setView && setView("help");   // ⓘ -> Glossary
+export default function Reconciliation() {
   const [includeHistory, setIncludeHistory] = useState(false);
   const [category, setCategory] = useState("");     // "" = all
   const [expanded, setExpanded] = useState(null);
@@ -55,12 +54,12 @@ export default function Reconciliation({ setView }) {
       {sum && (
         <>
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-            <KPI label={<>Match rate<HelpHint term="match_rate" onOpen={help} /></>} value={sum.match_rate != null ? `${sum.match_rate}%` : "—"}
+            <KPI label={<>Match rate<HelpHint term="match_rate" /></>} value={sum.match_rate != null ? `${sum.match_rate}%` : "—"}
               tone="beacon" sub={`${sum.matched}/${sum.total} signals`} />
-            <KPI label={<>No fill<HelpHint term="no_fill" onOpen={help} /></>} value={sum.categories.no_fill || 0} tone="short" sub="placed, never filled" />
-            <KPI label={<>Stopped early<HelpHint term="shortfall_stopped_before_tp" onOpen={help} /></>} value={sum.categories.shortfall_stopped_before_tp || 0}
+            <KPI label={<>No fill<HelpHint term="no_fill" /></>} value={sum.categories.no_fill || 0} tone="short" sub="placed, never filled" />
+            <KPI label={<>Stopped early<HelpHint term="shortfall_stopped_before_tp" /></>} value={sum.categories.shortfall_stopped_before_tp || 0}
               tone="warn" sub="filled, closed before TP" />
-            <KPI label={<>No trade<HelpHint term="executed_no_trade" onOpen={help} /></>}
+            <KPI label={<>No trade<HelpHint term="executed_no_trade" /></>}
               value={(sum.categories.executed_no_trade || 0) + (sum.categories.not_executed || 0)}
               tone="muted" sub="signal placed nothing" />
           </div>

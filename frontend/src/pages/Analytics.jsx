@@ -12,8 +12,7 @@ const fmt = (v, d = 2) => (v == null ? "—" : Number(v).toFixed(d));
 
 /** Shadow analytics sidecar (#51/#53): signal↔channel↔regime correlation.
  *  Read-only observability — nothing here gates trading. */
-export default function Analytics({ setView }) {
-  const help = () => setView && setView("help");   // ⓘ -> Glossary
+export default function Analytics() {
   const [rep, setRep] = useState(null);
   const [struct, setStruct] = useState(null);
   const [cfg, setCfg] = useState(null);
@@ -62,9 +61,11 @@ export default function Analytics({ setView }) {
           )}
         </div>
         <div className="px-4 py-2 text-[11px] text-muted">
-          Per-signal regime · Hurst · Kalman slope · VWAP-z · k-NN, computed side-by-side
-          with live trading and <b>never gating it</b>. Win-rates use Beta-Binomial credible
-          intervals (small samples shrink toward the {rep ? `${fmt(rep.base_rate * 100, 1)}%` : "base"} rate).
+          Per-signal regime<HelpHint term="regime" /> · Hurst<HelpHint term="hurst" /> ·
+          Kalman slope<HelpHint term="kalman_slope" /> · VWAP-z<HelpHint term="vwap_z" /> ·
+          k-NN<HelpHint term="knn" />, computed side-by-side with live trading and
+          <b>never gating it</b>. Win-rates use Beta-Binomial credible intervals
+          (small samples shrink toward the {rep ? `${fmt(rep.base_rate * 100, 1)}%` : "base"} rate).
         </div>
       </Card>
 
@@ -82,9 +83,9 @@ export default function Analytics({ setView }) {
           : !rep.by_channel_regime?.length ? <Empty>No labelled analytics yet — accrues as signals capture and trades close.</Empty> : (
           <Table minW={860}>
             <thead><tr className="border-b border-edge">
-              <Th>Channel</Th><Th>Regime<HelpHint term="regime" onOpen={help} /></Th><Th right>n</Th><Th right>Win%</Th>
-              <Th right>90% CI<HelpHint term="credible_interval" onOpen={help} /></Th>
-              <Th right>Expectancy<HelpHint term="expectancy" onOpen={help} /></Th>
+              <Th>Channel</Th><Th>Regime<HelpHint term="regime" /></Th><Th right>n</Th><Th right>Win%</Th>
+              <Th right>90% CI<HelpHint term="credible_interval" /></Th>
+              <Th right>Expectancy<HelpHint term="expectancy" /></Th>
             </tr></thead>
             <tbody>
               {rep.by_channel_regime.map((r, i) => (
@@ -197,7 +198,7 @@ function StructureMapCard({ map, price, busy, onRecompute }) {
     <Card>
       <div className="px-4 py-3 border-b border-edge flex items-center justify-between gap-2 flex-wrap">
         <div className="text-sm font-medium flex items-center gap-2">
-          Structure &amp; magnets · XAUUSD
+          Structure &amp; magnets<HelpHint term="magnet_zone" /> · XAUUSD
           {map?.version_id != null && (
             <Badge tone={STRUCT_TONE[bias]}>{bias} bias · {counts.bull}▲/{counts.bear}▼</Badge>
           )}
