@@ -1,0 +1,119 @@
+# Dependabot version updates.
+#
+# Noise control: everything is weekly (Monday), and minor+patch bumps are GROUPED
+# into a single PR per ecosystem/directory. Majors are deliberately left ungrouped
+# so a breaking bump (e.g. sqlalchemy, anthropic, redis) gets its own PR and real
+# review — those sit under the trading path.
+#
+# CI (.github/workflows/tests.yml) runs the core suite on every Dependabot PR, so a
+# bump that breaks sizing/guards/SL rules fails before merge.
+
+version: 2
+
+updates:
+  # ---------------- Python: shared core (beacon_core) ----------------
+  - package-ecosystem: pip
+    directory: /packages/core
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: deps
+    groups:
+      core-minor-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  # ---------------- Python: one requirements.txt per service ----------------
+  - package-ecosystem: pip
+    directory: /services/api
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 3
+    commit-message: { prefix: deps }
+    groups:
+      api-minor-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: pip
+    directory: /services/executor
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 3
+    commit-message: { prefix: deps }
+    groups:
+      executor-minor-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: pip
+    directory: /services/monitor
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 3
+    commit-message: { prefix: deps }
+    groups:
+      monitor-minor-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: pip
+    directory: /services/telegram
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 3
+    commit-message: { prefix: deps }
+    groups:
+      telegram-minor-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  # ---------------- Frontend (npm) ----------------
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 5
+    commit-message: { prefix: deps }
+    groups:
+      frontend-minor-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  # ---------------- Container base images ----------------
+  - package-ecosystem: docker
+    directory: /frontend
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 2
+    commit-message: { prefix: deps }
+
+  - package-ecosystem: docker
+    directory: /services/api
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 2
+    commit-message: { prefix: deps }
+
+  - package-ecosystem: docker
+    directory: /services/executor
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 2
+    commit-message: { prefix: deps }
+
+  - package-ecosystem: docker
+    directory: /services/monitor
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 2
+    commit-message: { prefix: deps }
+
+  - package-ecosystem: docker
+    directory: /services/telegram
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 2
+    commit-message: { prefix: deps }
+
+  # ---------------- GitHub Actions ----------------
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 3
+    commit-message: { prefix: ci }
+    groups:
+      actions:
+        patterns: ["*"]
