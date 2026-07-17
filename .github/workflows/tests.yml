@@ -1,0 +1,39 @@
+name: tests
+
+# The core engine is pure-Python and unit-testable without a DB/Redis/broker
+# (see packages/core/tests). Several agents change this repo, so the suite runs
+# on every push/PR to catch regressions in sizing, guards, SL rules, and the
+# analysis layer before they reach the trading path.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    name: core engine tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install beacon-core + test deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e packages/core
+          pip install pytest
+
+      - name: Run test suite
+        # packages/core/tests  -> sizing, guards, SL ladder, bayes, TA, structure,
+        #                        estimators, reconcile, bus, ingest, notifications
+        # services/executor/tests -> exercises the real beacon_core execution guard
+        run: pytest packages/core/tests services/executor/tests -q
