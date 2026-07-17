@@ -3,6 +3,7 @@ import { Sigma } from "lucide-react";
 import { Card, Table, Th, Td, Badge, Empty } from "../components/ui";
 import { Button, ErrorNote } from "../components/form";
 import RangeFilter, { useRange } from "../components/RangeFilter";
+import HelpHint from "../components/HelpHint";
 import { api } from "../lib/api";
 
 const pct = (v) => (v == null ? "—" : (v * 100).toFixed(1) + "%");
@@ -15,7 +16,8 @@ const liftTone = (l) => (l > 0.05 ? "long" : l < -0.05 ? "short" : "muted");
  * win-rate table (credible intervals shrink thin samples toward the base rate)
  * plus a Naive-Bayes P(win) score for recent signals.
  */
-export default function Analysis({ account = "" }) {
+export default function Analysis({ account = "", setView }) {
+  const help = () => setView && setView("help");   // ⓘ deep-links into the Glossary
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
   const [minN, setMinN] = useState(5);
@@ -33,8 +35,8 @@ export default function Analysis({ account = "" }) {
     <div className="space-y-4">
       <RangeFilter state={range} variant="coarse" />
       {err && <ErrorNote>{err}</ErrorNote>}
-      {!err && data && <ExecutionTaxCard tax={data.execution_tax} />}
-      {!err && gate && <BayesGateCard gate={gate} />}
+      {!err && data && <ExecutionTaxCard tax={data.execution_tax} help={help} />}
+      {!err && gate && <BayesGateCard gate={gate} help={help} />}
       {!err && !data && <Card><Empty>Loading…</Empty></Card>}
       {!err && data && !data.ready && (
         <Card><Empty>{data.message || "Not enough data yet."} The Bayesian analysis
@@ -49,6 +51,7 @@ export default function Analysis({ account = "" }) {
           </div>
           <div className="flex items-center gap-3 text-xs text-muted">
             <span className="num">{data.n} trades · {data.wins}W/{data.losses}L · base {pct(base)}</span>
+            <HelpHint term="base_rate" onOpen={help} />
             <label className="flex items-center gap-1">min n
               <input type="number" min="2" value={minN} onChange={e => setMinN(+e.target.value)}
                 className="w-14 bg-panel2 border border-edge rounded px-2 py-1 num outline-none focus:border-beacon" /></label>
@@ -63,8 +66,12 @@ export default function Analysis({ account = "" }) {
         {!data.conditions.length ? <Empty>No conditions meet the min-sample threshold yet.</Empty> : (
           <Table>
             <thead><tr>
-              <Th>Condition</Th><Th right>n</Th><Th right>Raw</Th><Th right>Posterior</Th>
-              <Th>90% CI</Th><Th right>Lift</Th>
+              <Th>Condition</Th>
+              <Th right>n<HelpHint term="min_n" onOpen={help} /></Th>
+              <Th right>Raw<HelpHint term="raw_wr" onOpen={help} /></Th>
+              <Th right>Posterior<HelpHint term="posterior" onOpen={help} /></Th>
+              <Th>90% CI<HelpHint term="credible_interval" onOpen={help} /></Th>
+              <Th right>Lift<HelpHint term="lift" onOpen={help} /></Th>
             </tr></thead>
             <tbody>
               {data.conditions.map((c, i) => (
@@ -83,7 +90,8 @@ export default function Analysis({ account = "" }) {
       </Card>
 
       <Card>
-        <div className="px-4 py-3 border-b border-edge text-sm font-medium">Recent signals — Naive-Bayes P(win)</div>
+        <div className="px-4 py-3 border-b border-edge text-sm font-medium flex items-center">
+          Recent signals — Naive-Bayes P(win)<HelpHint term="p_win" onOpen={help} /></div>
         {!data.recent.length ? <Empty>No scored signals.</Empty> : (
           <Table>
             <thead><tr>
@@ -111,7 +119,7 @@ export default function Analysis({ account = "" }) {
 // Learned-P(win) execution gate (#64) — SHADOW / log-only: what the gate WOULD
 // skip/de-size, scored by the trades' ACTUAL realized outcomes. Go live only once
 // would_skip expectancy is clearly worse than would_allow.
-function BayesGateCard({ gate }) {
+function BayesGateCard({ gate, help }) {
   if (!gate) return null;
   const ORDER = ["skip", "desize", "allow", "observe"];
   const LABEL = { skip: "would skip", desize: "would de-size", allow: "would allow", observe: "observe-only" };
@@ -119,7 +127,7 @@ function BayesGateCard({ gate }) {
   return (
     <Card>
       <div className="px-4 py-3 border-b border-edge text-sm font-medium flex items-center gap-2 flex-wrap">
-        Learned-P(win) gate
+        Learned-P(win) gate<HelpHint term="p_win" onOpen={help} />
         <Badge tone={live ? "warn" : "muted"}>{live ? "LIVE" : "shadow · log-only"}</Badge>
         {gate.ready && <span className="text-muted font-normal">· {gate.n_scored} scored · signal-quality base {pct(gate.signal_quality_base)}</span>}
       </div>
@@ -156,7 +164,7 @@ function BayesGateCard({ gate }) {
 // Execution tax (#63): per-channel signal-quality WR (channel claims) vs
 // bot-realized WR (our P&L). A positive gap = the setup worked but our execution
 // didn't capture it — the backlog-sizing view.
-function ExecutionTaxCard({ tax }) {
+function ExecutionTaxCard({ tax, help }) {
   if (!tax || !tax.n_labelled) return null;
   const rows = tax.by_channel || [];
   const taxTone = (g) => (g > 0.05 ? "warn" : g < -0.05 ? "long" : "muted");
@@ -174,8 +182,10 @@ function ExecutionTaxCard({ tax }) {
       {!rows.length ? <Empty>No signals carry both a channel claim and a closed trade yet.</Empty> : (
         <Table minW={720}>
           <thead><tr className="border-b border-edge">
-            <Th>Channel</Th><Th right>n</Th><Th right>Signal-quality WR</Th>
-            <Th right>Bot-realized WR</Th><Th right>Execution tax</Th>
+            <Th>Channel</Th><Th right>n</Th>
+            <Th right>Signal-quality WR<HelpHint term="signal_quality_wr" onOpen={help} /></Th>
+            <Th right>Bot-realized WR<HelpHint term="bot_realized_wr" onOpen={help} /></Th>
+            <Th right>Execution tax<HelpHint term="execution_tax" onOpen={help} /></Th>
           </tr></thead>
           <tbody>
             {rows.map((r, i) => (

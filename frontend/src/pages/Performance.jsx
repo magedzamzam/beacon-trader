@@ -1,9 +1,11 @@
 import { Card, KPI, Th, Td, Badge, Empty } from "../components/ui";
 import RangeFilter, { useRange } from "../components/RangeFilter";
+import HelpHint from "../components/HelpHint";
 import { api } from "../lib/api";
 import { useData, money, tone } from "./_useData";
 
-export default function Performance({ account = "" }) {
+export default function Performance({ account = "", setView }) {
+  const help = () => setView && setView("help");   // ⓘ -> Glossary
   const range = useRange("all");           // anchored on leg CLOSE time
   const { fromIso, toIso } = range;
 
@@ -19,7 +21,7 @@ export default function Performance({ account = "" }) {
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             <KPI label="Realized P&L" value={money(sum.total_pl)} tone={tone(sum.total_pl)} />
             <KPI label="Win rate" value={`${sum.win_rate}%`} tone="beacon" sub={`${sum.wins}W / ${sum.losses}L`} />
-            <KPI label="Profit factor" value={sum.profit_factor ?? "—"} sub="gross win / loss" />
+            <KPI label={<>Profit factor<HelpHint term="profit_factor" onOpen={help} /></>} value={sum.profit_factor ?? "—"} sub="gross win / loss" />
             <KPI label="Closed legs" value={sum.closed_legs} />
           </div>
 
@@ -35,7 +37,7 @@ export default function Performance({ account = "" }) {
               <div className="overflow-x-auto">
                 <table className="w-full min-w-[640px]">
                   <thead><tr className="border-b border-edge">
-                    <Th>Source</Th><Th>Sample</Th><Th right>Win %</Th><Th right>P&L</Th>
+                    <Th>Source</Th><Th>Sample<HelpHint term="min_n" onOpen={help} /></Th><Th right>Win %<HelpHint term="raw_wr" onOpen={help} /></Th><Th right>P&L<HelpHint term="expectancy" onOpen={help} /></Th>
                     <Th right>TP1</Th><Th right>TP2</Th><Th right>TP3+</Th><Th right>SL hits</Th>
                   </tr></thead>
                   <tbody>

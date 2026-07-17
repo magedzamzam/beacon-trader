@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Table, Card, Th, Td, Badge, Empty } from "../components/ui";
 import { Toggle, Button } from "../components/form";
 import RangeFilter, { useRange } from "../components/RangeFilter";
+import HelpHint from "../components/HelpHint";
 import { api } from "../lib/api";
 
 const REGIME_TONE = { trending: "beacon", ranging: "muted", high_vol: "warn", unknown: "muted" };
@@ -11,7 +12,8 @@ const fmt = (v, d = 2) => (v == null ? "—" : Number(v).toFixed(d));
 
 /** Shadow analytics sidecar (#51/#53): signal↔channel↔regime correlation.
  *  Read-only observability — nothing here gates trading. */
-export default function Analytics() {
+export default function Analytics({ setView }) {
+  const help = () => setView && setView("help");   // ⓘ -> Glossary
   const [rep, setRep] = useState(null);
   const [struct, setStruct] = useState(null);
   const [cfg, setCfg] = useState(null);
@@ -80,8 +82,9 @@ export default function Analytics() {
           : !rep.by_channel_regime?.length ? <Empty>No labelled analytics yet — accrues as signals capture and trades close.</Empty> : (
           <Table minW={860}>
             <thead><tr className="border-b border-edge">
-              <Th>Channel</Th><Th>Regime</Th><Th right>n</Th><Th right>Win%</Th>
-              <Th right>90% CI</Th><Th right>Expectancy</Th>
+              <Th>Channel</Th><Th>Regime<HelpHint term="regime" onOpen={help} /></Th><Th right>n</Th><Th right>Win%</Th>
+              <Th right>90% CI<HelpHint term="credible_interval" onOpen={help} /></Th>
+              <Th right>Expectancy<HelpHint term="expectancy" onOpen={help} /></Th>
             </tr></thead>
             <tbody>
               {rep.by_channel_regime.map((r, i) => (

@@ -10,7 +10,7 @@ import {
   Activity, Radar, Radio, CandlestickChart, MessageSquare, GitBranch, ListChecks,
   Sigma, Brain, GitCompare, BarChart3, Building2, Rss, Coins, Plug, ShieldCheck,
   DollarSign, Clock, Sparkles, LineChart, Bell, Settings, Users, KeyRound,
-  FileCheck, Database, CreditCard,
+  FileCheck, Database, CreditCard, BookOpen,
 } from "lucide-react";
 
 import Dashboard from "../pages/Dashboard";
@@ -35,11 +35,13 @@ import AI from "../pages/AI";
 import Indicators from "../pages/Indicators";
 import Notifications from "../pages/Notifications";
 import SystemHealth from "../pages/SystemHealth";
+import Help from "../pages/Help";
 import { PLACEHOLDERS } from "../components/settings/placeholders";
 
 export const NAV = [
   { title: "Overview", items: [
     { id: "dashboard", label: "Dashboard", icon: Activity },
+    { id: "help", label: "Help & Glossary", icon: BookOpen },
   ]},
   { title: "Live Trading", items: [
     { id: "positions", label: "Positions", icon: Radar },
@@ -86,7 +88,8 @@ export const NAV = [
 ];
 
 export const PAGES = {
-  dashboard: Dashboard, positions: Positions, signals: Signals, chart: Chart,
+  dashboard: Dashboard, help: Help,
+  positions: Positions, signals: Signals, chart: Chart,
   messages: Messages, activity: Activity_, history: History,
   analytics: Analytics, analysis: Analysis, reconciliation: Reconciliation,
   performance: Performance,
