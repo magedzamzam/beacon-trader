@@ -82,8 +82,10 @@ gh project item-edit --id "$ITEM" --project-id PVT_kwHOA6ZThM4Bdjxy \
 - Gotchas: `gh project item-list` defaults to **30 items** (`--limit 300` when verifying);
   needs the `project` token scope (`gh auth refresh -s project`).
 - The project's **"Auto-add to project"** workflow is already ON, so a new issue lands on the
-  board by itself and gets a **Status**. It **cannot set Phase** (custom field) — the filing
-  agent must still set Phase.
+  board by itself — but it **only adds the item**. It does **not** set **Status** or **Phase**
+  (verified 2026-07-17): the filing agent must set **both**. Auto-add can also lag a few
+  seconds; `gh project item-add` is **idempotent** (returns the existing item), so just call it
+  rather than waiting.
 
 `user-reported.yml` is the maintainer's template — agents use **agent-detected**.
 
