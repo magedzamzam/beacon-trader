@@ -54,6 +54,48 @@ def test_two_accounts_same_source_diverge():
     assert a == SRC and b == OVR and a != b
 
 
+def test_pillar_cascade_to_any_any_base():
+    # #104: a specific row that only sets EXIT must still inherit entry/filtration
+    # from the (Any, Any) base — not silently fall back to code defaults.
+    base = strat(None, None,
+                 entry_policy={"chase_tolerance_r": 0.75, "ttl_minutes": 45},
+                 entry_filters={"trend_alignment": {"enabled": True, "require_htf_concordance": True}})
+    specific = strat(5, 6, exit_policy={"sl_rules": OVR})      # exit only
+    chain = ST.resolve_chain([base, specific], 5, 6)
+    assert [s.source_id for s in chain] == [6, None]           # most-specific first
+
+    # exit comes from the specific row...
+    assert ST.exit_sl_rules(chain)[0] == OVR
+    # ...while entry + filtration cascade down to the base
+    ep = ST.entry_policy(chain, global_planner={"chase_tolerance_r": 0.25, "beyond_tolerance": "limit"})
+    assert ep["chase_tolerance_r"] == 0.75 and ep["ttl_minutes"] == 45
+    assert ep["beyond_tolerance"] == "limit"                   # untouched code default
+    ef = ST.resolve_entry_filters(chain)
+    assert ef["trend_alignment"]["require_htf_concordance"] is True
+
+
+def test_specific_row_overrides_only_keys_it_sets():
+    base = strat(None, None, entry_policy={"chase_tolerance_r": 0.75, "ttl_minutes": 45})
+    specific = strat(5, 6, entry_policy={"ttl_minutes": 15})   # overrides ttl only
+    chain = ST.resolve_chain([base, specific], 5, 6)
+    ep = ST.entry_policy(chain, global_planner={"chase_tolerance_r": 0.25})
+    assert ep["ttl_minutes"] == 15          # specific wins
+    assert ep["chase_tolerance_r"] == 0.75  # inherited from the (Any,Any) base
+
+
+def test_htf_concordance_settable_per_account_source():
+    # #104 acceptance: concordance is per-(account, source), not just global.
+    base = strat(None, None, entry_filters={"trend_alignment": {"enabled": True, "require_htf_concordance": False}})
+    armB = strat(7, 12, entry_filters={"trend_alignment": {"enabled": True,
+                                                           "require_htf_concordance": True,
+                                                           "htf_timeframe": "1h"}})
+    a = ST.resolve_entry_filters(ST.resolve_chain([base, armB], 5, 12))   # acct 5 -> base
+    b = ST.resolve_entry_filters(ST.resolve_chain([base, armB], 7, 12))   # acct 7 -> its own
+    assert a["trend_alignment"]["require_htf_concordance"] is False
+    assert b["trend_alignment"]["require_htf_concordance"] is True
+    assert b["trend_alignment"]["htf_timeframe"] == "1h"
+
+
 def test_entry_policy_merge():
     glob = {"chase_tolerance_r": 0.25, "beyond_tolerance": "limit", "max_tp_distance_pct": 0.5}
     ep = ST.entry_policy(strat(5, 6, entry_policy={"chase_tolerance_r": 0.5, "ttl_minutes": 15}),

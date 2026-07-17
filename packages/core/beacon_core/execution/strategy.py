@@ -18,13 +18,17 @@ ENTRY_POLICY_KEYS = ("ttl_minutes", "honor_market_hint", "chase_tolerance_r",
                      "chase_tolerance_atr", "beyond_tolerance", "max_tp_distance_pct")
 
 
-def resolve_strategy(strategies, account_id, source_id):
-    """The most-specific ENABLED strategy for (account, source), or None.
+def resolve_chain(strategies, account_id, source_id) -> list:
+    """Every ENABLED strategy whose scope matches (account, source), MOST-SPECIFIC
+    FIRST: (acct,src) > (acct,*) > (*,src) > (*,*). A NULL scope column matches
+    anything; specificity = exact-account (2) + exact-source (1).
 
-    A NULL scope column matches anything; specificity = exact-account (2) +
-    exact-source (1), so (acct,src) > (acct,*) > (*,src) > (*,*). Ties can't occur
-    (each scope pair is unique)."""
-    best, best_score = None, -1
+    Pillars CASCADE down this chain (#104): a strategy that leaves a pillar unset
+    inherits it from the next-less-specific match — ultimately the (Any, Any) base
+    row — instead of jumping to a code default. That is what makes (Any, Any) a
+    real base layer and lets Strategies be the single source of truth, with no
+    hidden global settings layer underneath."""
+    scored = []
     for s in strategies or []:
         if not getattr(s, "enabled", True):
             continue
@@ -33,10 +37,26 @@ def resolve_strategy(strategies, account_id, source_id):
             continue
         if ss is not None and ss != source_id:
             continue
-        score = (2 if sa == account_id else 0) + (1 if ss == source_id else 0)
-        if score > best_score:
-            best, best_score = s, score
-    return best
+        scored.append(((2 if sa == account_id else 0) + (1 if ss == source_id else 0), s))
+    scored.sort(key=lambda x: -x[0])
+    return [s for _, s in scored]
+
+
+def resolve_strategy(strategies, account_id, source_id):
+    """The most-specific matching strategy — used for attribution (which arm a
+    trade ran under) and the config preview. Pillar resolution uses the whole
+    chain (resolve_chain), not just this row."""
+    chain = resolve_chain(strategies, account_id, source_id)
+    return chain[0] if chain else None
+
+
+def _as_chain(x) -> list:
+    """Accept a chain (list, most-specific first), a single strategy, or None."""
+    if x is None:
+        return []
+    if isinstance(x, (list, tuple)):
+        return [s for s in x if s is not None]
+    return [x]
 
 
 def _pillar(strategy, name) -> dict:
@@ -44,13 +64,14 @@ def _pillar(strategy, name) -> dict:
 
 
 # ---- Exit pillar -------------------------------------------------------------
-def exit_sl_rules(strategy, *, source_rules=None, global_default=None) -> tuple:
-    """Effective exit ladder + origin. strategy.exit_policy.sl_rules ->
+def exit_sl_rules(chain, *, source_rules=None, global_default=None) -> tuple:
+    """Effective exit ladder + origin, cascading most-specific -> (Any,Any) ->
     source.strategy.sl_rules -> global default_sl_rules -> built-in. The list is
     copied so callers can snapshot it without aliasing stored config."""
-    r = _pillar(strategy, "exit_policy").get("sl_rules")
-    if r:
-        return list(r), "strategy"
+    for s in _as_chain(chain):
+        r = _pillar(s, "exit_policy").get("sl_rules")
+        if r:
+            return list(r), "strategy"
     if source_rules:
         return list(source_rules), "source"
     if global_default:
@@ -58,35 +79,45 @@ def exit_sl_rules(strategy, *, source_rules=None, global_default=None) -> tuple:
     return list(DEFAULT_SL_RULES), "default"
 
 
-def cancel_pending_on_stop(strategy, *, source_strategy=None, default=True) -> bool:
-    ep = _pillar(strategy, "exit_policy")
-    if "cancel_pending_on_stop" in ep:
-        return bool(ep["cancel_pending_on_stop"])
+def cancel_pending_on_stop(chain, *, source_strategy=None, default=True) -> bool:
+    """First strategy in the chain that defines it wins; else legacy source; else default."""
+    for s in _as_chain(chain):
+        ep = _pillar(s, "exit_policy")
+        if "cancel_pending_on_stop" in ep:
+            return bool(ep["cancel_pending_on_stop"])
     if source_strategy and "cancel_pending_on_stop" in source_strategy:
         return bool(source_strategy["cancel_pending_on_stop"])
     return default
 
 
 # ---- Entry pillar ------------------------------------------------------------
-def entry_policy(strategy, *, global_planner=None, source_ttl=None) -> dict:
-    """Merged entry policy: global planner defaults, then a legacy source TTL, then
-    the strategy's entry_policy (only non-null keys win). Keys in ENTRY_POLICY_KEYS."""
+def entry_policy(chain, *, global_planner=None, source_ttl=None) -> dict:
+    """Merged entry policy (#104): built-in planner defaults, a legacy source TTL,
+    then every matching strategy applied LEAST- to MOST-specific — so a specific
+    row overrides only the keys it sets and inherits the rest from the (Any, Any)
+    base. Keys in ENTRY_POLICY_KEYS."""
     merged = dict(global_planner or {})
     if source_ttl is not None:
         merged["ttl_minutes"] = source_ttl
-    for k, v in _pillar(strategy, "entry_policy").items():
-        if v is not None:
-            merged[k] = v
+    for s in reversed(_as_chain(chain)):            # least-specific first
+        for k, v in _pillar(s, "entry_policy").items():
+            if v is not None:
+                merged[k] = v
     return merged
 
 
 # ---- Filtration pillar -------------------------------------------------------
-def resolve_entry_filters(strategy, *, global_filters=None) -> dict:
-    """Effective entry_filters config for this scope: the strategy's block if it
-    has one, else the global `entry_filters` setting. So trend-alignment (#48/#79)
-    and future rules can be tuned per (account, source)."""
-    ef = _pillar(strategy, "entry_filters")
-    return ef if ef else dict(global_filters or {})
+def resolve_entry_filters(chain, *, global_filters=None) -> dict:
+    """Effective entry_filters for this scope (#104): the most-specific non-empty
+    block wins wholesale (predictable — a channel's filter set is not half-merged),
+    cascading down to the (Any, Any) base. `global_filters` is only a code-level
+    floor; the legacy global `entry_filters` SETTING is no longer consulted by the
+    executor — Strategies is the single source of truth."""
+    for s in _as_chain(chain):
+        ef = getattr(s, "entry_filters", None)
+        if ef:
+            return dict(ef)
+    return dict(global_filters or {})
 
 
 def apply_filter_rules(rules, ctx) -> tuple:

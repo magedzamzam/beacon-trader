@@ -257,14 +257,16 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             log.warning("no price for %s; skipping account %s", smap.broker_epic, acct.id)
             return
 
-        # --- resolve the per-(account, source) ExecutionStrategy (#84) ---
-        # One strategy carries the three pillars (entry / filtration / exit). The
-        # most-specific enabled scope wins; a missing pillar falls back to the
-        # global/source default, so 'no strategy' == today's behaviour.
+        # --- resolve the per-(account, source) ExecutionStrategy chain (#84/#104) ---
+        # One strategy carries the three pillars (entry / filtration / exit).
+        # Pillars CASCADE most-specific -> (Any, Any) base, so Strategies is the
+        # single source of truth — the legacy global `entry_filters` / `planner`
+        # SETTINGS are no longer consulted (they were migrated into the (Any, Any)
+        # row); only the built-in code defaults sit underneath.
         _strategies = (await session.execute(select(ExecutionStrategy))).scalars().all()
-        strategy = ST.resolve_strategy(_strategies, acct.id, sig.source_id)
-        _entry_filters = ST.resolve_entry_filters(
-            strategy, global_filters=await get_setting(session, "entry_filters", {}))
+        _chain = ST.resolve_chain(_strategies, acct.id, sig.source_id)
+        strategy = _chain[0] if _chain else None          # attribution
+        _entry_filters = ST.resolve_entry_filters(_chain)
 
         # --- trend-alignment entry filter (#48/#79; filtration pillar) ---
         # Counter-trend entries (direction fighting the higher-TF trend) held ~95%
@@ -321,12 +323,12 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                               payload={"account_id": acct.id, "error": str(exc)}))
             return
 
-        # Entry-strategy pillar (#84): global planner defaults, overlaid with the
-        # per-(account,source) entry_policy (chase guard #67 + TTL). No strategy ->
-        # exactly the global `planner` setting as before.
-        _global_planner = {**DEFAULT_PLANNER, **(await get_setting(session, "planner", {}) or {})}
+        # Entry-strategy pillar (#84/#104): built-in planner defaults, then the
+        # strategy chain least->most specific (chase guard #67 + TTL). The legacy
+        # global `planner` setting is retired — its values live in the (Any, Any)
+        # strategy row, so exactly one surface decides the entry policy.
         planner_cfg = ST.entry_policy(
-            strategy, global_planner=_global_planner,
+            _chain, global_planner=DEFAULT_PLANNER,
             source_ttl=(source.strategy or {}).get("entry_ttl_minutes") if source else None)
         # Default 0.5 (50%): catches parse-artifact TPs (e.g. tp=1530 vs gold ~4180,
         # ~60% away) while never tripping a real target. Tune via the entry policy.
@@ -534,10 +536,13 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         # default -> global default. Stamp strategy_id for attribution.
         _gstrat = await get_setting(session, "strategy", {}) or {}
         _sl_rules, _origin = ST.exit_sl_rules(
-            strategy,
+            _chain,
             source_rules=(source.strategy or {}).get("sl_rules") if source else None,
             global_default=_gstrat.get("default_sl_rules"))
-        _strategy_id = strategy.id if (strategy is not None and _origin == "strategy") else None
+        # Attribute to the row that actually PROVIDED the exit rules — with the
+        # #104 pillar cascade that may be a less-specific row than chain[0].
+        _exit_row = next((s for s in _chain if (s.exit_policy or {}).get("sl_rules")), None)
+        _strategy_id = _exit_row.id if _exit_row else None
 
         trade = Trade(signal_id=sig.id, account_id=acct.id, symbol=parsed.symbol,
                       direction=parsed.direction, status="open",
@@ -547,7 +552,7 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         await session.flush()
         if _strategy_id:
             log.info("signal %s acct %s: strategy #%s (%s) applied", sig.id, acct.id,
-                     _strategy_id, strategy.label or "override")
+                     _strategy_id, _exit_row.label or "override")
 
         # Broker-enforced expiry for any working (LIMIT/STOP) leg (#40): the entry
         # TTL from the resolved entry policy (planner_cfg carries ttl_minutes from

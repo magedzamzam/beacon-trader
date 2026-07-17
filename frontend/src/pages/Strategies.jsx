@@ -21,10 +21,14 @@ const SL_PRESETS = {
   "BE at TP3 → trail": [{ trigger: tpH(3), action: mv("entry") }, { trigger: tpH(4), action: mv("previous_tp") }, { trigger: tpH(5), action: mv("previous_tp") }],
   "Tighten: +30pts → BE": [{ trigger: { type: "price_move", points: 30 }, action: mv("entry") }, { trigger: tpH(2), action: mv("previous_tp") }],
 };
+// Mirrors beacon_core.ta.registry.AVAILABLE_TIMEFRAMES (the TFs the trend read supports).
+const TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"];
 const BLANK = () => ({
   id: null, account_id: "", source_id: "", label: "", enabled: true,
   entry: { ttl_minutes: "", honor_market_hint: true, chase_tolerance_r: "", chase_tolerance_atr: "", beyond_tolerance: "limit", max_tp_distance_pct: "" },
-  trend: { enabled: false, timeframe: "4h", ema_period: 200, mode: "skip", desize_factor: 0.25, require_slope: true, min_dist_atr: 0.5 },
+  trend: { enabled: false, timeframe: "4h", ema_period: 200, mode: "skip", desize_factor: 0.25,
+           require_slope: true, slope_lookback: 10, min_dist_atr: 0.5,
+           require_htf_concordance: false, htf_timeframe: "1h" },
   rules: [],
   exit: { sl_rules: [], cancel_pending_on_stop: true },
 });
@@ -162,12 +166,22 @@ export default function Strategies() {
                 <Toggle checked={form.trend.enabled} onChange={(v) => setSub("trend", "enabled", v)} label={form.trend.enabled ? "on" : "off"} />
                 <span className="text-[11px] text-muted">counter-trend entries held ~95% of losses (#48/#79)</span></div>
               <div className={`grid grid-cols-2 lg:grid-cols-4 gap-3 ${form.trend.enabled ? "" : "opacity-60"}`}>
-                <Field label="Timeframe"><Input value={form.trend.timeframe} onChange={(e) => setSub("trend", "timeframe", e.target.value)} /></Field>
+                <Field label="Timeframe" hint="trend timeframe, e.g. 4h"><Input value={form.trend.timeframe} onChange={(e) => setSub("trend", "timeframe", e.target.value)} /></Field>
                 <Field label="EMA period"><Input type="number" value={form.trend.ema_period} onChange={(e) => setSub("trend", "ema_period", Number(e.target.value))} /></Field>
-                <Field label="Counter-trend action"><Select value={form.trend.mode} onChange={(e) => setSub("trend", "mode", e.target.value)}><option value="skip">skip</option><option value="desize">desize</option></Select></Field>
-                <Field label="De-size factor"><Input type="number" step="0.05" value={form.trend.desize_factor} onChange={(e) => setSub("trend", "desize_factor", Number(e.target.value))} /></Field>
-                <Field label="Min distance (ATR)" hint="#79 confirmation"><Input type="number" step="0.1" value={form.trend.min_dist_atr} onChange={(e) => setSub("trend", "min_dist_atr", Number(e.target.value))} /></Field>
-                <Field label="Require EMA slope (#79)"><Toggle checked={form.trend.require_slope} onChange={(v) => setSub("trend", "require_slope", v)} /></Field>
+                <Field label="Counter-trend action" hint="skip = reject · desize = trade smaller"><Select value={form.trend.mode} onChange={(e) => setSub("trend", "mode", e.target.value)}><option value="skip">skip</option><option value="desize">desize</option></Select></Field>
+                <Field label="De-size factor" hint="counter-trend size × this (desize mode)"><Input type="number" step="0.05" value={form.trend.desize_factor} onChange={(e) => setSub("trend", "desize_factor", Number(e.target.value))} /></Field>
+                <Field label="Min distance (ATR)" hint="#79 · price must be ≥ this many ATR beyond the EMA (skip the chop band)"><Input type="number" step="0.1" value={form.trend.min_dist_atr} onChange={(e) => setSub("trend", "min_dist_atr", Number(e.target.value))} /></Field>
+                <Field label="Slope lookback (bars)" hint="#79 · bars back used to measure the EMA slope"><Input type="number" value={form.trend.slope_lookback ?? 10} onChange={(e) => setSub("trend", "slope_lookback", Number(e.target.value))} /></Field>
+                <Field label="HTF concordance TF" hint="#79 · the timeframe that must agree when concordance is on">
+                  <Select value={form.trend.htf_timeframe ?? "1h"} onChange={(e) => setSub("trend", "htf_timeframe", e.target.value)}>
+                    {TIMEFRAMES.map((t) => <option key={t} value={t}>{t}</option>)}
+                  </Select></Field>
+              </div>
+              <div className={`flex flex-wrap gap-x-8 gap-y-2 ${form.trend.enabled ? "" : "opacity-60"}`}>
+                <label className="flex items-center gap-2 text-xs text-muted">Require EMA slope (#79)
+                  <Toggle checked={form.trend.require_slope} onChange={(v) => setSub("trend", "require_slope", v)} /></label>
+                <label className="flex items-center gap-2 text-xs text-muted">Require HTF concordance (#79)
+                  <Toggle checked={form.trend.require_htf_concordance ?? false} onChange={(v) => setSub("trend", "require_htf_concordance", v)} /></label>
               </div>
             </div>
             <div className="rounded-lg border border-edge p-3 space-y-2">

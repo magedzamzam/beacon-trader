@@ -93,19 +93,19 @@ async def _rules_for(session, trade) -> tuple[list, dict, int]:
 
     # Resolve the ExecutionStrategy for this trade's (account, source) scope — only
     # the ≤4 rows whose scope could match (#84).
-    strategy = None
+    chain = []
     if sig and sig.source_id is not None:
         rows = (await session.execute(select(ExecutionStrategy).where(
             or_(ExecutionStrategy.account_id.is_(None),
                 ExecutionStrategy.account_id == trade.account_id),
             or_(ExecutionStrategy.source_id.is_(None),
                 ExecutionStrategy.source_id == sig.source_id)))).scalars().all()
-        strategy = ST.resolve_strategy(rows, trade.account_id, sig.source_id)
+        chain = ST.resolve_chain(rows, trade.account_id, sig.source_id)
 
     # cancel_pending_on_stop is part of the exit pillar (live-resolved; a boolean op
-    # flag, no need to freeze it): strategy.exit_policy -> source -> default True.
+    # flag, no need to freeze it): cascades most-specific -> (Any,Any) -> default.
     strat["cancel_pending_on_stop"] = ST.cancel_pending_on_stop(
-        strategy, source_strategy=strat, default=True)
+        chain, source_strategy=strat, default=True)
 
     # Manage each trade by the exit-rules SNAPSHOT stamped at entry — this is what
     # makes the per-account A/B point-in-time (arm frozen at entry, immune to later
@@ -114,7 +114,7 @@ async def _rules_for(session, trade) -> tuple[list, dict, int]:
     if getattr(trade, "sl_rules", None):
         return trade.sl_rules, strat, effective_entry_ttl_min(strat)
     gcfg = await get_setting(session, "strategy", {}) or {}
-    rules, _origin = ST.exit_sl_rules(strategy, source_rules=strat.get("sl_rules"),
+    rules, _origin = ST.exit_sl_rules(chain, source_rules=strat.get("sl_rules"),
                                       global_default=gcfg.get("default_sl_rules"))
     return rules, strat, effective_entry_ttl_min(strat)
 

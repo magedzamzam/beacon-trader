@@ -30,8 +30,6 @@ export default function Risk() {
     <div className="space-y-6">
       <ErrorNote>{err}</ErrorNote>
       <RiskLimitsCard />
-      <EntryGuardCard />
-      <TrendFilterCard />
       <AccountSourceRiskCard accounts={accounts} sources={sources} />
       <Card>
         <div className="px-4 py-3 border-b border-edge text-sm font-medium">Account limits</div>
@@ -134,124 +132,6 @@ function RiskLimitsCard() {
 
 // Entry chase guard (#67) — a MARKET-hint signal only fills at market when price
 // is near the signalled entry; beyond the tolerance it rests a LIMIT (or skips).
-function EntryGuardCard() {
-  const [cfg, setCfg] = useState(null);
-  const [saved, setSaved] = useState(false);
-  const [err, setErr] = useState(null);
-  useEffect(() => { api.plannerConfig().then(setCfg).catch(e => setErr(e.message)); }, []);
-  if (!cfg) return null;
-  const set = (k, v) => { setCfg(c => ({ ...c, [k]: v })); setSaved(false); };
-  const num = (k, v) => set(k, v === "" ? "" : Number(v));
-  const save = async () => {
-    try { setCfg(await api.savePlannerConfig(cfg)); setSaved(true); } catch (e) { setErr(e.message); }
-  };
-  return (
-    <Card>
-      <div className="px-4 py-3 border-b border-edge flex items-center justify-between">
-        <div className="text-sm font-medium">Entry chase guard</div>
-        {saved && <span className="text-xs text-long">Saved</span>}
-      </div>
-      <div className="p-4 space-y-4">
-        <ErrorNote>{err}</ErrorNote>
-        <p className="text-[11px] text-muted">
-          A "BUY/SELL now" (MARKET-hint) signal fills at market <b>only</b> when price is within the chase
-          tolerance of the signalled entry. Beyond it, the entry rests as a LIMIT at the level (never chases a
-          price it hasn't reached). Tolerance = the larger of <b>× stop-distance</b> and <b>× ATR</b>.
-        </p>
-        <div className="flex flex-wrap gap-x-8 gap-y-3">
-          <label className="flex items-center gap-2 text-sm">Honor "enter now" (market hint)
-            <Toggle checked={!!cfg.honor_market_hint} onChange={v => set("honor_market_hint", v)} /></label>
-        </div>
-        <div className={`grid grid-cols-1 sm:grid-cols-2 gap-3 ${cfg.honor_market_hint ? "" : "opacity-60"}`}>
-          <Field label="Chase tolerance (× |entry − SL|)" hint="0.25 = allow chasing up to a quarter of the stop distance">
-            <Input type="number" step="0.05" value={cfg.chase_tolerance_r}
-              onChange={e => num("chase_tolerance_r", e.target.value)} /></Field>
-          <Field label="Chase tolerance (× ATR)" hint="0 = disabled; larger of the two wins">
-            <Input type="number" step="0.05" value={cfg.chase_tolerance_atr}
-              onChange={e => num("chase_tolerance_atr", e.target.value)} /></Field>
-          <Field label="Beyond tolerance" hint="what to do when the entry is too far to fill at market">
-            <select value={cfg.beyond_tolerance} onChange={e => set("beyond_tolerance", e.target.value)}
-              className="bg-panel2 border border-edge rounded-lg px-2.5 py-1.5 text-sm w-full outline-none focus:border-beacon">
-              <option value="limit">rest a LIMIT at the entry</option>
-              <option value="skip">skip the entry</option>
-            </select></Field>
-          <Field label="Max TP distance (× entry)" hint="drop parse-artifact TPs this far from entry (0.5 = 50%)">
-            <Input type="number" step="0.05" value={cfg.max_tp_distance_pct}
-              onChange={e => num("max_tp_distance_pct", e.target.value)} /></Field>
-        </div>
-        <div className="flex justify-end"><Button onClick={save}>Save entry guard</Button></div>
-      </div>
-    </Card>
-  );
-}
-
-function TrendFilterCard() {
-  const [cfg, setCfg] = useState(null);
-  const [saved, setSaved] = useState(false);
-  const [err, setErr] = useState(null);
-  useEffect(() => { api.entryFilters().then(r => setCfg(r.trend_alignment)).catch(e => setErr(e.message)); }, []);
-  if (!cfg) return null;
-  const set = (k, v) => { setCfg(c => ({ ...c, [k]: v })); setSaved(false); };
-  const save = async () => {
-    try { const r = await api.saveEntryFilters({ trend_alignment: cfg }); setCfg(r.trend_alignment); setSaved(true); }
-    catch (e) { setErr(e.message); }
-  };
-  return (
-    <Card>
-      <div className="px-4 py-3 border-b border-edge flex items-center justify-between">
-        <div className="text-sm font-medium">Trend-alignment entry filter</div>
-        <div className="flex items-center gap-2">
-          <Badge tone={cfg.enabled ? "beacon" : "muted"}>{cfg.enabled ? `on · ${cfg.mode}` : "off"}</Badge>
-          {saved && <span className="text-xs text-long">Saved</span>}
-        </div>
-      </div>
-      <div className="p-4 space-y-4">
-        <ErrorNote>{err}</ErrorNote>
-        <p className="text-[11px] text-muted">
-          Skips or de-sizes signals whose direction fights the higher-timeframe trend
-          ({cfg.timeframe} EMA{cfg.ema_period}). Counter-trend entries held ~95% of the
-          book's realized loss. Off by default — validated over a single bearish window,
-          so A/B it and re-verify when the trend flips (fail-open on missing data).
-          <b> Confirmation (#79):</b> an "aligned" read must also pass the EMA-slope and
-          ATR-distance checks below, so a lagging EMA can't green-light the wrong side at
-          a regime turn. Re-backtest with confirmation on before enabling.
-        </p>
-        <div className="flex flex-wrap gap-x-8 gap-y-3">
-          <label className="flex items-center gap-2 text-sm">Enable filter
-            <Toggle checked={!!cfg.enabled} onChange={v => set("enabled", v)} /></label>
-        </div>
-        <div className={`grid grid-cols-1 sm:grid-cols-2 gap-3 ${cfg.enabled ? "" : "opacity-60"}`}>
-          <Field label="Trend timeframe" hint="e.g. 4h, 1d">
-            <Input value={cfg.timeframe} onChange={e => set("timeframe", e.target.value)} /></Field>
-          <Field label="EMA period">
-            <Input type="number" value={cfg.ema_period} onChange={e => set("ema_period", Number(e.target.value))} /></Field>
-          <Field label="Counter-trend action" hint="skip = reject · desize = trade smaller">
-            <select value={cfg.mode} onChange={e => set("mode", e.target.value)}
-              className="bg-panel2 border border-edge rounded-lg px-2.5 py-1.5 text-sm w-full outline-none focus:border-beacon">
-              <option value="skip">skip</option>
-              <option value="desize">desize</option>
-            </select></Field>
-          <Field label="De-size factor" hint="counter-trend size × this (desize mode)">
-            <Input type="number" step="0.05" min="0" max="1" value={cfg.desize_factor}
-              onChange={e => set("desize_factor", Number(e.target.value))} /></Field>
-          <Field label="Min distance (ATR)" hint="#79 · price must be ≥ this many ATR beyond the EMA (skip the chop band)">
-            <Input type="number" step="0.1" min="0" value={cfg.min_dist_atr ?? 0.5}
-              onChange={e => set("min_dist_atr", Number(e.target.value))} /></Field>
-          <Field label="HTF concordance TF" hint="#79 · timeframe that must agree when concordance is on">
-            <Input value={cfg.htf_timeframe ?? "1h"} onChange={e => set("htf_timeframe", e.target.value)} /></Field>
-        </div>
-        <div className={`flex flex-wrap gap-x-8 gap-y-2 ${cfg.enabled ? "" : "opacity-60"}`}>
-          <label className="flex items-center gap-2 text-xs text-muted">Require EMA slope (#79)
-            <Toggle checked={cfg.require_slope ?? true} onChange={v => set("require_slope", v)} /></label>
-          <label className="flex items-center gap-2 text-xs text-muted">Require HTF concordance
-            <Toggle checked={cfg.require_htf_concordance ?? false} onChange={v => set("require_htf_concordance", v)} /></label>
-        </div>
-        <div className="flex justify-end"><Button onClick={save}>Save entry filter</Button></div>
-      </div>
-    </Card>
-  );
-}
-
 function RiskModal({ account, onClose, onSaved }) {
   const [risk, setRisk] = useState(account.risk_config || { basis: "capital_percent", value: "1.0", allocation: "even" });
   const [err, setErr] = useState(null);

@@ -122,10 +122,7 @@ export const api = {
   riskLimits: () => req("/risk-limits/config"),
   saveRiskLimits: (c) => req("/risk-limits/config", { method: "PUT", body: JSON.stringify(c) }),
   riskStatus: (accountId = "") => req(`/risk-limits/status${accountId ? `?account_id=${accountId}` : ""}`),
-  plannerConfig: () => req("/planner/config"),
-  savePlannerConfig: (c) => req("/planner/config", { method: "PUT", body: JSON.stringify(c) }),
-  entryFilters: () => req("/entry-filters/config"),
-  saveEntryFilters: (c) => req("/entry-filters/config", { method: "PUT", body: JSON.stringify(c) }),
+  // (entry filter + chase guard moved to /strategies — Entry / Filtration pillars, #104)
   analyticsConfig: () => req("/analytics/config"),
   saveAnalyticsConfig: (c) => req("/analytics/config", { method: "PUT", body: JSON.stringify(c) }),
   analyticsCorrelation: (range = {}) => req(`/analytics/correlation${_perfQs("", range)}`),

@@ -18,9 +18,7 @@ from beacon_core.db.base import Session, init_models
 from beacon_core.db.models import Account, Broker, Source, SymbolMap
 from beacon_core.execution.guard import DEFAULT_RISK_LIMITS
 from beacon_core.strategy.rules import DEFAULT_SL_RULES
-from beacon_core.execution.trend_filter import DEFAULT_TREND_FILTER
 from beacon_core.execution.bayes_gate import DEFAULT_BAYES_GATE
-from beacon_core.execution.planner import DEFAULT_PLANNER
 from beacon_core.analysis.sidecar import DEFAULT_ANALYTICS
 from beacon_core.analysis.structure import DEFAULT_STRUCTURE
 from beacon_core.settings_store import get_setting, set_setting
@@ -101,16 +99,11 @@ async def main():
         strat_cfg.setdefault("default_sl_rules", DEFAULT_SL_RULES)
         await set_setting(s, "strategy", strat_cfg)
 
-        # Trend-alignment entry filter (#48) — ENABLED as the #72 rollout on demo:
-        # counter-trend entries held 93% of the ledger loss (2026-07-13, n=135)
-        # while aligned entries were ~breakeven, and 07-13 confirmed it prospectively.
-        # setdefault so re-seeding never clobbers an operator who later tunes or
-        # disables it — fully reversible from the Risk page (PUT /entry-filters).
-        # The library DEFAULT stays off (opt-in A/B contract); this is the
-        # deployment's initial rollout value, not a standing directional bias.
-        ef_cfg = dict(await get_setting(s, "entry_filters", {}) or {})
-        ef_cfg.setdefault("trend_alignment", {**DEFAULT_TREND_FILTER, "enabled": True})
-        await set_setting(s, "entry_filters", ef_cfg)
+        # NOTE (#104): the trend-alignment filter (#48/#79) and the entry chase
+        # guard (#67) are NO LONGER seeded as global `entry_filters` / `planner`
+        # settings — the executor doesn't read those any more. They live in the
+        # (Any, Any) ExecutionStrategy base row (Strategies -> Entry / Filtration),
+        # which the API migrates/creates on startup. One surface, no hidden base.
 
         # Learned-P(win) execution gate (#64) — seeded SHADOW (enabled:false,
         # mode:log_only). It computes what it WOULD skip/de-size and the
@@ -120,14 +113,6 @@ async def main():
         for k, v in DEFAULT_BAYES_GATE.items():
             bg_cfg.setdefault(k, v)
         await set_setting(s, "bayes_gate", bg_cfg)
-
-        # Entry/planner config (#67) — the market-on-receipt chase guard etc.
-        # Seeded so it's visible/editable from the Risk page; safe defaults apply
-        # even if unset (a MARKET-hint entry never chases beyond the tolerance).
-        pl_cfg = dict(await get_setting(s, "planner", {}) or {})
-        for k, v in DEFAULT_PLANNER.items():
-            pl_cfg.setdefault(k, v)
-        await set_setting(s, "planner", pl_cfg)
 
         # Shadow analytics sidecar (#51/#52) — pure observability, off the hot
         # path, on by default. Set analytics.enabled=false to disable entirely.

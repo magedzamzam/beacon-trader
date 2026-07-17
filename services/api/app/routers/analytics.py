@@ -12,7 +12,8 @@ from beacon_core.analysis.report import (channel_regime_report,
 from beacon_core.analysis.sidecar import load_config
 from beacon_core.analysis import structure_map as struct_map
 from beacon_core.analysis.structure import DEFAULT_STRUCTURE
-from beacon_core.db.models import SignalAnalytics
+from beacon_core.db.models import ExecutionStrategy, SignalAnalytics
+from beacon_core.execution import strategy as ST
 from beacon_core.execution.trend_filter import trend_filter_cfg
 from beacon_core.settings_store import get_setting, set_setting
 from beacon_core.timeutil import parse_iso_utc
@@ -68,8 +69,13 @@ async def trend_alignment(date_from: str = None, date_to: str = None,
     """Aligned-vs-counter split as a first-class metric (#72): win-rate, net PnL
     and expectancy for trend-aligned vs counter-trend entries, overall and per
     channel, with credible intervals. Classified from persisted signal_features
-    using the SAME timeframe/EMA the live #48 filter gates on. Shadow only."""
-    cfg = trend_filter_cfg(await get_setting(db, "entry_filters", {}))
+    using the SAME timeframe/EMA the live #48 filter gates on. Shadow only.
+
+    Reads the trend config from the (Any, Any) strategy base — Strategies is the
+    single source of truth since #104, so this report can't drift from the filter."""
+    rows = (await db.execute(select(ExecutionStrategy))).scalars().all()
+    base = ST.resolve_chain(rows, None, None)             # the (Any, Any) base row
+    cfg = trend_filter_cfg(ST.resolve_entry_filters(base))
     return await trend_alignment_outcome_report(
         db, parse_iso_utc(date_from), parse_iso_utc(date_to),
         timeframe=cfg["timeframe"], ema_period=int(cfg["ema_period"]))
