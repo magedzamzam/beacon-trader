@@ -111,6 +111,13 @@ class Trade(Base):
     # to source/global default). Both NULL on pre-#83 trades -> monitor resolves live.
     strategy_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     sl_rules: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Correlation-cluster tag (#106): concurrent same-symbol/same-direction trades
+    # share a cluster_id so aggregate exposure can be budgeted and P&L analysed
+    # per-cluster as well as per-channel. cluster_alloc records what the cluster
+    # budgeter computed/applied (shadow vs enforced). Both NULL until the feature
+    # is enabled (needs the ALTER — new columns don't auto-appear, CLAUDE.md §6).
+    cluster_id: Mapped[str | None] = mapped_column(String(48), nullable=True, index=True)
+    cluster_alloc: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
     signal: Mapped["Signal"] = relationship(back_populates="trades")
     legs: Mapped[list["Leg"]] = relationship(back_populates="trade")

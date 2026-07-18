@@ -36,6 +36,7 @@ from beacon_core.execution.guard import (should_auto_execute, risk_limit_reason,
 from beacon_core.execution.trend_filter import trend_filter_cfg, decide as trend_decide
 from beacon_core.risk.sizing import (RiskConfig, InstrumentSpec, size_legs,
                                       plan_total_risk, cap_total_risk, resolve_risk_config)
+from beacon_core.risk import cluster as CL
 from beacon_core.ta import capture as ta_capture
 from beacon_core.trading_hours import service as th_service
 from beacon_core.ta.registry import TF_RESOLUTION
@@ -458,6 +459,84 @@ async def _execute_on_account(session, sig, parsed, source, acct,
 
         planned_risk = plan_total_risk(plan.legs)   # worst-case loss, account ccy
 
+        # --- correlation-cluster risk budgeting (#106) — SHADOW-FIRST ---
+        # Concurrent same-symbol/same-direction signals are usually the same market
+        # view bet N times, so full-risk-each is N× concentration. Share ONE budget
+        # across the cluster and de-size the arrival to fit (don't block — the
+        # operator wants to keep trading, just not inflate risk linearly). Feature is
+        # OFF unless the `risk_limits.cluster_risk` block is present; with enabled:false
+        # it only COMPUTES + LOGS + TAGS (shadow), and only enabled:true changes lots.
+        cluster_id = None
+        cluster_alloc_rec = None
+        _cluster_cfg = CL.merge_config((rl_cfg or {}).get("cluster_risk"))
+        if _cluster_cfg:
+            _since = utcnow() - timedelta(
+                minutes=int(_cluster_cfg.get("window_minutes", 30) or 30))
+            _open_rows = (await session.execute(select(
+                Trade.direction, Trade.planned_risk, Trade.cluster_id, Trade.created_at
+            ).where(Trade.account_id == acct.id, Trade.symbol == parsed.symbol,
+                    Trade.status.in_(("open", "partial")),
+                    Trade.created_at >= _since))).all()
+            _same = [r for r in _open_rows if r.direction == parsed.direction]
+            _opp = [r for r in _open_rows if r.direction != parsed.direction]
+            # Inherit the earliest same-direction member's cluster_id, else start one.
+            _cids = [r.cluster_id for r in sorted(_same, key=lambda r: r.created_at)
+                     if r.cluster_id]
+            cluster_id = _cids[0] if _cids else f"{parsed.symbol}:{parsed.direction}:{sig.id}"
+            _budget = CL.resolve_budget(_cluster_cfg, rl_cfg.get("max_open_risk_per_symbol"))
+            cluster_alloc_rec = CL.allocate(
+                planned_risk,
+                [CL.ClusterMember(planned_risk=Decimal(str(r.planned_risk or 0)))
+                 for r in _same],
+                budget=_budget, mode=_cluster_cfg.get("allocation", "equal"),
+                decay=_cluster_cfg.get("decay", 0.5))
+            cluster_alloc_rec["cluster_id"] = cluster_id
+            cluster_alloc_rec["enforced"] = bool(_cluster_cfg.get("enabled"))
+            _mixed = CL.mixed_exposure(
+                parsed.direction, [r.planned_risk or 0 for r in _same],
+                [r.planned_risk or 0 for r in _opp])
+            if _mixed:
+                cluster_alloc_rec["mixed"] = _mixed
+            _scale = Decimal(cluster_alloc_rec["scale"])
+            if _cluster_cfg.get("enabled") and _scale < 1:
+                # ENFORCE: de-size the arrival to the shared budget (fit, don't block).
+                _target = Decimal(cluster_alloc_rec["target_risk"])
+                if _target <= 0:
+                    for _l in plan.legs:
+                        if _l.valid:
+                            _l.valid = False
+                            _l.skip_reason = "cluster budget exhausted"
+                else:
+                    cap_total_risk(plan.legs, cap=_target, instrument=instrument,
+                                   fx_factor=fx_factor)
+                planned_risk = plan_total_risk(plan.legs)
+                cluster_alloc_rec["applied_risk"] = str(planned_risk)
+                valid = plan.valid_legs
+                if not valid:
+                    session.add(Event(kind="cluster_desized", payload={
+                        "signal_id": sig.id, "account_id": acct.id,
+                        "cluster_id": cluster_id, "alloc": cluster_alloc_rec,
+                        "result": "rejected_below_min_lot"}))
+                    await session.commit()
+                    log.warning("signal %s acct %s: cluster budget exhausted — no legs "
+                                "above min_lot (cluster %s)", sig.id, acct.id, cluster_id)
+                    return
+                session.add(Event(kind="cluster_desized", payload={
+                    "signal_id": sig.id, "account_id": acct.id,
+                    "cluster_id": cluster_id, "alloc": cluster_alloc_rec}))
+                log.warning("signal %s acct %s: cluster de-size x%s -> risk %s "
+                            "(cluster %s, N=%s)", sig.id, acct.id, _scale, planned_risk,
+                            cluster_id, cluster_alloc_rec["cluster_size"])
+            else:
+                # SHADOW: record what we WOULD do; lots unchanged (measure-before-gate).
+                session.add(Event(kind="cluster_shadow", payload={
+                    "signal_id": sig.id, "account_id": acct.id,
+                    "cluster_id": cluster_id, "alloc": cluster_alloc_rec}))
+                if _scale < 1:
+                    log.info("signal %s acct %s: cluster SHADOW would de-size x%s "
+                             "(cluster %s, N=%s)", sig.id, acct.id, _scale, cluster_id,
+                             cluster_alloc_rec["cluster_size"])
+
         # --- Risk-limit enforcement (independent of the AI gate) ---
         # risk_limit_reason() self-gates on cfg (#65): a present row with
         # enabled:false blocks nothing except the explicit kill-switch; a MISSING
@@ -547,7 +626,8 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         trade = Trade(signal_id=sig.id, account_id=acct.id, symbol=parsed.symbol,
                       direction=parsed.direction, status="open",
                       planned_risk=planned_risk,
-                      sl_rules=_sl_rules, strategy_id=_strategy_id)
+                      sl_rules=_sl_rules, strategy_id=_strategy_id,
+                      cluster_id=cluster_id, cluster_alloc=cluster_alloc_rec)
         session.add(trade)
         await session.flush()
         if _strategy_id:
