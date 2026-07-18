@@ -154,13 +154,29 @@ def _tf_features(ctx):
     return {}
 
 
+def _tf_num(tf, prefix, inner):
+    """Read a numeric indicator output by PREFIX match (#111). Persisted feature
+    keys embed their params (e.g. "adx_14", "atr_14") via ta.registry.instance_key,
+    the same convention as fvg_*/order_block_* (#59). Match the block whose key is
+    `prefix` or `prefix_*`, then read `inner`. Also accepts the bare (unsuffixed)
+    key so legacy/synthetic feature blocks keep resolving."""
+    if not isinstance(tf, dict):
+        return None
+    for key, block in tf.items():
+        if key == prefix or key.startswith(prefix + "_"):
+            v = _num(block, inner)
+            if v is not None:
+                return v
+    return None
+
+
 
 
 # ============================ ctx estimators ==================================
 def regime(ctx) -> Optional[dict]:
     tf = _tf_features(ctx)
-    adx = _num(tf, "adx", "adx")
-    atr_pct = _num(tf, "atr", "pct")
+    adx = _tf_num(tf, "adx", "adx")
+    atr_pct = _tf_num(tf, "atr", "pct")
     rvol = realized_vol(ctx.closes)
     hurst = hurst_rs(ctx.closes)
     return {"label": classify_regime(adx, atr_pct, rvol, hurst),

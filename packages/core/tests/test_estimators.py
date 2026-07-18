@@ -71,6 +71,44 @@ def test_ctx_estimators_degrade_gracefully_on_missing_data():
     assert E.vwap_deviation(ctx) is None
 
 
+def test_regime_reads_param_suffixed_feature_keys():
+    # Persisted blocks use param-suffixed keys (adx_14/atr_14), not bare adx/atr
+    # (#111). The estimator must surface real adx/atr_pct via prefix match.
+    feats = {"1h": {"adx_14": {"adx": 30.0, "trending": True},
+                    "atr_14": {"value": 12.2, "pct": 0.29}}}
+    r = E.regime(_Ctx([], feats))          # empty window -> no rvol/hurst noise
+    assert r["adx"] == 30.0
+    assert r["atr_pct"] == 0.29
+    assert r["label"] == "trending"        # ADX 30 >= 25
+
+
+def test_regime_yields_more_than_one_label_across_mixed_inputs():
+    # A range signal (low ADX, no window so hurst/rvol are None) must NOT collapse
+    # to "trending" the way the pre-#111 dead-key path did.
+    ranging = E.regime(_Ctx([], {"1h": {"adx_14": {"adx": 12.0},
+                                        "atr_14": {"pct": 0.15}}}))
+    trending = E.regime(_Ctx([], {"1h": {"adx_14": {"adx": 34.0},
+                                         "atr_14": {"pct": 0.21}}}))
+    assert ranging["label"] == "ranging"
+    assert trending["label"] == "trending"
+    assert len({ranging["label"], trending["label"]}) > 1
+
+
+def test_regime_backward_compatible_with_bare_keys():
+    # bare (unsuffixed) keys still resolve, so older synthetic blocks keep working
+    r = E.regime(_Ctx([], {"1h": {"adx": {"adx": 40.0}, "atr": {"pct": 0.3}}}))
+    assert r["adx"] == 40.0 and r["atr_pct"] == 0.3
+
+
+def test_regime_adx_feeds_knn_vector():
+    # #111 latent path: once regime() writes real adx/atr_pct, the k-NN feature
+    # vector picks them up (previously two dead dimensions).
+    r = E.regime(_Ctx([], {"1h": {"adx_14": {"adx": 27.0}, "atr_14": {"pct": 0.4}}}))
+    vec = E._feature_vector({"regime": r})
+    assert vec is not None
+    assert vec[0] == 27.0 and vec[1] == 0.4
+
+
 if __name__ == "__main__":
     for n, f in sorted(globals().items()):
         if n.startswith("test_") and callable(f):
