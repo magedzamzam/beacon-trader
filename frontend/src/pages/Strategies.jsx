@@ -21,6 +21,7 @@ const SL_PRESETS = {
   "BE at TP2 → trail": [{ trigger: tpH(2), action: mv("entry") }, { trigger: tpH(3), action: mv("previous_tp") }, { trigger: tpH(4), action: mv("previous_tp") }],
   "BE at TP3 → trail": [{ trigger: tpH(3), action: mv("entry") }, { trigger: tpH(4), action: mv("previous_tp") }, { trigger: tpH(5), action: mv("previous_tp") }],
   "Tighten: +30pts → BE": [{ trigger: { type: "price_move", points: 30 }, action: mv("entry") }, { trigger: tpH(2), action: mv("previous_tp") }],
+  "Early BE @ 0.6R (hold)": [{ trigger: { type: "be_lock_at_r", r: 0.6 }, action: mv("entry") }],   // #109
 };
 // Mirrors beacon_core.ta.registry.AVAILABLE_TIMEFRAMES (the TFs the trend read supports).
 const TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"];

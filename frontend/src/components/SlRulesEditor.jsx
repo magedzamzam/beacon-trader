@@ -1,7 +1,14 @@
 import { Plus, Trash2 } from "lucide-react";
 import { Select, NumberInput, Button } from "./form";
 
-/* rule: {trigger:{type,index|points}, action:{type:'move_sl_to', target, index?, value?}} */
+// Trigger shapes must mirror beacon_core.strategy.rules._triggered.
+const NEW_TRIGGER = {
+  tp_hit: (t = {}) => ({ type: "tp_hit", index: t.index || 1 }),
+  price_move: (t = {}) => ({ type: "price_move", points: t.points || 3 }),
+  be_lock_at_r: (t = {}) => ({ type: "be_lock_at_r", r: t.r ?? 0.6 }),   // #109
+};
+
+/* rule: {trigger:{type,index|points|r}, action:{type:'move_sl_to', target, index?, value?}} */
 export default function SlRulesEditor({ rules, onChange }) {
   const list = rules || [];
   const update = (i, r) => onChange(list.map((x, j) => (j === i ? r : x)));
@@ -21,18 +28,23 @@ export default function SlRulesEditor({ rules, onChange }) {
         return (
           <div key={i} className="flex flex-wrap items-center gap-2 border border-edge rounded-xl p-2.5 bg-panel2">
             <span className="text-xs text-muted">When</span>
-            <Select value={trig.type} onChange={e => setTrig(
-              e.target.value === "tp_hit" ? { type: "tp_hit", index: trig.index || 1 }
-                                          : { type: "price_move", points: trig.points || 3 })}>
+            <Select value={trig.type}
+              onChange={e => setTrig((NEW_TRIGGER[e.target.value] || NEW_TRIGGER.tp_hit)(trig))}>
               <option value="tp_hit">TP hit</option>
               <option value="price_move">price moves (pts)</option>
+              <option value="be_lock_at_r">profit reaches (× R)</option>
             </Select>
-            {trig.type === "tp_hit" ? (
+            {trig.type === "tp_hit" && (
               <div className="w-16"><NumberInput value={trig.index ?? 1}
                 onChange={e => setTrig({ ...trig, index: +e.target.value })} /></div>
-            ) : (
+            )}
+            {trig.type === "price_move" && (
               <div className="w-20"><NumberInput value={trig.points ?? 3}
                 onChange={e => setTrig({ ...trig, points: +e.target.value })} /></div>
+            )}
+            {trig.type === "be_lock_at_r" && (
+              <div className="w-20"><NumberInput step="0.05" value={trig.r ?? 0.6}
+                onChange={e => setTrig({ ...trig, r: +e.target.value })} /></div>
             )}
             <span className="text-xs text-muted">→ move SL to</span>
             <Select value={act.target} onChange={e => {
@@ -60,7 +72,9 @@ export default function SlRulesEditor({ rules, onChange }) {
       })}
       <Button variant="ghost" onClick={add}><Plus className="w-4 h-4 inline -mt-0.5" /> Add rule</Button>
       <div className="text-[11px] text-muted">
-        Chain them: TP1 hit → entry, TP2 hit → previous TP (TP1), TP3 hit → previous TP (TP2). The engine only ever tightens.
+        Chain them: TP1 hit → entry, TP2 hit → previous TP (TP1)… The engine only ever tightens.
+        <b> × R</b> = move once profit reaches that multiple of the initial risk (|entry − SL|), so it
+        self-adapts to each signal's stop — e.g. <i>profit reaches 0.6 × R → entry</i> for an early break-even.
       </div>
     </div>
   );
