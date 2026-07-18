@@ -5,6 +5,11 @@ engine applies the one that tightens the stop the most.
 Triggers:
   {"type": "tp_hit", "index": 1}
   {"type": "price_move", "points": 3}
+  {"type": "be_lock_at_r", "r": 0.6}   -> fires once the favorable excursion reaches
+                                          r x R, where R = |entry - initial_sl| (the
+                                          stop distance at OPEN). Self-adapts to each
+                                          signal's own risk, so one rule works across
+                                          channels whose stop distances vary ~3x (#109).
 
 Actions (move_sl_to):
   {"target": "entry"}
@@ -41,6 +46,10 @@ class PositionCtx:
     current_sl: Optional[Decimal]
     current_price: Decimal
     tps: Dict[int, Decimal] = field(default_factory=dict)   # {1: price, 2: price, ...}
+    # The stop distance at position OPEN is the R denominator for be_lock_at_r.
+    # It must be the IMMUTABLE original stop — current_sl is unusable because it is
+    # mutated as the stop trails. Optional so the trigger fails open when unknown.
+    initial_sl: Optional[Decimal] = None   # #109
 
 
 def _triggered(trigger: dict, ctx: PositionCtx, tps_hit: Set[int]) -> bool:
@@ -52,6 +61,16 @@ def _triggered(trigger: dict, ctx: PositionCtx, tps_hit: Set[int]) -> bool:
         if ctx.side == "BUY":
             return (ctx.current_price - ctx.entry) >= pts
         return (ctx.entry - ctx.current_price) >= pts
+    if t == "be_lock_at_r":                       # R-relative favorable excursion (#109)
+        if ctx.initial_sl is None:
+            return False                          # fail-open: no R denominator known
+        R = abs(ctx.entry - ctx.initial_sl)
+        if R <= 0:
+            return False
+        r_mult = Decimal(str(trigger.get("r", 0)))
+        moved = (ctx.current_price - ctx.entry) if ctx.side == "BUY" \
+            else (ctx.entry - ctx.current_price)
+        return moved >= r_mult * R
     return False
 
 

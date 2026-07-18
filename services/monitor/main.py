@@ -86,10 +86,14 @@ async def _open_trades(session):
         select(Trade).where(Trade.status.in_(("open", "partial"))))).scalars().all()
 
 
-async def _rules_for(session, trade) -> tuple[list, dict, int]:
+async def _rules_for(session, trade) -> tuple[list, dict, int, "Decimal | None"]:
     sig = await session.get(Signal, trade.signal_id)
     source = await session.get(Source, sig.source_id) if sig and sig.source_id else None
     strat = dict((source.strategy if source else {}) or {})
+    # The signal's original stop — the IMMUTABLE R denominator for be_lock_at_r
+    # (#109). We use the signal SL rather than leg.sl because leg.sl is mutated as
+    # the stop trails; None -> the trigger fails open.
+    initial_sl = Decimal(str(sig.sl)) if sig and sig.sl is not None else None
 
     # Resolve the ExecutionStrategy for this trade's (account, source) scope — only
     # the ≤4 rows whose scope could match (#84).
@@ -112,11 +116,11 @@ async def _rules_for(session, trade) -> tuple[list, dict, int]:
     # strategy edits). Pre-snapshot trades resolve live: strategy.exit_policy ->
     # source -> global default.
     if getattr(trade, "sl_rules", None):
-        return trade.sl_rules, strat, effective_entry_ttl_min(strat)
+        return trade.sl_rules, strat, effective_entry_ttl_min(strat), initial_sl
     gcfg = await get_setting(session, "strategy", {}) or {}
     rules, _origin = ST.exit_sl_rules(chain, source_rules=strat.get("sl_rules"),
                                       global_default=gcfg.get("default_sl_rules"))
-    return rules, strat, effective_entry_ttl_min(strat)
+    return rules, strat, effective_entry_ttl_min(strat), initial_sl
 
 
 # Persistent broker sessions, reused across ticks. Re-logging in (and switching
@@ -238,7 +242,7 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
         # reliable key to link a filled working order to the exact leg that
         # placed it (Capital.com's position.workingOrderId == our order dealId).
         pos_by_wo = {p.working_order_ref: p for p in positions.values() if p.working_order_ref}
-        rules, strat, ttl_min = await _rules_for(session, trade)
+        rules, strat, ttl_min, initial_sl = await _rules_for(session, trade)
         tps_hit = _tps_hit(trade.direction, price, legs)
         # TP price map across ALL legs of the trade, so a ratchet rule that
         # references a TP whose legs already closed still resolves its level.
@@ -553,7 +557,8 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
             ctx = PositionCtx(
                 side=trade.direction,
                 entry=Decimal(str(leg.fill_price if leg.fill_price is not None else leg.entry)),
-                current_sl=Decimal(str(leg.sl)), current_price=price, tps=tp_levels)
+                current_sl=Decimal(str(leg.sl)), current_price=price, tps=tp_levels,
+                initial_sl=initial_sl)          # immutable original stop -> R for be_lock_at_r (#109)
             new_sl = evaluate(ctx, rules, effective_tps_hit)
             if new_sl is not None:
                 try:
