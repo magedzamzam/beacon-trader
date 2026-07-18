@@ -112,6 +112,195 @@ async def channel_regime_report(session, frm=None, to=None) -> dict:
     }
 
 
+async def execution_geometry_ab_report(session, frm=None, to=None,
+                                       source_id=None) -> dict:
+    """Payoff-geometry A/B read (#80 item 3 / #85 action 2), normalized to
+    **R-multiples** so the arms are comparable even when they trade different
+    nominal sizes.
+
+    Each closed trade's outcome is expressed as R = realized_pl / planned_risk
+    (planned_risk = the worst-case loss at the ORIGINAL stop, account ccy). R is
+    scale-free, so it dissolves the equity-parity confound (#85 §2): a drawn-down
+    arm and a fresh arm sizing the SAME signal at 1% of very different equities
+    still get the same R denominator, so raw-AED P&L incomparability goes away.
+
+    Arms are keyed by **account** (the A/B axis: e.g. acct#5 = Arm A `BE@TP1`,
+    acct#7 = Arm B `BE@TP2`); the exit `strategy` label(s) actually seen on each
+    arm's trades are surfaced for attribution. Optional [frm, to) window is
+    anchored on SIGNAL time — both arms fan out from the same signals, so a window
+    selects the same signal set for every arm. Optional `source_id` scopes to one
+    channel (the A/B is run per-channel).
+
+    Per arm it reports the geometry levers #80 targets:
+      * avg_R / expectancy_R           — the bottom line in risk units
+      * payoff_ratio  = avgWinR/|avgLossR|   (the ~0.56 → ~0.9 lever)
+      * profit_factor = ΣwinR/|ΣlossR|       (scale-free)
+      * breakeven_leg_rate             — the primary MECHANISM (#85): legs the
+                                         TP1→entry ratchet dragged back to flat
+      * pct_winners_reach_tp3          — did winners actually run (any tp_hit leg
+                                         at tp_index ≥ 3), or get cut at TP1/2
+    Win-rate carries a Beta-Binomial credible interval (small-n honesty, §4).
+    Trades whose planned_risk is missing/zero keep their win/leg contribution but
+    are excluded from R-based stats (R undefined) and counted in `n_no_risk`.
+
+    Read-only / shadow — nothing gates on this; it is the measurement the #80
+    experiment is judged by. Trade-level realized_pl + leg OUTCOME labels only
+    (never legs.realized_pl — the cross-attribution bug, golden rule §5)."""
+    from sqlalchemy import select
+    from ..db.models import Trade, Signal, Account, ExecutionStrategy, Leg
+
+    q = (select(Trade.id, Trade.account_id, Account.name, Trade.realized_pl,
+                Trade.planned_risk, Trade.strategy_id, ExecutionStrategy.label)
+         .join(Signal, Signal.id == Trade.signal_id)
+         .outerjoin(Account, Account.id == Trade.account_id)
+         .outerjoin(ExecutionStrategy, ExecutionStrategy.id == Trade.strategy_id)
+         .where(Trade.status == "closed"))
+    if source_id is not None:
+        q = q.where(Signal.source_id == source_id)
+    if frm is not None:
+        q = q.where(Signal.created_at >= frm)
+    if to is not None:
+        q = q.where(Signal.created_at < to)
+    trows = [{"trade_id": tid, "account_id": aid, "account": aname,
+              "realized_pl": pl, "planned_risk": pr, "strategy_label": slabel}
+             for tid, aid, aname, pl, pr, sid, slabel in (await session.execute(q)).all()]
+
+    tids = [t["trade_id"] for t in trows]
+    lrows = []
+    if tids:
+        lq = select(Leg.trade_id, Leg.outcome, Leg.tp_index).where(Leg.trade_id.in_(tids))
+        lrows = [{"trade_id": tid, "outcome": outcome, "tp_index": tp_index}
+                 for tid, outcome, tp_index in (await session.execute(lq)).all()]
+    return geometry_ab_rollup(trows, lrows, source_id=source_id)
+
+
+# Leg outcomes that represent a resolved close (counted in the leg denominator).
+_RESOLVED_OUTCOMES = ("tp_hit", "sl_hit", "breakeven", "manual", "expired")
+
+
+def geometry_ab_rollup(trades, legs, source_id=None) -> dict:
+    """Pure roll-up behind execution_geometry_ab_report — kept DB-free so the
+    geometry math is unit-testable on a bare box (the repo's test convention).
+
+    `trades`: iterable of dicts {trade_id, account_id, account, realized_pl,
+    planned_risk, strategy_label}. `legs`: iterable of {trade_id, outcome,
+    tp_index}. See execution_geometry_ab_report for the metric definitions."""
+    from collections import defaultdict
+
+    def _arm():
+        return {"n": 0, "wins": 0, "net": 0.0, "n_r": 0, "n_no_risk": 0,
+                "sum_r": 0.0, "sum_win_r": 0.0, "sum_loss_r": 0.0,
+                "n_win_r": 0, "n_loss_r": 0, "labels": set(),
+                "legs": 0, "be_legs": 0, "winners": 0, "winners_tp3": 0}
+
+    arms = defaultdict(_arm)
+    trade_arm = {}          # trade_id -> account_id
+    trade_win = {}          # trade_id -> bool
+    a_name = {}             # account_id -> account name
+    overall_n = overall_wins = 0
+
+    for t in trades:
+        pl = t.get("realized_pl")
+        if pl is None:
+            continue
+        pl = float(pl)
+        win = pl > 0
+        acct_id = t.get("account_id")
+        tid = t.get("trade_id")
+        a = arms[acct_id]
+        a["n"] += 1
+        a["wins"] += 1 if win else 0
+        a["net"] += pl
+        if win:
+            a["winners"] += 1
+        if t.get("strategy_label"):
+            a["labels"].add(t["strategy_label"])
+        if acct_id is not None and acct_id not in a_name and t.get("account"):
+            a_name[acct_id] = t["account"]
+        trade_arm[tid] = acct_id
+        trade_win[tid] = win
+        overall_n += 1
+        overall_wins += 1 if win else 0
+        prisk = t.get("planned_risk")
+        r = None
+        if prisk is not None and float(prisk) != 0:
+            r = pl / abs(float(prisk))
+        if r is None:
+            a["n_no_risk"] += 1
+        else:
+            a["n_r"] += 1
+            a["sum_r"] += r
+            if win:
+                a["sum_win_r"] += r
+                a["n_win_r"] += 1
+            else:
+                a["sum_loss_r"] += r
+                a["n_loss_r"] += 1
+
+    # Legs of the selected trades: breakeven-leg rate + did a winner reach ≥TP3.
+    winners_tp3 = set()                       # trade_ids whose winner ran to ≥TP3
+    for lg in legs:
+        tid = lg.get("trade_id")
+        if tid not in trade_arm:
+            continue
+        acct_id = trade_arm[tid]
+        a = arms[acct_id]
+        outcome, tp_index = lg.get("outcome"), lg.get("tp_index")
+        # Only count legs with a resolved outcome as "closed legs".
+        if outcome in _RESOLVED_OUTCOMES:
+            a["legs"] += 1
+            if outcome == "breakeven":
+                a["be_legs"] += 1
+        if outcome == "tp_hit" and (tp_index or 0) >= 3 and trade_win.get(tid):
+            winners_tp3.add(tid)
+    for tid in winners_tp3:
+        arms[trade_arm[tid]]["winners_tp3"] += 1
+
+    base = (overall_wins / overall_n) if overall_n else 0.5
+
+    def _fmt(acct_id, a):
+        n, nr = a["n"], a["n_r"]
+        post = posterior(a["wins"], n, base)
+        avg_win_r = (a["sum_win_r"] / a["n_win_r"]) if a["n_win_r"] else None
+        avg_loss_r = (a["sum_loss_r"] / a["n_loss_r"]) if a["n_loss_r"] else None
+        payoff = (avg_win_r / abs(avg_loss_r)) if (avg_win_r is not None
+                  and avg_loss_r not in (None, 0)) else None
+        pf = (a["sum_win_r"] / abs(a["sum_loss_r"])) if a["sum_loss_r"] < 0 else None
+        return {
+            "account_id": acct_id,
+            "account": a_name.get(acct_id) or (f"acct#{acct_id}" if acct_id else "unmapped"),
+            "arms": sorted(a["labels"]),
+            "n_trades": n, "n_with_risk": nr, "n_no_risk": a["n_no_risk"],
+            "win_rate": round(a["wins"] / n, 4) if n else None,
+            "win_rate_ci": [round(post["ci_low"], 4), round(post["ci_high"], 4)],
+            "avg_R": round(a["sum_r"] / nr, 4) if nr else None,
+            "expectancy_R": round(a["sum_r"] / nr, 4) if nr else None,
+            "avg_win_R": round(avg_win_r, 4) if avg_win_r is not None else None,
+            "avg_loss_R": round(avg_loss_r, 4) if avg_loss_r is not None else None,
+            "payoff_ratio": round(payoff, 4) if payoff is not None else None,
+            "profit_factor": round(pf, 4) if pf is not None else None,
+            "breakeven_leg_rate": round(a["be_legs"] / a["legs"], 4) if a["legs"] else None,
+            "n_legs": a["legs"], "n_breakeven_legs": a["be_legs"],
+            "pct_winners_reach_tp3": round(a["winners_tp3"] / a["winners"], 4) if a["winners"] else None,
+            "net_nominal": round(a["net"], 2),
+        }
+
+    by_arm = [_fmt(acct_id, a) for acct_id, a in arms.items()]
+    by_arm.sort(key=lambda r: (r["account_id"] is None, r["account_id"]))
+
+    return {
+        "n_closed": overall_n, "base_rate": round(base, 4),
+        "source_id": source_id, "by_arm": by_arm,
+        "note": ("Payoff-geometry A/B in R-multiples (#80/#85). R = realized_pl / "
+                 "planned_risk (scale-free → dissolves the equity-parity confound). "
+                 "payoff_ratio = avgWinR/|avgLossR| (the ~0.56→~0.9 lever); "
+                 "breakeven_leg_rate is the primary mechanism (legs the TP1→entry "
+                 "ratchet dragged to flat); pct_winners_reach_tp3 = winners that "
+                 "actually ran. Trade-level P&L + leg outcome labels only (§5). "
+                 "Shadow/read-only; judge only at N≥30 closed/arm (§4)."),
+    }
+
+
 def _structure_membership(features: dict) -> tuple:
     """(in_fvg, in_ob): is the entry price inside an UNFILLED FVG / UNMITIGATED
     OB on any captured timeframe? The structure keys embed their params

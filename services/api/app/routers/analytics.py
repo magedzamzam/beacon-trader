@@ -8,7 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from beacon_core.analysis.report import (channel_regime_report,
                                          structure_outcome_report,
                                          structure_magnet_outcome_report,
-                                         trend_alignment_outcome_report)
+                                         trend_alignment_outcome_report,
+                                         execution_geometry_ab_report)
 from beacon_core.analysis.sidecar import load_config
 from beacon_core.analysis import structure_map as struct_map
 from beacon_core.analysis.structure import DEFAULT_STRUCTURE
@@ -79,6 +80,20 @@ async def trend_alignment(date_from: str = None, date_to: str = None,
     return await trend_alignment_outcome_report(
         db, parse_iso_utc(date_from), parse_iso_utc(date_to),
         timeframe=cfg["timeframe"], ema_period=int(cfg["ema_period"]))
+
+
+@router.get("/execution-geometry")
+async def execution_geometry(date_from: str = None, date_to: str = None,
+                             source_id: int = None,
+                             db: AsyncSession = Depends(get_db)):
+    """Payoff-geometry A/B in R-multiples (#80/#85): per-arm (account) avg R,
+    payoff ratio, profit factor, breakeven-leg rate and %-winners-reaching-≥TP3,
+    with win-rate credible intervals. R = realized_pl / planned_risk is scale-free,
+    so it compares arms trading different nominal sizes (equity-parity confound).
+    Optional date range (anchored on signal time) and per-channel `source_id`
+    scope. Shadow / read-only — judge only at N≥30 closed per arm."""
+    return await execution_geometry_ab_report(
+        db, parse_iso_utc(date_from), parse_iso_utc(date_to), source_id=source_id)
 
 
 @router.get("/structure/outcome")
