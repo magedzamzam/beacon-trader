@@ -41,6 +41,7 @@ CLUSTER_DEFAULTS = {
 }
 
 ALLOCATION_MODES = ("equal", "decaying", "confidence_weighted")
+MIXED_POLICIES = ("off", "desize_both", "higher_confidence")
 
 
 def _dec(v, default="0") -> Decimal:
@@ -48,6 +49,40 @@ def _dec(v, default="0") -> Decimal:
         return Decimal(str(v))
     except Exception:
         return Decimal(default)
+
+
+def sanitize(cr: Optional[dict]) -> Optional[dict]:
+    """Typed, whitelisted normalization for the WRITE path (the API `risk_limits`
+    PUT). Coerces each field to the type the executor expects and drops unknown
+    keys, so a UI save stores a clean block. Returns None for an absent/empty
+    block — the caller then omits `cluster_risk` entirely (feature off), so a save
+    never silently activates a config that was never set. The executor reads the
+    RAW stored setting, so what this returns must be directly consumable."""
+    if not cr:
+        return None
+    d = dict(CLUSTER_DEFAULTS)
+    d["enabled"] = bool(cr.get("enabled", False))
+    try:
+        d["window_minutes"] = max(1, int(cr.get("window_minutes", 30)))
+    except (TypeError, ValueError):
+        pass
+    alloc = cr.get("allocation", "equal")
+    d["allocation"] = alloc if alloc in ALLOCATION_MODES else "equal"
+    try:
+        d["decay"] = float(cr.get("decay", 0.5))
+    except (TypeError, ValueError):
+        pass
+    b = cr.get("budget")
+    if b in (None, "", 0, "0"):
+        d["budget"] = None                       # None => fall back to per-symbol cap
+    else:
+        try:
+            d["budget"] = float(b)
+        except (TypeError, ValueError):
+            d["budget"] = None
+    mp = cr.get("mixed_policy", "off")
+    d["mixed_policy"] = mp if mp in MIXED_POLICIES else "off"
+    return d
 
 
 def merge_config(raw: Optional[dict]) -> Optional[dict]:

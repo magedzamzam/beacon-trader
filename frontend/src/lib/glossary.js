@@ -340,6 +340,42 @@ export const GLOSSARY = [
     not: "It is NOT the same as the per-signal ceiling above (which is relative to the daily limit). 0 disables it.",
     act: "Keep it a little above a normal plan's risk so it only bites stacked fanouts.",
   },
+  {
+    id: "cluster_risk", term: "Correlation-cluster budgeting (#106)", section: "risk",
+    what: "Concurrent same-symbol/same-direction signals are usually one market view echoed by several channels, not independent bets. This shares ONE risk budget across the cluster instead of sizing each at full risk.",
+    read: "Off (the default) = today's behaviour: N channels agreeing stack to N× risk, so a reversal takes every stop at once. On = the cluster's aggregate planned risk is held to one budget.",
+    not: "It does NOT merge or net positions — each trade stays separate with its own channel attribution. It is INDEPENDENT of the master switch above (it gates on its own Enforce toggle).",
+    act: "Turn on and leave in shadow for a few sessions; read the cluster_shadow events, then enable Enforce.",
+  },
+  {
+    id: "cluster_enforce", term: "Cluster: Enforce vs Shadow", section: "risk",
+    what: "The measure-before-gate switch for cluster budgeting. Shadow computes + logs + tags what it WOULD do; Enforce actually de-sizes the arriving signal to fit the shared budget.",
+    read: "Shadow changes no lots — safe to run live. Enforce only ever REDUCES the new signal (or rejects it if it can't reach min lot); it never sizes up and never touches already-open members.",
+    not: "Enforce does NOT block the trade the way the per-symbol cap does — 'fit, don't block' is the whole point.",
+    act: "Only flip to Enforce once the shadow numbers look right on demo.",
+    guard: G_SHADOW,
+  },
+  {
+    id: "cluster_window", term: "Cluster: concurrency window (min)", section: "risk",
+    what: "How close in time two same-symbol/same-direction trades must be to count as one cluster.",
+    read: "Wider = more signals grouped and de-sized together. 30 min matched the observed clustering best.",
+    not: "It does NOT look at open trades older than the window, even if still open.",
+    act: "Start at 30; widen only if you see related bursts spilling just outside it.",
+  },
+  {
+    id: "cluster_allocation", term: "Cluster: allocation mode", section: "risk",
+    what: "How the shared budget is spread. equal = de-size each arrival to the remaining budget (aggregate ≈ 1 unit). decaying = 1st full, then ½, ¼ … (confirmation adds info, not linearly). confidence_weighted = scale by the channel's measured edge.",
+    read: "equal is the strictest cap and the safest default. decaying lets a cluster grow a little with each confirmation.",
+    not: "confidence_weighted is wired but not yet fed channel edge (#62/#63), so today it behaves like equal.",
+    act: "Use equal while measuring; revisit decaying once you trust the clustering.",
+  },
+  {
+    id: "cluster_budget", term: "Cluster: shared budget", section: "risk",
+    what: "The one risk budget (account currency) a whole cluster may consume, worst-case-to-stop.",
+    read: "Leave it BLANK to reuse 'Max open risk / symbol' as the ceiling — usually what you want, since everything here is XAUUSD.",
+    not: "It is NOT per-trade — it's the cap on the sum across the cluster.",
+    act: "Set a number only if you want the cluster ceiling to differ from the per-symbol cap.",
+  },
 
   // ---- Strategies -----------------------------------------------------------
   {

@@ -3,6 +3,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from beacon_core.execution.guard import DEFAULT_RISK_LIMITS, risk_limit_reason
+from beacon_core.risk import cluster as CL
 from beacon_core.db.models import Account, AccountSourceRisk, Source, Trade
 from beacon_core.settings_store import get_setting, set_setting
 from beacon_core.timeutil import utcnow
@@ -16,7 +17,6 @@ _FLOATS = ("daily_loss_limit", "per_signal_max_pct_of_daily",
            "max_open_risk_per_account", "max_open_risk_per_symbol",
            "max_signal_risk_pct")       # per-signal risk cap (#78)
 
-
 def _sanitize(cfg: dict | None) -> dict:
     cfg = cfg or {}
     out = dict(DEFAULT_RISK_LIMITS)
@@ -27,6 +27,12 @@ def _sanitize(cfg: dict | None) -> dict:
             out[k] = float(cfg.get(k, out[k]))
         except (TypeError, ValueError):
             pass
+    # Preserve the cluster-risk block (#106) through GET/PUT. Only when present —
+    # an ABSENT block means the feature is off entirely, and a UI save must not
+    # silently inject (and thereby activate shadow) one that was never configured.
+    cr = CL.sanitize(cfg.get("cluster_risk"))
+    if cr is not None:
+        out["cluster_risk"] = cr
     return out
 
 

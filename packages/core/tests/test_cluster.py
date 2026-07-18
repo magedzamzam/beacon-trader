@@ -16,6 +16,31 @@ def test_merge_config_absent_is_feature_off():
     assert CL.merge_config({}) is None
 
 
+def test_sanitize_absent_is_none():
+    assert CL.sanitize(None) is None
+    assert CL.sanitize({}) is None
+
+
+def test_sanitize_coerces_and_whitelists():
+    # UI/JSON sends strings and junk; the write path must store clean typed values.
+    d = CL.sanitize({"enabled": True, "window_minutes": "45", "allocation": "bogus",
+                     "decay": "0.4", "budget": "", "mixed_policy": "nope",
+                     "junk_key": 999})
+    assert d["enabled"] is True
+    assert d["window_minutes"] == 45 and isinstance(d["window_minutes"], int)
+    assert d["allocation"] == "equal"              # invalid -> safe default
+    assert d["decay"] == 0.4
+    assert d["budget"] is None                      # "" -> None (fall back to per-symbol cap)
+    assert d["mixed_policy"] == "off"               # invalid -> safe default
+    assert "junk_key" not in d                      # unknown keys dropped
+
+
+def test_sanitize_budget_numeric_and_window_floor():
+    assert CL.sanitize({"budget": "3000"})["budget"] == 3000.0
+    assert CL.sanitize({"budget": 0})["budget"] is None
+    assert CL.sanitize({"window_minutes": 0})["window_minutes"] == 1   # floored to >=1
+
+
 def test_merge_config_overlays_defaults_and_validates_mode():
     cfg = CL.merge_config({"enabled": True, "window_minutes": 45,
                            "allocation": "nonsense"})

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Pencil } from "lucide-react";
 import { Table, Card, Th, Td, Badge, Empty } from "../components/ui";
-import { Modal, Field, Input, Toggle, Button, ErrorNote } from "../components/form";
+import { Modal, Field, Input, Select, Toggle, Button, ErrorNote } from "../components/form";
 import RiskConfigEditor from "../components/RiskConfigEditor";
 import HelpHint from "../components/HelpHint";
 import { api } from "../lib/api";
@@ -66,6 +66,23 @@ function RiskLimitsCard() {
   if (!cfg) return null;
   const set = (k, v) => { setCfg(c => ({ ...c, [k]: v })); setSaved(false); };
   const num = (k, v) => set(k, v === "" ? "" : Number(v));
+  // Cluster-risk block (#106). Absent => feature off entirely; present + enabled:false
+  // => shadow. Toggling the section off REMOVES the block so we never leave a stray
+  // (and executor-active) config behind.
+  const cr = cfg.cluster_risk;
+  const CR_DEFAULT = { enabled: false, window_minutes: 30, allocation: "equal", decay: 0.5, budget: null };
+  const setCR = (k, v) => {
+    setCfg(c => ({ ...c, cluster_risk: { ...CR_DEFAULT, ...(c.cluster_risk || {}), [k]: v } }));
+    setSaved(false);
+  };
+  const toggleCluster = (on) => {
+    setSaved(false);
+    setCfg(c => {
+      if (on) return { ...c, cluster_risk: c.cluster_risk || { ...CR_DEFAULT } };
+      const { cluster_risk, ...rest } = c;   // eslint-disable-line no-unused-vars
+      return rest;
+    });
+  };
   const save = async () => {
     try { setCfg(await api.saveRiskLimits(cfg)); setSaved(true); loadStatus(); } catch (e) { setErr(e.message); }
   };
@@ -125,6 +142,59 @@ function RiskLimitsCard() {
             <Input type="number" step="0.25" value={cfg.max_signal_risk_pct ?? 2.0}
               onChange={e => num("max_signal_risk_pct", e.target.value)} /></Field>
         </div>
+
+        {/* Correlation-cluster risk budgeting (#106) — independent of the master
+            switch (the executor gates on this block's own `enabled`). */}
+        <div className="border-t border-edge pt-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <label className="flex items-center gap-2 text-sm font-medium">
+              Correlation-cluster budgeting<HelpHint term="cluster_risk" />
+              <Toggle checked={!!cr} onChange={toggleCluster} label={cr ? "on" : "off"} />
+            </label>
+            {cr && (cr.enabled ? <Badge tone="short">enforcing</Badge> : <Badge tone="warn">shadow</Badge>)}
+          </div>
+          {!cr ? (
+            <div className="text-[11px] text-muted">
+              Off — concurrent same-symbol/same-direction signals are each sized independently, so N channels echoing
+              one view stack to N× risk (#106). Turn on to share one budget across the cluster; it starts in
+              <b> shadow</b> (logs + tags, no lot change) until you enable enforce.
+            </div>
+          ) : (
+            <>
+              <label className="flex items-center gap-2 text-sm">
+                <span className={cr.enabled ? "text-warn font-medium" : ""}>Enforce (de-size live)</span>
+                <HelpHint term="cluster_enforce" />
+                <Toggle checked={!!cr.enabled} onChange={v => setCR("enabled", v)} label={cr.enabled ? "on" : "shadow"} />
+              </label>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <Field label={<>Concurrency window (min)<HelpHint term="cluster_window" /></>}>
+                  <Input type="number" value={cr.window_minutes ?? 30}
+                    onChange={e => setCR("window_minutes", e.target.value === "" ? "" : Number(e.target.value))} /></Field>
+                <Field label={<>Allocation<HelpHint term="cluster_allocation" /></>}>
+                  <Select value={cr.allocation || "equal"} onChange={e => setCR("allocation", e.target.value)}>
+                    <option value="equal">equal (de-size to fit)</option>
+                    <option value="decaying">decaying (½ each confirmation)</option>
+                    <option value="confidence_weighted">confidence-weighted</option>
+                  </Select></Field>
+                {cr.allocation === "decaying" && (
+                  <Field label="Decay factor" hint="member k gets budget × decay^k">
+                    <Input type="number" step="0.05" value={cr.decay ?? 0.5}
+                      onChange={e => setCR("decay", e.target.value === "" ? "" : Number(e.target.value))} /></Field>
+                )}
+                <Field label={<>Cluster budget (account ccy)<HelpHint term="cluster_budget" /></>} hint="blank = use Max open risk / symbol">
+                  <Input type="number" value={cr.budget ?? ""}
+                    onChange={e => setCR("budget", e.target.value === "" ? null : Number(e.target.value))} /></Field>
+              </div>
+              <div className="text-[11px] text-muted">
+                Shadow logs each cluster it would form (Event <span className="num">cluster_shadow</span>) and tags trades with a
+                <span className="num"> cluster_id</span> — no lot change. Enforce de-sizes the arriving signal to fit the shared budget
+                instead of blocking it (only rejects if it can't reach min lot). Needs the <span className="num">trades.cluster_id</span> /
+                <span className="num"> cluster_alloc</span> columns (migration).
+              </div>
+            </>
+          )}
+        </div>
+
         <div className="flex justify-end"><Button onClick={save}>Save risk limits</Button></div>
       </div>
     </Card>
