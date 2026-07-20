@@ -15,6 +15,36 @@ _engine = None
 _Session: async_sessionmaker | None = None
 
 
+# Additive column migrations, applied on every startup after create_all.
+# create_all makes new TABLES but never adds COLUMNS to an existing one, so any
+# column added to an already-deployed table must be listed here too (CLAUDE.md
+# §6). Each is idempotent (Postgres IF NOT EXISTS) and swallowed on non-Postgres.
+# When you add a mapped column to an EXISTING table, add its ALTER here or trade
+# INSERTs break on the live box (#112).
+ADDITIVE_MIGRATIONS: tuple[str, ...] = (
+    "ALTER TABLE telegram_messages "
+    "ADD COLUMN IF NOT EXISTS reply_to_message_id INTEGER",
+    "ALTER TABLE sources "
+    "ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT FALSE",
+    "ALTER TABLE signals "
+    "ADD COLUMN IF NOT EXISTS reinitiated_from INTEGER",   # re-initiate clone link (#66)
+    "ALTER TABLE signal_claims "
+    "ADD COLUMN IF NOT EXISTS claim_confidence numeric(4,3)",  # claim link confidence (#63)
+    "ALTER TABLE trades "
+    "ADD COLUMN IF NOT EXISTS sl_rules JSON",              # point-in-time exit-rules snapshot (#83)
+    "ALTER TABLE trades "
+    "ADD COLUMN IF NOT EXISTS strategy_id INTEGER",        # ExecutionStrategy attribution (#84)
+    "ALTER TABLE trades "
+    "ADD COLUMN IF NOT EXISTS cluster_id VARCHAR(48)",     # correlation-cluster tag (#106)
+    "ALTER TABLE trades "
+    "ADD COLUMN IF NOT EXISTS cluster_alloc JSON",         # cluster budgeter record (#106)
+    # cluster_id is index=True in the model, so create_all builds this index on a
+    # FRESH table; add it explicitly for the existing-table path (IF NOT EXISTS
+    # keeps it a no-op elsewhere — no double CREATE).
+    "CREATE INDEX IF NOT EXISTS ix_trades_cluster_id ON trades (cluster_id)",
+)
+
+
 def engine():
     global _engine
     if _engine is None:
@@ -44,20 +74,7 @@ async def init_models() -> None:
         await conn.run_sync(Base.metadata.create_all)
         # create_all makes new TABLES but never adds COLUMNS to existing ones —
         # self-apply the additive columns (idempotent; Postgres IF NOT EXISTS).
-        for stmt in (
-            "ALTER TABLE telegram_messages "
-            "ADD COLUMN IF NOT EXISTS reply_to_message_id INTEGER",
-            "ALTER TABLE sources "
-            "ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT FALSE",
-            "ALTER TABLE signals "
-            "ADD COLUMN IF NOT EXISTS reinitiated_from INTEGER",   # re-initiate clone link (#66)
-            "ALTER TABLE signal_claims "
-            "ADD COLUMN IF NOT EXISTS claim_confidence numeric(4,3)",  # claim link confidence (#63)
-            "ALTER TABLE trades "
-            "ADD COLUMN IF NOT EXISTS sl_rules JSON",              # point-in-time exit-rules snapshot (#83)
-            "ALTER TABLE trades "
-            "ADD COLUMN IF NOT EXISTS strategy_id INTEGER",        # ExecutionStrategy attribution (#84)
-        ):
+        for stmt in ADDITIVE_MIGRATIONS:
             try:
                 await conn.exec_driver_sql(stmt)
             except Exception:                       # non-Postgres / already applied
