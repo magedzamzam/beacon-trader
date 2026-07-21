@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Plus, RotateCcw, Sparkles, Layers } from "lucide-react";
 import { Card, Table, Th, Td, Badge, Empty } from "../components/ui";
 import { Button, ErrorNote, Modal, Field, Input, NumberInput, Select } from "../components/form";
+import TradeDetail from "../components/TradeDetail";
 import { api } from "../lib/api";
 
 const AI_TONE = { approve: "long", caution: "warn", reject: "short" };
@@ -18,6 +19,8 @@ export default function Signals() {
   const [busy, setBusy] = useState(null);
   const [structId, setStructId] = useState(null);   // signal id whose structure panel is open
   const [reinitSig, setReinitSig] = useState(null); // signal pending re-initiate confirmation
+  const [tradeId, setTradeId] = useState(null);     // trade id whose TradeDetail modal is open
+  const [tradePick, setTradePick] = useState(null); // signal w/ >1 trade, awaiting account pick
   const [msg, setMsg] = useState(null);             // success feedback
 
   const load = async () => {
@@ -75,7 +78,15 @@ export default function Signals() {
             <tbody>
               {data.map(s => (
                 <tr key={s.id} className="row-hover">
-                  <Td mono>{s.id}</Td>
+                  <Td mono>{
+                    (s.trade_ids || []).length === 1
+                      ? <button className="text-beacon hover:underline" title="Open trade"
+                          onClick={() => setTradeId(s.trade_ids[0])}>{s.id}</button>
+                      : (s.trade_ids || []).length > 1
+                      ? <button className="text-beacon hover:underline" title={`${s.trade_ids.length} trades — choose account`}
+                          onClick={() => setTradePick(s)}>{s.id}</button>
+                      : s.id
+                  }</Td>
                   <Td>{s.source_name}{s.source_kind && <span className="text-[10px] text-muted ml-1">{s.source_kind}</span>}</Td>
                   <Td>{s.symbol}</Td>
                   <Td><Badge dot tone={s.direction === "BUY" ? "long" : "short"}>{s.direction}</Badge></Td>
@@ -105,11 +116,33 @@ export default function Signals() {
       </Card>
       {add && <ManualModal sources={sources} onClose={() => setAdd(false)} onSaved={() => { setAdd(false); load(); }} />}
       {structId != null && <SignalStructureModal signalId={structId} onClose={() => setStructId(null)} />}
+      {tradeId != null && <TradeDetail tradeId={tradeId} onClose={() => setTradeId(null)} />}
+      {tradePick && (
+        <TradePickModal sig={tradePick}
+          onPick={(tid) => { setTradePick(null); setTradeId(tid); }}
+          onClose={() => setTradePick(null)} />
+      )}
       {reinitSig && (
         <ReinitConfirmModal sig={reinitSig} busy={busy === reinitSig.id}
           onConfirm={() => doReinit(reinitSig)} onClose={() => setReinitSig(null)} />
       )}
     </div>
+  );
+}
+
+// A signal that executed on multiple accounts has >1 trade; let the user pick
+// which one to open in the shared TradeDetail modal (#114).
+function TradePickModal({ sig, onPick, onClose }) {
+  const tids = sig.trade_ids || [];
+  return (
+    <Modal title={`Signal #${sig.id} — ${tids.length} trades`} onClose={onClose}>
+      <p className="text-sm text-muted mb-3">This signal executed on multiple accounts. Choose a trade to open.</p>
+      <div className="flex flex-wrap gap-2">
+        {tids.map(tid => (
+          <Button key={tid} variant="ghost" onClick={() => onPick(tid)}>Trade #{tid}</Button>
+        ))}
+      </div>
+    </Modal>
   );
 }
 

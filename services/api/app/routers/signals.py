@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from beacon_core.db.models import AiAssessment, Event, Signal, Source
+from beacon_core.db.models import AiAssessment, Event, Signal, Source, Trade
 from beacon_core.parsing import parse
 from ..deps import get_db
 from ..auth import require_token
@@ -26,6 +26,21 @@ async def _latest_ai_by_signal(db, signal_ids, kind="signal_validation") -> dict
     return out
 
 
+async def _trades_by_signal(db, signal_ids) -> dict:
+    """Map signal_id -> [trade_id, ...] (ascending) so the Signals UI can open a
+    signal's executed trade(s) in the same TradeDetail modal History uses (#114)."""
+    if not signal_ids:
+        return {}
+    rows = (await db.execute(
+        select(Trade.id, Trade.signal_id)
+        .where(Trade.signal_id.in_(signal_ids))
+        .order_by(Trade.id))).all()
+    out: dict = {}
+    for (tid, sid) in rows:
+        out.setdefault(sid, []).append(tid)
+    return out
+
+
 @router.get("/signals", dependencies=[Depends(require_token)])
 async def list_signals(db: AsyncSession = Depends(get_db), limit: int = 100,
                        source_id: int | None = None):
@@ -35,11 +50,14 @@ async def list_signals(db: AsyncSession = Depends(get_db), limit: int = 100,
     if source_id is not None:
         q = q.where(Signal.source_id == source_id)
     rows = (await db.execute(q)).all()
-    ai = await _latest_ai_by_signal(db, [s.id for (s, _, _) in rows])
+    sig_ids = [s.id for (s, _, _) in rows]
+    ai = await _latest_ai_by_signal(db, sig_ids)
+    trades_by_sig = await _trades_by_signal(db, sig_ids)
     out = []
     for (s, sname, skind) in rows:
         a = ai.get(s.id)
         out.append({"id": s.id, "source_id": s.source_id,
+                    "trade_ids": trades_by_sig.get(s.id, []),
                     "source_name": sname or "—", "source_kind": skind,
                     "symbol": s.symbol,
                     "direction": s.direction, "entry_from": float(s.entry_from),
