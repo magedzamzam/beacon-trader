@@ -85,6 +85,12 @@ async def recompute_symbol(session, adapter, symbol: str, broker_epic: str,
             bias_price=Decimal(str(res["bias_price"])) if res["bias_price"] is not None else None,
             premium_discount=(Decimal(str(round(res["premium_discount"], 6)))
                               if res["premium_discount"] is not None else None),
+            # Persist the prem/disc reference range so premium_discount is
+            # reproducible from the stored row (#113), not just from the last 8 swings.
+            range_low=(Decimal(str(round(res["range_low"], 6)))
+                       if res.get("range_low") is not None else None),
+            range_high=(Decimal(str(round(res["range_high"], 6)))
+                        if res.get("range_high") is not None else None),
             atr=Decimal(str(round(a, 6))), active=True, computed_at=now)
         session.add(ms)
         struct_rows.append((tf, ms, res["levels"]))
@@ -120,13 +126,16 @@ async def recompute_symbol(session, adapter, symbol: str, broker_epic: str,
 
     await session.flush()     # get StructureLevel ids
 
-    # Cluster into magnet zones. Tolerance = cluster_atr * ATR(1h) (fallback: any tf ATR).
+    # Cluster into magnet zones. Tolerance = cluster_atr * ATR(1h) (fallback: any tf ATR);
+    # width capped at max_zone_width_atr * ATR(1h) so a chain can't fuse a whole range
+    # into one "mega-zone" (#113).
     ref_atr = atr_1h or float(struct_rows[0][1].atr)
     tol = float(cfg.get("cluster_atr", 0.5)) * ref_atr
+    max_w = float(cfg.get("max_zone_width_atr", 1.0)) * ref_atr
     cluster_input = [{"level_id": x["row"].id, "price": x["price"], "weight": x["weight"],
                       "timeframe": x["timeframe"], "kind": x["kind"], "ratio": x["ratio"]}
                      for x in all_levels]
-    zones = S.cluster_levels(cluster_input, tolerance=tol)
+    zones = S.cluster_levels(cluster_input, tolerance=tol, max_width=max_w)
     for z in zones:
         session.add(MagnetZone(
             symbol=symbol, version_id=version_id,

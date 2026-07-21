@@ -34,6 +34,8 @@ DEFAULT_STRUCTURE = {
     "zigzag_k_by_tf": {"1w": 2.0, "1d": 2.0, "4h": 1.5, "1h": 1.5,
                        "30m": 1.2, "15m": 1.2, "5m": 1.0, "1m": 1.0},
     "cluster_atr": 0.5,              # zone tolerance = cluster_atr * ATR(1h)
+    "max_zone_width_atr": 1.0,       # hard cap on a zone's width = max_zone_width_atr * ATR(1h)
+                                     # (stops single-linkage chaining a whole range into one blob)
     "tf_weights": {"1w": 8.0, "1d": 5.0, "4h": 3.0, "1h": 2.0,
                    "30m": 1.5, "15m": 1.2, "5m": 1.0, "1m": 0.8},
     "kind_weights": {"fib_retracement": 1.0, "fib_extension": 0.8,
@@ -207,16 +209,31 @@ def analyze_timeframe(bars: List[dict], *, atr: float, k: float,
     }
 
 
-def cluster_levels(levels: List[dict], tolerance: float) -> List[dict]:
-    """Single-linkage cluster of levels within `tolerance` price -> magnet zones,
-    scored by Σ(level weight). Each level dict must carry price, weight, timeframe,
-    kind, ratio. Returns zones ranked 1 = strongest."""
+def cluster_levels(levels: List[dict], tolerance: float,
+                   max_width: Optional[float] = None) -> List[dict]:
+    """Width-bounded cluster of levels -> magnet zones, scored by Σ(level weight).
+
+    A level joins the current cluster only if it is within `tolerance` of the
+    previous member (the chaining gap) AND the cluster's total width would stay
+    within `max_width`. The width cap stops single-linkage from *chaining* a dense
+    stack of levels into one range-wide "mega-zone" (#113): once a cluster spans
+    `max_width`, the next level opens a new zone even if it's within `tolerance`.
+    `max_width=None` (or <= 0) disables the cap (legacy single-linkage).
+
+    Each level dict must carry price, weight, timeframe, kind, ratio. Returns zones
+    ranked 1 = strongest. Members carry their `weight` so Σ(member weights) == score
+    is reconstructable from the stored row."""
     if not levels or tolerance is None or tolerance <= 0:
         return []
+    capped = max_width is not None and max_width > 0
     ordered = sorted(levels, key=lambda x: x["price"])
     groups, cur = [], [ordered[0]]
     for lv in ordered[1:]:
-        if lv["price"] - cur[-1]["price"] <= tolerance:
+        gap_ok = lv["price"] - cur[-1]["price"] <= tolerance
+        # cur[0] is the cluster's lowest price (ordered ascending); the width if lv
+        # joined is lv - cur[0]. Cap it so a chain can't grow past max_width.
+        width_ok = (not capped) or (lv["price"] - cur[0]["price"] <= max_width)
+        if gap_ok and width_ok:
             cur.append(lv)
         else:
             groups.append(cur)
@@ -234,7 +251,8 @@ def cluster_levels(levels: List[dict], tolerance: float) -> List[dict]:
             "n_timeframes": len(tfs),
             "members": [{"level_id": m.get("level_id"), "timeframe": m.get("timeframe"),
                          "kind": m.get("kind"), "ratio": m.get("ratio"),
-                         "price": round(m["price"], 5)} for m in g],
+                         "price": round(m["price"], 5),
+                         "weight": round(float(m.get("weight", 0.0)), 6)} for m in g],
         })
     zones.sort(key=lambda z: (-z["score"], -z["n_timeframes"]))
     for i, z in enumerate(zones):

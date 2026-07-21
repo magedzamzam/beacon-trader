@@ -394,6 +394,8 @@ class MarketStructure(Base):
     swings: Mapped[list] = mapped_column(JSON, default=list)   # ordered pivots [{kind,price,idx}]
     bias_price: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)
     premium_discount: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)  # 0 discount -> 1 premium
+    range_low: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)         # prem/disc ref range (reproducible)
+    range_high: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)        # ^ active dealing range low/high
     atr: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)               # TF ATR at compute (for dist_atr)
     last_event: Mapped[str | None] = mapped_column(String(8), nullable=True)      # BOS | CHoCH (future)
     active: Mapped[bool] = mapped_column(Boolean, default=True)

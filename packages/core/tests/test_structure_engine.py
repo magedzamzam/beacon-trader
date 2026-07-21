@@ -70,6 +70,33 @@ def test_cluster_scores_confluence_and_ranks():
     assert S.cluster_levels(lvls, 0) == []             # no tolerance -> no zones
 
 
+def test_cluster_members_carry_weight_and_sum_to_score():
+    # members must persist their weight so Σ(member weights) == score is auditable (#113)
+    lvls = [
+        {"price": 110.0, "weight": 2.0, "timeframe": "1h", "kind": "fib_retracement", "ratio": 0.5},
+        {"price": 110.3, "weight": 3.0, "timeframe": "4h", "kind": "swing_high", "ratio": None},
+    ]
+    z = S.cluster_levels(lvls, tolerance=1.0)[0]
+    assert all("weight" in m for m in z["members"])
+    assert abs(sum(m["weight"] for m in z["members"]) - z["score"]) < 1e-9
+
+
+def test_width_cap_splits_chained_levels_into_multiple_zones():
+    # Regression for single-linkage chaining (#113): evenly-spaced levels each within
+    # `tolerance` of the next chain into ONE zone without a cap, but a max_width cap
+    # must split them into several tight zones instead of one range-wide blob.
+    lvls = [{"price": 100.0 + i, "weight": 1.0, "timeframe": "1h",
+             "kind": "fib_retracement", "ratio": None} for i in range(21)]  # 100..120, 1pt apart
+    # No cap: single-linkage welds the whole 20-pt span into one mega-zone.
+    uncapped = S.cluster_levels(lvls, tolerance=2.0)
+    assert len(uncapped) == 1
+    assert uncapped[0]["price_high"] - uncapped[0]["price_low"] == 20.0
+    # With a 5-pt width cap: no zone may exceed 5 pts, so it splits into several.
+    capped = S.cluster_levels(lvls, tolerance=2.0, max_width=5.0)
+    assert len(capped) > 1
+    assert all(z["price_high"] - z["price_low"] <= 5.0 for z in capped)
+
+
 def test_analyze_timeframe_end_to_end():
     r = S.analyze_timeframe(_rising(), atr=3.0, k=1.0,
                             retr_ratios=[0.618], ext_ratios=[1.618])
