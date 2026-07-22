@@ -12,7 +12,7 @@ import math
 from statistics import pstdev, mean
 from typing import List, Optional
 
-from ._util import dig_num as _num, zone_side   # shared analytics helpers (#69)
+from ._util import dig_num as _num, zone_side, nearest_sides   # shared analytics helpers (#69)
 
 # --- Regime thresholds (labels only — nothing gates on them) ------------------
 ADX_TRENDING = 25.0          # classic ADX trend threshold
@@ -315,8 +315,9 @@ async def structure_magnet(ctx) -> Optional[dict]:
                                            if s.premium_discount is not None else None),
                       "nearest_fib": nf}
 
+    zones = m["zones"]
     nearest_zone, nearest_d, within = None, None, []
-    for z in m["zones"]:
+    for z in zones:
         lo, hi = float(z.price_low), float(z.price_high)
         ref_atr = float(z.ref_atr) if z.ref_atr else None
         inside = lo <= price <= hi
@@ -332,8 +333,25 @@ async def structure_magnet(ctx) -> Optional[dict]:
             within.append({"zone_id": z.id, "dist_atr": dist_atr, "side": side,
                            "score": float(z.score)})
 
+    # Side-aware nearest zones (#116): always surface the nearest zone ABOVE
+    # (resistance) and BELOW (support) so a score-ranked list can't hide one side
+    # — critical for a directional BUY-vs-SELL read.
+    def _side_zone(i):
+        if i is None:
+            return None
+        z = zones[i]
+        lo, hi = float(z.price_low), float(z.price_high)
+        ref_atr = float(z.ref_atr) if z.ref_atr else None
+        d = (lo - price) if lo > price else (price - hi)
+        return {"zone_id": z.id, "band": [round(lo, 5), round(hi, 5)],
+                "dist_atr": round(d / ref_atr, 3) if ref_atr else None,
+                "score": float(z.score), "n_timeframes": z.n_timeframes}
+
+    res_i, sup_i = nearest_sides([(float(z.price_low), float(z.price_high)) for z in zones], price)
+
     return {"map_version_id": m["version_id"], "per_tf": per_tf,
             "nearest_zone": nearest_zone, "zones_within_2atr": within,
+            "nearest_resistance": _side_zone(res_i), "nearest_support": _side_zone(sup_i),
             "htf_alignment": _htf_alignment(ctx.direction, m["structures"])}
 
 

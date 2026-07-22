@@ -49,3 +49,26 @@ def zone_side(price: float, low: float, high: float) -> str:
     if low <= price <= high:
         return "inside"
     return "above" if price > high else "below"
+
+
+def nearest_sides(bands, price):
+    """Indices of the nearest RESISTANCE and SUPPORT band around `price` (#116).
+
+    `bands` is a list of (low, high) tuples. Resistance = the nearest band lying
+    entirely ABOVE price (low > price); support = the nearest entirely BELOW
+    (high < price). Distance is measured to the band's near edge. A band that
+    straddles price is neither side. Returns (resistance_idx, support_idx); either
+    may be None when that side has no band. Score-agnostic on purpose — so a
+    score-ranked list can never hide one side."""
+    res_i = sup_i = None
+    res_d = sup_d = None
+    for i, (lo, hi) in enumerate(bands):
+        if lo > price:                                  # band above -> resistance
+            d = lo - price
+            if res_d is None or d < res_d:
+                res_d, res_i = d, i
+        elif hi < price:                                # band below -> support
+            d = price - hi
+            if sup_d is None or d < sup_d:
+                sup_d, sup_i = d, i
+    return res_i, sup_i

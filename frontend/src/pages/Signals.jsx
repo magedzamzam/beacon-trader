@@ -184,6 +184,11 @@ function SignalStructureModal({ signalId, onClose }) {
   const perTf = row?.per_tf || {};
   const tfs = TF_ORDER.filter(t => perTf[t]);
   const nz = row?.nearest_zone;
+  const res = row?.nearest_resistance;   // nearest zone ABOVE price
+  const sup = row?.nearest_support;      // nearest zone BELOW price
+  const sideZone = (z) => !z ? <span className="text-muted">—</span> : (
+    <span className="num">band <b>{z.band[0]}–{z.band[1]}</b> · dist <b>{z.dist_atr == null ? "—" : `${z.dist_atr} ATR`}</b> · score <b>{z.score}</b> · {z.n_timeframes} TF</span>
+  );
   return (
     <Modal title={`Structure & magnets — signal #${signalId}`} onClose={onClose}>
       {err && <ErrorNote>{err}</ErrorNote>}
@@ -217,8 +222,19 @@ function SignalStructureModal({ signalId, onClose }) {
             </tbody>
           </Table>
 
+          {/* Side-aware magnets (#116): show resistance above AND support below,
+              so a score-ranked list never hides one side for a directional read. */}
+          <div className="text-xs space-y-1">
+            <div className="flex flex-wrap items-baseline gap-2">
+              <span className="text-muted w-32 shrink-0">Resistance (above)</span>{sideZone(res)}
+            </div>
+            <div className="flex flex-wrap items-baseline gap-2">
+              <span className="text-muted w-32 shrink-0">Support (below)</span>{sideZone(sup)}
+            </div>
+          </div>
+
           <div className="text-xs">
-            <div className="text-muted mb-1">Nearest magnet zone</div>
+            <div className="text-muted mb-1">Nearest magnet zone (either side)</div>
             {!nz ? <span className="text-muted">—</span> : (
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 num">
                 <span>band <b>{nz.band[0]}–{nz.band[1]}</b></span>

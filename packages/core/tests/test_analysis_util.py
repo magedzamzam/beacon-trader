@@ -1,6 +1,6 @@
 """Shared analytics helpers (#69) — pure, bare-box unit tests."""
 from beacon_core.analysis._util import (bars_col, dig, dig_num, overlay_config,
-                                        adverse_side, zone_side)
+                                        adverse_side, zone_side, nearest_sides)
 
 
 def test_bars_col_skips_missing():
@@ -48,6 +48,26 @@ def test_zone_side():
     assert zone_side(100, 90, 110) == "inside"
     assert zone_side(120, 90, 110) == "above"
     assert zone_side(80, 90, 110) == "below"
+
+
+def test_nearest_sides_picks_closest_each_side():
+    # bands: two above price=100, two below. Expect the NEAREST on each side,
+    # regardless of order or which side is denser (#116).
+    bands = [(101, 103),   # 0: above, near  -> resistance
+             (108, 110),   # 1: above, far
+             (95, 98),     # 2: below, near  -> support
+             (80, 85)]     # 3: below, far
+    res_i, sup_i = nearest_sides(bands, 100)
+    assert res_i == 0 and sup_i == 2
+
+
+def test_nearest_sides_ignores_straddling_and_missing_side():
+    # a band straddling price is neither side; a side with no band -> None
+    bands = [(98, 102),    # straddles price -> ignored
+             (105, 107)]   # above -> resistance
+    res_i, sup_i = nearest_sides(bands, 100)
+    assert res_i == 1 and sup_i is None
+    assert nearest_sides([], 100) == (None, None)
 
 
 if __name__ == "__main__":

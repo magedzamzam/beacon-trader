@@ -188,8 +188,28 @@ function StructureMapCard({ map, price, busy, onRecompute }) {
   tfs.forEach(t => { counts[structures[t].label] = (counts[structures[t].label] || 0) + 1; });
   const bias = counts.bull > counts.bear ? "bull" : counts.bear > counts.bull ? "bear" : "range";
 
-  // Keep only the strongest zones, then order high → low for the ladder.
-  const strongest = [...(map?.zones || [])].sort((a, b) => b.score - a.score).slice(0, TOP_ZONES);
+  // Keep only the strongest zones, then order high → low for the ladder. When we
+  // know the live price, pick the strongest from EACH side and always include the
+  // nearest zone above/below — so a score-ranked list can't hide one side (#116):
+  // dense below-price structure otherwise buries every resistance overhead.
+  const allZones = map?.zones || [];
+  let strongest;
+  if (price != null && allZones.length) {
+    const half = Math.ceil(TOP_ZONES / 2);
+    const byScore = (a, b) => b.score - a.score;
+    const above = allZones.filter(z => z.mid > price).sort(byScore);
+    const below = allZones.filter(z => z.mid <= price).sort(byScore);
+    const pick = (arr, nearest) => {
+      const top = arr.slice(0, half);
+      if (nearest && !top.includes(nearest)) top.push(nearest);  // never hide the nearest side
+      return top;
+    };
+    const nearestAbove = [...above].sort((a, b) => a.mid - b.mid)[0];   // lowest above price
+    const nearestBelow = [...below].sort((a, b) => b.mid - a.mid)[0];   // highest below price
+    strongest = [...pick(above, nearestAbove), ...pick(below, nearestBelow)];
+  } else {
+    strongest = [...allZones].sort((a, b) => b.score - a.score).slice(0, TOP_ZONES);
+  }
   const maxScore = Math.max(1, ...strongest.map(z => z.score));
   const ladder = [...strongest].sort((a, b) => b.mid - a.mid);
   const priceShown = price != null && ladder.length > 0;

@@ -12,6 +12,7 @@ from beacon_core.analysis.report import (channel_regime_report,
                                          execution_geometry_ab_report)
 from beacon_core.analysis.sidecar import load_config
 from beacon_core.analysis import structure_map as struct_map
+from beacon_core.analysis._util import nearest_sides
 from beacon_core.analysis.structure import DEFAULT_STRUCTURE
 from beacon_core.db.models import ExecutionStrategy, SignalAnalytics
 from beacon_core.execution import strategy as ST
@@ -128,11 +129,44 @@ async def structure_recompute():
 
 
 @router.get("/structure/map")
-async def structure_map_view(symbol: str = "XAUUSD", db: AsyncSession = Depends(get_db)):
-    """The active (current) structure/magnet map: per-TF structure + magnet zones."""
+async def structure_map_view(symbol: str = "XAUUSD", price: float = None,
+                             db: AsyncSession = Depends(get_db)):
+    """The active (current) structure/magnet map: per-TF structure + magnet zones.
+
+    Also surfaces the nearest magnet on EACH side of a reference price (#116) so a
+    consumer never has to infer resistance-vs-support from the score-ranked `zones`
+    list (which the higher-scoring side otherwise dominates). `price` defaults to
+    the finest-TF close captured at recompute time when not supplied."""
     m = await struct_map.active_map(db, symbol)
     if not m:
-        return {"symbol": symbol, "version_id": None, "structures": {}, "zones": []}
+        return {"symbol": symbol, "version_id": None, "structures": {}, "zones": [],
+                "reference_price": None, "nearest_resistance": None, "nearest_support": None}
+
+    ref_price = price
+    if ref_price is None:                       # fall back to the freshest recompute-time close
+        for tf in ("1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"):
+            s = m["structures"].get(tf)
+            if s is not None and s.bias_price is not None:
+                ref_price = float(s.bias_price)
+                break
+
+    zones = m["zones"]
+
+    def _side_zone(i):
+        if i is None:
+            return None
+        z = zones[i]
+        lo, hi = float(z.price_low), float(z.price_high)
+        ref_atr = float(z.ref_atr) if z.ref_atr else None
+        d = (lo - ref_price) if lo > ref_price else (ref_price - hi)
+        return {"rank": z.rank, "band": [lo, hi], "mid": float(z.mid),
+                "score": float(z.score), "n_timeframes": z.n_timeframes,
+                "dist": round(d, 5), "dist_atr": round(d / ref_atr, 3) if ref_atr else None}
+
+    res_i = sup_i = None
+    if ref_price is not None:
+        res_i, sup_i = nearest_sides([(float(z.price_low), float(z.price_high)) for z in zones], ref_price)
+
     return {
         "symbol": symbol, "version_id": m["version_id"],
         "structures": {tf: {
@@ -146,6 +180,9 @@ async def structure_map_view(symbol: str = "XAUUSD", db: AsyncSession = Depends(
             "mid": float(z.mid), "score": float(z.score),
             "n_timeframes": z.n_timeframes, "members": z.members,
         } for z in m["zones"]],
+        "reference_price": ref_price,
+        "nearest_resistance": _side_zone(res_i),
+        "nearest_support": _side_zone(sup_i),
     }
 
 
