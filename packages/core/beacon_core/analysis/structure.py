@@ -42,7 +42,10 @@ DEFAULT_STRUCTURE = {
                      "swing_high": 1.2, "swing_low": 1.2,
                      "equal_high": 1.0, "equal_low": 1.0,
                      "order_block": 1.0, "fvg": 0.8},
-    "recompute_cadence_days": 7,
+    "recompute_cadence_days": 1,     # daily, anchored to the UTC day boundary (#115)
+    "break_trigger_tf": "4h",        # recompute on a range break on this anchor TF (#115)
+    "break_atr_buffer": 0.25,        # break must exceed the range edge by this * ATR (noise guard)
+    "break_debounce_minutes": 30,    # a break can't re-fire within this window of the last recompute
     "min_bars_by_tf": {"1w": 40, "1d": 60, "4h": 80, "1h": 100,
                        "30m": 100, "15m": 120, "5m": 150, "1m": 150},
     "max_bars": 300,
@@ -258,6 +261,36 @@ def cluster_levels(levels: List[dict], tolerance: float,
     for i, z in enumerate(zones):
         z["rank"] = i + 1
     return zones
+
+
+# ============================ recompute cadence (#115) ========================
+def scheduled_recompute_due(last, now, cadence_days) -> bool:
+    """Daily-anchored schedule gate for the map recompute (#115).
+
+    Due when no map exists yet (`last is None`), or when at least `cadence_days`
+    UTC *calendar* days have elapsed since the last recompute. Anchoring to the day
+    boundary (date diff, not "elapsed seconds since last run") makes it fire once
+    per day at a consistent point instead of drifting by whenever it last ran.
+    `last`/`now` are tz-aware UTC datetimes."""
+    if last is None:
+        return True
+    days = max(1, int(cadence_days or 1))
+    return (now.date() - last.date()).days >= days
+
+
+def range_break(price, range_low, range_high, atr, buffer_atr) -> Optional[str]:
+    """On-break gate (#115): 'up'/'down' when `price` has broken beyond the active
+    dealing range by more than `buffer_atr` * ATR — the fib anchors are stale and a
+    recompute is warranted — else None. The ATR buffer keeps noise just past an edge
+    from triggering. Missing price/ATR (or ATR <= 0) -> None (can't judge)."""
+    if price is None or atr is None or atr <= 0:
+        return None
+    buf = float(buffer_atr) * float(atr)
+    if range_high is not None and price > float(range_high) + buf:
+        return "up"
+    if range_low is not None and price < float(range_low) - buf:
+        return "down"
+    return None
 
 
 # ---- composability: the common feature-contribution contract (#61/#70) --------

@@ -118,6 +118,33 @@ def test_config_overlay_and_contract():
     assert set(fc) == {"name", "value", "direction", "weight", "confidence"}
 
 
+def test_scheduled_recompute_due_daily_anchored():
+    # #115: daily cadence, anchored to the UTC day boundary (not "24h since run").
+    from datetime import datetime, timezone
+    utc = timezone.utc
+    assert S.scheduled_recompute_due(None, datetime(2026, 7, 22, 3, 0, tzinfo=utc), 1) is True
+    # same UTC day as last run -> not due, even 23h later
+    last = datetime(2026, 7, 22, 1, 0, tzinfo=utc)
+    assert S.scheduled_recompute_due(last, datetime(2026, 7, 22, 23, 59, tzinfo=utc), 1) is False
+    # a new UTC day has started -> due (fires at the boundary, doesn't drift)
+    assert S.scheduled_recompute_due(last, datetime(2026, 7, 23, 0, 30, tzinfo=utc), 1) is True
+    # cadence 7 -> needs 7 calendar days
+    assert S.scheduled_recompute_due(last, datetime(2026, 7, 28, 12, 0, tzinfo=utc), 7) is False
+    assert S.scheduled_recompute_due(last, datetime(2026, 7, 29, 0, 1, tzinfo=utc), 7) is True
+
+
+def test_range_break_fires_beyond_buffer_only():
+    # #115: break must exceed the range edge by buffer_atr*ATR (noise guard).
+    # range 100..120, ATR 10, buffer 0.25 -> need > 2.5 pts beyond an edge.
+    assert S.range_break(121.0, 100, 120, 10, 0.25) is None    # inside buffer -> no break
+    assert S.range_break(123.0, 100, 120, 10, 0.25) == "up"    # clears the upper buffer
+    assert S.range_break(97.0, 100, 120, 10, 0.25) == "down"   # clears the lower buffer
+    assert S.range_break(110.0, 100, 120, 10, 0.25) is None    # mid-range
+    # can't judge without a valid ATR / price
+    assert S.range_break(200.0, 100, 120, 0, 0.25) is None
+    assert S.range_break(None, 100, 120, 10, 0.25) is None
+
+
 if __name__ == "__main__":
     for n, f in sorted(globals().items()):
         if n.startswith("test_") and callable(f):

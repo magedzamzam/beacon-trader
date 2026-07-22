@@ -30,6 +30,7 @@ from beacon_core.brokers import build_adapter, symbol_map
 from beacon_core.brokers.types import AuthError, ModifyPositionRequest
 from beacon_core.strategy.rules import PositionCtx, evaluate, DEFAULT_SL_RULES
 from beacon_core.settings_store import get_setting, set_setting
+from beacon_core.analysis import structure as S
 from beacon_core.analysis import structure_map as struct_map
 from beacon_core.tasks import spawn_bg
 from beacon_core.timeutil import utcnow, parse_iso_utc
@@ -235,6 +236,10 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
         price = (quote.bid if trade.direction == "BUY" else quote.offer) or quote.last_price
         if price is None:
             return
+        # Cache the freshest live price so the structure-map on-break check (#115)
+        # can gate on it without an extra broker call (mid, side-agnostic).
+        mid = (quote.bid + quote.offer) / 2 if (quote.bid is not None and quote.offer is not None) else price
+        _LAST_PRICE[trade.symbol] = (float(mid), utcnow())
 
         positions = {p.broker_position_ref: p for p in await adapter.list_positions()}
         orders = {o.broker_order_ref: o for o in await adapter.list_orders()}
@@ -648,9 +653,49 @@ async def tick() -> None:
 
 _STRUCT_RECOMPUTE_KEY = "structure_last_recompute"
 
+# Freshest live mid-price per symbol, captured by the trade loop, so the on-break
+# structure check (#115) never needs its own broker call. {symbol: (price, ts)}.
+_LAST_PRICE: dict = {}
+_PRICE_TTL_S = 300          # ignore a cached price older than this for the break check
+
+
+async def _structure_break(s, cfg, last, now):
+    """On-break gate for the map recompute (#115): return a short reason string
+    when the live price has broken beyond the ACTIVE map's dealing range on
+    `break_trigger_tf` by more than `break_atr_buffer` * ATR (fib anchors stale),
+    else None. Debounced against the last recompute so one break can't re-fire
+    repeatedly. Uses the trade loop's cached price (no extra broker call); if none
+    is fresh, the daily scheduled cadence still covers the map."""
+    debounce = float(cfg.get("break_debounce_minutes", 30)) * 60
+    if last is not None and (now - last).total_seconds() < debounce:
+        return None
+    tf = str(cfg.get("break_trigger_tf", "4h"))
+    buffer_atr = float(cfg.get("break_atr_buffer", 0.25))
+    for symbol in (cfg.get("symbols") or []):
+        cached = _LAST_PRICE.get(symbol)
+        if cached is None or (now - cached[1]).total_seconds() > _PRICE_TTL_S:
+            continue
+        m = await struct_map.active_map(s, symbol)
+        if not m:
+            continue
+        st = m["structures"].get(tf)
+        if st is None:
+            continue
+        brk = S.range_break(cached[0], st.range_low, st.range_high, st.atr, buffer_atr)
+        if brk:
+            return f"{symbol}:{brk}"
+    return None
+
 
 async def _maybe_recompute_structure() -> None:
-    """Weekly (config) recompute of the persistent structure/magnet map (#61).
+    """Recompute the persistent structure/magnet map (#61) when either gate fires (#115):
+
+      * SCHEDULED — a new UTC day has started (config `recompute_cadence_days`,
+        default 1), anchored to the day boundary so it fires once per day at a
+        consistent point instead of drifting by run time; or
+      * ON BREAK — the live price has broken beyond the active map's dealing range
+        on `break_trigger_tf`, invalidating the fib anchors (debounced).
+
     Best-effort, background, own session — zero impact on the trade loop. The
     timestamp is stamped BEFORE launching so a slow recompute never re-triggers."""
     try:
@@ -658,13 +703,20 @@ async def _maybe_recompute_structure() -> None:
             cfg = await struct_map.load_config(s)
             if not cfg.get("enabled"):
                 return
+            now = utcnow()
             last = parse_iso_utc(await get_setting(s, _STRUCT_RECOMPUTE_KEY, None))
-            cadence = float(cfg.get("recompute_cadence_days", 7)) * 86400
-            if last is not None and (utcnow() - last).total_seconds() < cadence:
+            reason = None
+            if S.scheduled_recompute_due(last, now, cfg.get("recompute_cadence_days", 1)):
+                reason = "scheduled"
+            else:
+                brk = await _structure_break(s, cfg, last, now)
+                if brk:
+                    reason = f"break:{brk}"
+            if reason is None:
                 return
-            await set_setting(s, _STRUCT_RECOMPUTE_KEY, utcnow().isoformat())
+            await set_setting(s, _STRUCT_RECOMPUTE_KEY, now.isoformat())
             await s.commit()
-        log.info("structure: weekly recompute due — launching in background")
+        log.info("structure: recompute due (%s) — launching in background", reason)
         spawn_bg(struct_map.recompute_all(cfg))
     except Exception as exc:                    # never disturb the monitor loop
         log.warning("structure recompute check failed: %s", exc)
