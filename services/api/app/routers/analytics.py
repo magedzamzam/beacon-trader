@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from beacon_core.analysis.report import (channel_regime_report,
+                                         channel_verdict_report,
                                          structure_outcome_report,
                                          structure_magnet_outcome_report,
                                          trend_alignment_outcome_report,
@@ -45,6 +46,17 @@ async def put_config(body: dict, db: AsyncSession = Depends(get_db)):
             pass
     await set_setting(db, "analytics", cfg)
     return cfg
+
+
+@router.get("/synthesis")
+async def synthesis(date_from: str = None, date_to: str = None,
+                    db: AsyncSession = Depends(get_db)):
+    """Decision-layer synthesis (#117): the weekly per-channel keep/watch/cut
+    verdict with an explicit significance state, and an honest 'no credible edge
+    yet' when nothing has crossed the N floor. A pure reduction of the same
+    labelled analytics→trade join `/correlation` details — no new estimator,
+    nothing gates on it. Optional date range anchored on signal time."""
+    return await channel_verdict_report(db, parse_iso_utc(date_from), parse_iso_utc(date_to))
 
 
 @router.get("/correlation")

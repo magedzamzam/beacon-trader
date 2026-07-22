@@ -39,6 +39,105 @@ def _summary(vals):
     return {"n": len(vals), "mean": round(sum(vals) / len(vals), 4)}
 
 
+# Closed-trade floor for a per-channel verdict to be "significant" (§4). Correlated
+# signals mean effective-N << raw-N, so treat this as a floor, not a guarantee.
+SIGNIFICANCE_N = 30
+
+
+def channel_verdict_rollup(rows, significance_n: int = SIGNIFICANCE_N) -> dict:
+    """Pure synthesis behind /analytics/synthesis — the "so what?" layer (#117).
+
+    Pools the labelled analytics→trade join PER CHANNEL (across regimes) into a
+    keep / watch / cut read with an EXPLICIT significance state, so a page can lead
+    with a decision instead of asking the operator to assemble one from five tables.
+    DB-free so the reduction is unit-testable on a bare box (repo convention).
+
+    This is NOT a new estimator: it reuses `posterior` and reduces existing outputs
+    into a verdict. `rows`: iterable of {channel, realized_pl}. A channel is
+    `significant` at n≥significance_n, `watch` from ceil(sig/2)..sig-1, else
+    `gathering`. Verdict is keep (ci_low>base) / cut (ci_high<base) / hold
+    (straddles base) only once significant; watch/gathering are explicitly
+    provisional. Shadow — nothing gates on this."""
+    watch_n = max(1, (significance_n + 1) // 2)
+    buckets = defaultdict(lambda: {"n": 0, "wins": 0, "pl": 0.0})
+    overall_n = overall_wins = 0
+    for r in rows:
+        pl = r.get("realized_pl")
+        if pl is None:
+            continue
+        pl = float(pl)
+        win = pl > 0
+        chan = r.get("channel") or "Unattributed"
+        b = buckets[chan]
+        b["n"] += 1
+        b["wins"] += 1 if win else 0
+        b["pl"] += pl
+        overall_n += 1
+        overall_wins += 1 if win else 0
+    base = (overall_wins / overall_n) if overall_n else 0.5
+
+    def _verdict(n, ci_low, ci_high):
+        if n < watch_n:
+            return "gathering", "gathering"
+        if n < significance_n:
+            return "watch", "watch"
+        if ci_low > base:
+            return "significant", "keep"
+        if ci_high < base:
+            return "significant", "cut"
+        return "significant", "hold"
+
+    channels = []
+    for chan, b in buckets.items():
+        post = posterior(b["wins"], b["n"], base)
+        state, verdict = _verdict(b["n"], post["ci_low"], post["ci_high"])
+        channels.append({
+            "channel": chan, "n": b["n"], "wins": b["wins"],
+            "win_rate": round(b["wins"] / b["n"], 4) if b["n"] else None,
+            "expectancy": round(b["pl"] / b["n"], 4) if b["n"] else None,
+            "ci_low": round(post["ci_low"], 4), "ci_high": round(post["ci_high"], 4),
+            "state": state, "verdict": verdict,
+        })
+    # significant first, then most reliably-good (highest lower bound), then size
+    order = {"significant": 0, "watch": 1, "gathering": 2}
+    channels.sort(key=lambda c: (order[c["state"]], -c["ci_low"], -c["n"]))
+    n_sig = sum(1 for c in channels if c["state"] == "significant")
+    any_edge = any(c["verdict"] in ("keep", "cut") for c in channels)
+    return {
+        "significance_n": significance_n, "watch_n": watch_n,
+        "base_rate": round(base, 4), "n_labelled": overall_n,
+        "n_channels": len(channels), "n_significant": n_sig,
+        "any_credible_edge": any_edge, "channels": channels,
+        "note": ("Weekly channel verdict (#117): labelled trades pooled per channel; "
+                 "keep/watch/cut from the 90%% credible interval vs the base rate. "
+                 "Significant only at n>=%d closed (§4 — correlated signals mean "
+                 "effective-N << raw-N). Shadow — nothing gates on this." % significance_n),
+    }
+
+
+async def channel_verdict_report(session, frm=None, to=None,
+                                 significance_n: int = SIGNIFICANCE_N) -> dict:
+    """Async wrapper (#117): the labelled analytics→trade join pooled per channel
+    into the keep/watch/cut synthesis. Same join and SIGNAL-time [frm, to) anchor
+    as `channel_regime_report`, so the verdict can't drift from the detail table it
+    summarises. Read-only / shadow."""
+    from sqlalchemy import select
+    from ..db.models import SignalAnalytics, Signal, Source, Trade
+
+    q = (select(Source.name, Trade.realized_pl)
+         .join(Signal, Signal.id == SignalAnalytics.signal_id)
+         .join(Trade, Trade.signal_id == SignalAnalytics.signal_id)
+         .outerjoin(Source, Source.id == Signal.source_id))
+    if frm is not None:
+        q = q.where(Signal.created_at >= frm)
+    if to is not None:
+        q = q.where(Signal.created_at < to)
+    rows = (await session.execute(q)).all()
+    return channel_verdict_rollup(
+        [{"channel": name, "realized_pl": pl} for name, pl in rows],
+        significance_n=significance_n)
+
+
 async def channel_regime_report(session, frm=None, to=None) -> dict:
     """Per-channel × regime performance + regime mix by channel + a
     win/loss feature read, all off the labelled analytics→trade join.

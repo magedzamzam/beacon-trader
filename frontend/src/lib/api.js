@@ -125,6 +125,7 @@ export const api = {
   // (entry filter + chase guard moved to /strategies — Entry / Filtration pillars, #104)
   analyticsConfig: () => req("/analytics/config"),
   saveAnalyticsConfig: (c) => req("/analytics/config", { method: "PUT", body: JSON.stringify(c) }),
+  analyticsSynthesis: (range = {}) => req(`/analytics/synthesis${_perfQs("", range)}`),
   analyticsCorrelation: (range = {}) => req(`/analytics/correlation${_perfQs("", range)}`),
   analyticsStructure: (range = {}) => req(`/analytics/structure${_perfQs("", range)}`),
   analyticsTrendAlignment: (range = {}) => req(`/analytics/trend-alignment${_perfQs("", range)}`),
