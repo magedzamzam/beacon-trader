@@ -115,19 +115,30 @@ def channel_verdict_rollup(rows, significance_n: int = SIGNIFICANCE_N) -> dict:
     }
 
 
+def _channel_verdict_query():
+    """The labelled analytics→trade join behind channel_verdict_report, factored
+    out so it's compile-testable on a bare box. Anchors the FROM on SignalAnalytics
+    EXPLICITLY: unlike channel_regime_report this select carries no SignalAnalytics
+    column, so SQLAlchemy can't infer the join's left side ("Can't determine which
+    FROM clause to join from") without select_from."""
+    from sqlalchemy import select
+    from ..db.models import SignalAnalytics, Signal, Source, Trade
+    return (select(Source.name, Trade.realized_pl)
+            .select_from(SignalAnalytics)
+            .join(Signal, Signal.id == SignalAnalytics.signal_id)
+            .join(Trade, Trade.signal_id == SignalAnalytics.signal_id)
+            .outerjoin(Source, Source.id == Signal.source_id))
+
+
 async def channel_verdict_report(session, frm=None, to=None,
                                  significance_n: int = SIGNIFICANCE_N) -> dict:
     """Async wrapper (#117): the labelled analytics→trade join pooled per channel
     into the keep/watch/cut synthesis. Same join and SIGNAL-time [frm, to) anchor
     as `channel_regime_report`, so the verdict can't drift from the detail table it
     summarises. Read-only / shadow."""
-    from sqlalchemy import select
-    from ..db.models import SignalAnalytics, Signal, Source, Trade
+    from ..db.models import Signal
 
-    q = (select(Source.name, Trade.realized_pl)
-         .join(Signal, Signal.id == SignalAnalytics.signal_id)
-         .join(Trade, Trade.signal_id == SignalAnalytics.signal_id)
-         .outerjoin(Source, Source.id == Signal.source_id))
+    q = _channel_verdict_query()
     if frm is not None:
         q = q.where(Signal.created_at >= frm)
     if to is not None:

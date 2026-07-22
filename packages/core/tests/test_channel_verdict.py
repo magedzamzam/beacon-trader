@@ -1,7 +1,17 @@
 """Weekly channel verdict roll-up (#117): the keep/watch/cut synthesis behind
 /analytics/synthesis. Pure math (reuses `posterior`), tested DB-free — the
 decision layer must never over-state significance the sample doesn't support."""
-from beacon_core.analysis.report import channel_verdict_rollup, SIGNIFICANCE_N
+from beacon_core.analysis.report import (channel_verdict_rollup, SIGNIFICANCE_N,
+                                         _channel_verdict_query)
+
+
+def test_verdict_query_compiles():
+    """Regression (#117): the join must compile. The select carries no
+    SignalAnalytics column, so without an explicit select_from SQLAlchemy raises
+    'Can't determine which FROM clause to join from' at compile time — a 500 the
+    unit-testable rollup can't catch. Compiling the real query guards it."""
+    sql = str(_channel_verdict_query().compile()).lower()
+    assert "signal_analytics" in sql and "join" in sql
 
 
 def _rows(channel, wins, losses):
