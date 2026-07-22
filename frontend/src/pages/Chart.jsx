@@ -14,7 +14,7 @@ function cssVar(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
-export default function Chart() {
+export default function Chart({ account }) {
   const wrap = useRef(null);
   const chartRef = useRef(null);
   const seriesRef = useRef(null);
@@ -66,14 +66,14 @@ export default function Chart() {
     const t = setInterval(draw, 20000);
     return () => { alive = false; clearInterval(t); };
     // eslint-disable-next-line
-  }, [resolution]);
+  }, [resolution, account]);   // #118 redraw overlays when the account filter changes
 
   const drawPositions = async () => {
     const series = seriesRef.current; if (!series) return;
     linesRef.current.forEach(l => series.removePriceLine(l));
     linesRef.current = [];
     try {
-      const trades = await api.trades();
+      const trades = await api.trades(account);   // #118 overlay only the selected account's positions
       const legs = [];
       trades.forEach(t => t.legs.filter(l => OPEN.has(l.status)).forEach(l => legs.push({ t, l })));
       const seenEntry = new Set();

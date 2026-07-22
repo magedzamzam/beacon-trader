@@ -14,16 +14,20 @@ const TONE = {
   closed_by_user: "muted", cancelled_by_user: "warn", sl_moved_by_user: "long",
 };
 
-export default function Activity() {
+export default function Activity({ account }) {
   const [rows, setRows] = useState(null);
   const [err, setErr] = useState(null);
   const [detail, setDetail] = useState(null);
 
   const load = async () => {
-    try { setRows(await api.events("?limit=300")); setErr(null); }
+    try {
+      const q = account ? `?limit=300&account_id=${account}` : "?limit=300";
+      setRows(await api.events(q)); setErr(null);
+    }
     catch (e) { setErr(e.message); }
   };
-  useEffect(() => { load(); }, []);
+  // Follow the global account filter; refetch when it changes.
+  useEffect(() => { load(); }, [account]);
 
   return (
     <div className="space-y-3">

@@ -4,8 +4,9 @@ import TradeDetail from "../components/TradeDetail";
 import { api } from "../lib/api";
 import { useData, money, tone } from "./_useData";
 
-export default function History() {
-  const { data: trades } = useData(api.trades);
+export default function History({ account }) {
+  // Follow the global account filter; refetch when it changes.
+  const { data: trades } = useData(() => api.trades(account), [account]);
   const [detail, setDetail] = useState(null);
   if (!trades) return <Card><Empty>Loading…</Empty></Card>;
   const rows = [];

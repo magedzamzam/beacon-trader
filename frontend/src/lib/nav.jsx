@@ -41,13 +41,18 @@ export const NAV = [
   { title: "Overview", items: [
     { id: "dashboard", label: "Dashboard", icon: Activity },
   ]},
-  { title: "Live Trading", items: [
+  // Split mirrors the ingestion-vs-execution boundary (#118): a signal has one
+  // source (Telegram) but is executed per account. So Trading pages follow the
+  // global account filter; Telegram pages are account-agnostic and ignore it.
+  { title: "Trading", items: [
     { id: "positions", label: "Positions", icon: Radar },
-    { id: "signals", label: "Signals", icon: Radio },
     { id: "chart", label: "Chart", icon: CandlestickChart },
-    { id: "messages", label: "Messages", icon: MessageSquare },
     { id: "activity", label: "Activity", icon: GitBranch },
     { id: "history", label: "History", icon: ListChecks },
+  ]},
+  { title: "Telegram", items: [
+    { id: "signals", label: "Signals", icon: Radio },
+    { id: "messages", label: "Messages", icon: MessageSquare },
   ]},
   { title: "Intelligence", items: [
     { id: "analytics", label: "Analytics", icon: Sigma },

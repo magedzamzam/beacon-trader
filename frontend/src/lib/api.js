@@ -45,7 +45,7 @@ export const api = {
   // reads
   health: () => req("/health"),
   dashboard: (accountId = "") => req(`/dashboard/summary${accountId ? `?account_id=${accountId}` : ""}`),
-  trades: () => req("/trades"),
+  trades: (accountId = "") => req(`/trades${accountId ? `?account_id=${accountId}` : ""}`),
   signals: (q = "") => req(`/signals${q}`),
   sources: (includeArchived = false) => req(`/sources${includeArchived ? "?include_archived=true" : ""}`),
   brokers: () => req("/brokers"),

@@ -7,7 +7,7 @@ import { api } from "../lib/api";
 
 const OPEN = new Set(["open", "working", "pending"]);
 
-export default function Positions() {
+export default function Positions({ account }) {
   const [trades, setTrades] = useState(null);
   const [err, setErr] = useState(null);
   const [sel, setSel] = useState(new Set());
@@ -16,9 +16,10 @@ export default function Positions() {
   const [detail, setDetail] = useState(null);
 
   const load = async () => {
-    try { setTrades(await api.trades()); setErr(null); } catch (e) { setErr(e.message); }
+    try { setTrades(await api.trades(account)); setErr(null); } catch (e) { setErr(e.message); }
   };
-  useEffect(() => { load(); const t = setInterval(load, 6000); return () => clearInterval(t); }, []);
+  // Re-fetch (and restart polling) whenever the global account filter changes.
+  useEffect(() => { load(); const t = setInterval(load, 6000); return () => clearInterval(t); }, [account]);
 
   const rows = [];
   (trades || []).forEach(t => t.legs.filter(l => OPEN.has(l.status)).forEach(l => rows.push({ t, l })));

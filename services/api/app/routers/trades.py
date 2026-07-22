@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from beacon_core.db.models import (AiAssessment, Event, Leg, PositionActivity,
                                    Signal, SignalFeature, Source, Trade)
+from beacon_core.db.filters import scope_trades_to_account
 from ..deps import get_db
 from ..auth import require_token
 
@@ -12,7 +13,7 @@ router = APIRouter(prefix="/trades", tags=["trades"], dependencies=[Depends(requ
 
 @router.get("")
 async def list_trades(db: AsyncSession = Depends(get_db), limit: int = 100,
-                      source_id: int | None = None):
+                      source_id: int | None = None, account_id: int | None = None):
     # Join Trade -> Signal -> Source so each trade carries its originating channel.
     q = (select(Trade, Signal.source_id, Source.name, Source.kind)
          .outerjoin(Signal, Signal.id == Trade.signal_id)
@@ -20,6 +21,7 @@ async def list_trades(db: AsyncSession = Depends(get_db), limit: int = 100,
          .order_by(Trade.id.desc()).limit(limit))
     if source_id is not None:
         q = q.where(Signal.source_id == source_id)
+    q = scope_trades_to_account(q, account_id)   # #118 honor the global account filter
     rows = (await db.execute(q)).all()
     out = []
     for (t, src_id, sname, skind) in rows:
