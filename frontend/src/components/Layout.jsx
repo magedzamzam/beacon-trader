@@ -3,7 +3,7 @@ import { Radar, Moon, Sun, KeyRound, LogOut, Menu, X, ChevronDown,
          ChevronsLeft, ChevronsRight } from "lucide-react";
 import { api, getToken, setToken, clearToken } from "../lib/api";
 import { toggleTheme } from "../lib/theme";
-import { NAV, leafLabel, parentTitleOf } from "../lib/nav";
+import { NAV, leafLabel, parentTitleOf, isAccountScoped } from "../lib/nav";
 
 // A leaf destination: navigates to its view id.
 function NavLeaf({ item, view, go, collapsed, child }) {
@@ -204,15 +204,21 @@ export default function Layout({ view, setView, children, accounts = [], account
           </div>
           <div className="flex items-center gap-2">
             <BrokerChip />
-            {setAccount && (
-              <select value={account} onChange={e => setAccount(e.target.value)}
-                title="Filter the whole app by account"
-                className="bg-panel2 border border-edge rounded-lg px-2.5 py-1.5 text-xs text-ink
-                           max-w-[40vw] sm:max-w-none outline-none focus:border-beacon">
-                <option value="">All accounts</option>
-                {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-              </select>
-            )}
+            {setAccount && (() => {
+              const _acctScoped = isAccountScoped(view);
+              return (
+                <select value={account} onChange={e => setAccount(e.target.value)}
+                  title={_acctScoped
+                    ? "Filter the whole app by account"
+                    : "This page isn’t account-specific — the filter doesn’t change what you see here"}
+                  className={`bg-panel2 border border-edge rounded-lg px-2.5 py-1.5 text-xs text-ink
+                             max-w-[40vw] sm:max-w-none outline-none focus:border-beacon transition-opacity
+                             ${_acctScoped ? "" : "opacity-40"}`}>
+                  <option value="">All accounts</option>
+                  {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                </select>
+              );
+            })()}
             <button onClick={() => setTokenOpen(v => !v)}
               className="p-2 rounded-lg text-muted hover:text-ink hover:bg-panel" title="API token">
               <KeyRound className="w-4 h-4" />

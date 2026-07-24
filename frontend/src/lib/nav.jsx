@@ -109,6 +109,15 @@ export const REDIRECTS = { configuration: "brokers" };
 export const LEAVES = NAV.flatMap(g =>
   g.items.flatMap(it => (it.children ? it.children : [it])));
 
+// Views whose content actually responds to the global account filter. Everywhere
+// else the header filter is inert: Telegram is account-agnostic by design (#118),
+// Analytics/Reconciler aggregate across the whole book, and Settings pages are
+// global config. Layout uses this to dim the filter where it has no effect (#119).
+export const ACCOUNT_SCOPED = new Set([
+  "dashboard", "positions", "chart", "activity", "history", "analysis", "performance",
+]);
+export const isAccountScoped = (id) => ACCOUNT_SCOPED.has(id);
+
 export function leafLabel(id) {
   const l = LEAVES.find(x => x.id === id);
   return l ? l.label : id;
