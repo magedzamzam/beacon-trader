@@ -13,6 +13,17 @@ const TF_ORDER = ["1w", "1d", "4h", "1h", "30m", "15m", "5m", "1m"];
 const fmt = (v, d = 2) => (v == null ? "—" : Number(v).toFixed(d));
 const pct0 = (v) => (v == null ? "—" : `${(v * 100).toFixed(0)}%`);
 
+// Multi-TF structure bias from the map — shared by the summary strip and the
+// Structure map card so both read the same number.
+function biasFrom(map) {
+  const structures = map?.structures || {};
+  const tfs = TF_ORDER.filter(t => structures[t]);
+  const counts = { bull: 0, bear: 0, range: 0 };
+  tfs.forEach(t => { const l = structures[t].label; counts[l] = (counts[l] || 0) + 1; });
+  const bias = counts.bull > counts.bear ? "bull" : counts.bear > counts.bull ? "bear" : "range";
+  return { tfs, counts, bias };
+}
+
 /** Shadow analytics sidecar (#51/#53): signal↔channel↔regime correlation, now
  *  fronted by a decision/synthesis layer (#117) — an Act-now zone (weekly channel
  *  verdict + a per-signal combined read) over the raw stat cards, which collapse
@@ -97,22 +108,93 @@ export default function Analytics() {
 
       <RangeFilter state={range} variant="coarse" />
 
+      {/* ── Summary strip (#123): the handful of numbers that orient the page ── */}
+      <AnalyticsSummary synth={synth} map={map} />
+
       {/* ── Act now ─────────────────────────────────────────────── */}
       <WeeklyVerdictCard synth={synth} />
       <SignalReadCard read={signalRead} />
 
-      {/* ── Details (collapsed) ─────────────────────────────────── */}
+      {/* ── Details (collapsed) — one analysis panel at a time (#123) ─── */}
       <Collapse title="Details — raw analytics"
-        subtitle="structure map · placement · trend · channel×regime · structure analyses">
-        <StructureMapCard map={map} price={price} busy={mapBusy} onRecompute={recompute} />
-        <StructureMapChart map={map} price={price} />
-        <TrendAlignmentCard trend={trend} />
-        <ChannelRegimeCard rep={rep} sigN={synth?.significance_n ?? 30} />
-        {rep?.regime_mix_by_channel && Object.keys(rep.regime_mix_by_channel).length > 0 && (
-          <RegimeMixCard mix={rep.regime_mix_by_channel} />
-        )}
-        <StructureAnalyses struct={struct} ready={!!struct} />
+        subtitle="structure · placement · trend · channel×regime · regime mix · FVG/OB">
+        <DetailsTabs tabs={[
+          { key: "structure", label: "Structure",
+            node: <StructureMapCard map={map} price={price} busy={mapBusy} onRecompute={recompute} /> },
+          { key: "placement", label: "Placement",
+            node: <StructureMapChart map={map} price={price} /> },
+          { key: "trend", label: "Trend",
+            node: <TrendAlignmentCard trend={trend} /> },
+          { key: "channel_regime", label: "Channel×Regime",
+            node: <ChannelRegimeCard rep={rep} sigN={synth?.significance_n ?? 30} /> },
+          ...(rep?.regime_mix_by_channel && Object.keys(rep.regime_mix_by_channel).length > 0
+            ? [{ key: "regime_mix", label: "Regime mix",
+                 node: <RegimeMixCard mix={rep.regime_mix_by_channel} /> }]
+            : []),
+          { key: "fvg_ob", label: "FVG/OB",
+            node: <StructureAnalyses struct={struct} ready={!!struct} /> },
+        ]} />
       </Collapse>
+    </div>
+  );
+}
+
+// Compact orienting KPI row (#123): base rate, labelled count, significant-channel
+// keep/cut, and the current multi-TF bias — one glance = "where do we stand".
+// Numbers come straight from the same sources as the cards below.
+function AnalyticsSummary({ synth, map }) {
+  const { bias, counts } = biasFrom(map);
+  const hasMap = map?.version_id != null;
+  const sig = (synth?.channels || []).filter(c => c.state === "significant");
+  const keep = sig.filter(c => c.verdict === "keep").length;
+  const cut = sig.filter(c => c.verdict === "cut").length;
+  const biasCls = bias === "bull" ? "text-long" : bias === "bear" ? "text-short" : "text-muted";
+  const tiles = [
+    { label: "Base rate", value: synth ? pct0(synth.base_rate) : "—" },
+    { label: "Labelled", value: synth ? synth.n_labelled : "—",
+      sub: synth ? `N≥${synth.significance_n} to signif.` : "" },
+    { label: "Significant channels", value: synth ? sig.length : "—",
+      sub: synth ? `${keep} keep · ${cut} cut` : "" },
+    { label: "Multi-TF bias", value: hasMap ? bias : "—",
+      valueCls: hasMap ? biasCls : "", sub: hasMap ? `${counts.bull}▲ / ${counts.bear}▼` : "" },
+  ];
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      {tiles.map(t => (
+        <div key={t.label} className="card p-3">
+          <div className="text-[10px] uppercase tracking-wider text-muted truncate">{t.label}</div>
+          <div className={`mt-1 num text-xl font-semibold ${t.valueCls || ""}`}>{t.value}</div>
+          {t.sub && <div className="text-[11px] text-muted mt-0.5 num">{t.sub}</div>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Tabbed Details (#123): show one analysis panel at a time instead of a five-card
+// vertical stack, so Details is a single screen. The chosen tab persists across
+// reloads; the strip scrolls horizontally on mobile (same pattern as the
+// Configuration tabs). Data is fetched at the page level regardless of tab, so
+// switching only mounts/unmounts a panel — no refetch coupling.
+function DetailsTabs({ tabs }) {
+  const [active, setActive] = useState(() => localStorage.getItem("beacon_analytics_tab") || tabs[0].key);
+  const keys = tabs.map(t => t.key);
+  const cur = keys.includes(active) ? active : tabs[0].key;
+  const pick = (k) => { setActive(k); localStorage.setItem("beacon_analytics_tab", k); };
+  const node = tabs.find(t => t.key === cur)?.node;
+  return (
+    <div>
+      <div className="flex gap-1 overflow-x-auto pb-2 -mb-1">
+        {tabs.map(t => (
+          <button key={t.key} onClick={() => pick(t.key)}
+            className={`whitespace-nowrap px-3 py-1.5 rounded-lg text-sm border transition ${
+              t.key === cur ? "bg-beacon/15 text-beacon border-beacon/40"
+                            : "bg-panel2 text-muted border-edge hover:text-ink"}`}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+      <div className="pt-2">{node}</div>
     </div>
   );
 }
@@ -384,10 +466,7 @@ const TOP_ZONES = 8;
 
 function StructureMapCard({ map, price, busy, onRecompute }) {
   const structures = map?.structures || {};
-  const tfs = TF_ORDER.filter(t => structures[t]);
-  const counts = { bull: 0, bear: 0, range: 0 };
-  tfs.forEach(t => { counts[structures[t].label] = (counts[structures[t].label] || 0) + 1; });
-  const bias = counts.bull > counts.bear ? "bull" : counts.bear > counts.bull ? "bear" : "range";
+  const { tfs, counts, bias } = biasFrom(map);
 
   // Keep only the strongest zones, then order high → low for the ladder. When we
   // know the live price, pick the strongest from EACH side and always include the
