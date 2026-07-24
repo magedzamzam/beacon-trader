@@ -23,9 +23,9 @@ export function Badge({ children, tone = "muted", dot }) {
   const map = {
     long: "bg-long/15 text-long", short: "bg-short/15 text-short",
     beacon: "bg-beacon/15 text-beacon", warn: "bg-warn/15 text-warn",
-    violet: "bg-violet/15", muted: "bg-panel2 text-muted",
+    violet: "bg-violet/15 text-violet", muted: "bg-panel2 text-muted",
   };
-  const dotc = { long: "bg-long", short: "bg-short", beacon: "bg-beacon", warn: "bg-warn", muted: "bg-muted" }[tone];
+  const dotc = { long: "bg-long", short: "bg-short", beacon: "bg-beacon", warn: "bg-warn", violet: "bg-violet", muted: "bg-muted" }[tone];
   return (
     <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${map[tone] || map.muted}`}>
       {dot && <span className={`w-1.5 h-1.5 rounded-full ${dotc}`} />}{children}

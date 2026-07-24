@@ -8,7 +8,7 @@ export default {
         bg: "var(--bg)", panel: "var(--panel)", panel2: "var(--panel-2)",
         edge: "var(--edge)", ink: "var(--ink)", muted: "var(--muted)",
         beacon: "var(--beacon)", long: "var(--long)", short: "var(--short)",
-        warn: "var(--warn)",
+        warn: "var(--warn)", violet: "var(--violet)",
       },
       fontFamily: {
         sans: ["Inter", "ui-sans-serif", "system-ui", "sans-serif"],

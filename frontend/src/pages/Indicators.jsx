@@ -9,6 +9,20 @@ import { api } from "../lib/api";
  * captured per signal, across which timeframes. Reads the backend registry
  * catalog so the set is never hardcoded in the UI; saves to the `ta` setting.
  */
+
+// Category → Badge tone, so each indicator group reads with a consistent color
+// cue (#120). Categories come from the backend registry (trend / momentum /
+// volatility / volume / structure); unknown ones fall back to muted.
+const CAT_TONE = {
+  trend: "beacon", momentum: "violet", volatility: "warn",
+  volume: "long", structure: "short",
+};
+const catTone = (c) => CAT_TONE[c] || "muted";
+// Left-accent border per tone (mirrors the Badge palette).
+const ACCENT = {
+  beacon: "border-l-beacon/50", violet: "border-l-violet/50", warn: "border-l-warn/50",
+  long: "border-l-long/50", short: "border-l-short/50", muted: "border-l-edge",
+};
 export default function Indicators() {
   const [cat, setCat] = useState(null);
   const [cfg, setCfg] = useState(null);
@@ -59,6 +73,18 @@ export default function Indicators() {
     } catch (e) { setErr(e.message); }
   };
 
+  // Preserve each indicator's original index (the `cfg.indicators` array position
+  // that remove/setParam operate on) before grouping for display, so grouping
+  // stays purely visual and the saved payload shape is untouched (#120).
+  const rows = cfg.indicators.map((ind, idx) => ({ ind, idx, spec: specById[ind.id] }));
+  const groups = [];
+  for (const r of rows) {
+    const c = r.spec?.category || "other";
+    let g = groups.find(x => x.category === c);
+    if (!g) { g = { category: c, rows: [] }; groups.push(g); }
+    g.rows.push(r);
+  }
+
   return (
     <div className="space-y-4">
       <Card>
@@ -68,6 +94,21 @@ export default function Indicators() {
           </div>
           {saved && <span className="text-xs text-long">Saved</span>}
         </div>
+
+        {/* Add + Save toolbar at the top of the card so the primary action is
+            reachable without scrolling past a long list (#120). */}
+        <div className="px-5 py-3 border-b border-edge bg-panel2/60 flex flex-wrap items-center gap-2">
+          <div className="w-64 max-w-full">
+            <Select value={addId} onChange={e => setAddId(e.target.value)}>
+              <option value="">Add indicator…</option>
+              {cat.indicators.map(i => <option key={i.id} value={i.id}>{i.label} · {i.category}</option>)}
+            </Select>
+          </div>
+          <Button onClick={addIndicator} disabled={!addId}><Plus className="w-4 h-4 inline -mt-0.5" /> Add</Button>
+          <div className="flex-1" />
+          <Button onClick={save}>Save configuration</Button>
+        </div>
+
         <div className="p-5 space-y-5">
           <div className="text-[11px] text-muted max-w-2xl">
             A technical snapshot is recorded for every signal across the timeframes and
@@ -91,46 +132,51 @@ export default function Indicators() {
             <div className="text-xs uppercase tracking-wider text-muted mb-2">
               Indicators ({cfg.indicators.length})
             </div>
-            {!cfg.indicators.length ? <div className="text-xs text-muted">None yet — add one below.</div> : (
-              <div className="space-y-2">
-                {cfg.indicators.map((ind, idx) => {
-                  const spec = specById[ind.id];
+            {!cfg.indicators.length ? (
+              <div className="border border-dashed border-edge rounded-lg py-8 text-center">
+                <div className="text-sm text-muted">No indicators configured yet.</div>
+                <div className="text-xs text-muted mt-1">
+                  Use <span className="text-ink font-medium">Add indicator…</span> at the top of this card to capture one per signal.
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {groups.map(g => {
+                  const tone = catTone(g.category);
                   return (
-                    <div key={idx} className="flex flex-wrap items-center gap-x-3 gap-y-2 border border-edge rounded-lg px-3 py-2 bg-panel2">
-                      <Badge>{spec?.category || "?"}</Badge>
-                      <span className="text-sm font-medium">{spec?.label || ind.id}</span>
-                      {(spec?.params || []).map(p => (
-                        <label key={p.name} className="flex items-center gap-1.5 text-xs text-muted">
-                          {p.name}
-                          <input type="number" step={p.type === "float" ? "0.5" : "1"}
-                            min={p.min} max={p.max}
-                            value={ind.params?.[p.name] ?? p.default}
-                            onChange={e => setParam(idx, p.name,
-                              p.type === "float" ? parseFloat(e.target.value) : parseInt(e.target.value, 10))}
-                            className="w-16 bg-panel border border-edge rounded px-2 py-1 text-ink num outline-none focus:border-beacon" />
-                        </label>
-                      ))}
-                      <button onClick={() => removeIndicator(idx)}
-                        className="ml-auto text-short hover:bg-short/10 rounded p-1" title="Remove">
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                    <div key={g.category}>
+                      <div className="flex items-center gap-2 mb-2">
+                        <Badge tone={tone} dot>{g.category}</Badge>
+                        <span className="text-[11px] text-muted">{g.rows.length}</span>
+                      </div>
+                      <div className="space-y-2">
+                        {g.rows.map(({ ind, idx, spec }) => (
+                          <div key={idx}
+                            className={`flex flex-wrap items-center gap-x-3 gap-y-2 border border-edge border-l-2 ${ACCENT[tone]} rounded-lg px-3 py-2 bg-panel2`}>
+                            <span className="text-sm font-medium">{spec?.label || ind.id}</span>
+                            {(spec?.params || []).map(p => (
+                              <label key={p.name} className="flex items-center gap-1.5 text-xs text-muted">
+                                {p.name}
+                                <input type="number" step={p.type === "float" ? "0.5" : "1"}
+                                  min={p.min} max={p.max}
+                                  value={ind.params?.[p.name] ?? p.default}
+                                  onChange={e => setParam(idx, p.name,
+                                    p.type === "float" ? parseFloat(e.target.value) : parseInt(e.target.value, 10))}
+                                  className="w-16 bg-panel border border-edge rounded px-2 py-1 text-ink num outline-none focus:border-beacon" />
+                              </label>
+                            ))}
+                            <button onClick={() => removeIndicator(idx)}
+                              className="ml-auto text-short hover:bg-short/10 rounded p-1" title="Remove">
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   );
                 })}
               </div>
             )}
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="w-64">
-              <Select value={addId} onChange={e => setAddId(e.target.value)}>
-                <option value="">Add indicator…</option>
-                {cat.indicators.map(i => <option key={i.id} value={i.id}>{i.label} · {i.category}</option>)}
-              </Select>
-            </div>
-            <Button onClick={addIndicator} disabled={!addId}><Plus className="w-4 h-4 inline -mt-0.5" /> Add</Button>
-            <div className="flex-1" />
-            <Button onClick={save}>Save configuration</Button>
           </div>
         </div>
       </Card>
