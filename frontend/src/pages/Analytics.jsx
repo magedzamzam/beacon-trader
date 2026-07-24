@@ -4,6 +4,7 @@ import { Table, Card, Th, Td, Badge, Empty } from "../components/ui";
 import { Toggle, Button } from "../components/form";
 import RangeFilter, { useRange } from "../components/RangeFilter";
 import HelpHint from "../components/HelpHint";
+import StructureMapChart from "../components/StructureMapChart";
 import { api } from "../lib/api";
 
 const REGIME_TONE = { trending: "beacon", ranging: "muted", high_vol: "warn", unknown: "muted" };
@@ -102,8 +103,9 @@ export default function Analytics() {
 
       {/* ── Details (collapsed) ─────────────────────────────────── */}
       <Collapse title="Details — raw analytics"
-        subtitle="structure map · trend · channel×regime · structure analyses">
+        subtitle="structure map · placement · trend · channel×regime · structure analyses">
         <StructureMapCard map={map} price={price} busy={mapBusy} onRecompute={recompute} />
+        <StructureMapChart map={map} price={price} />
         <TrendAlignmentCard trend={trend} />
         <ChannelRegimeCard rep={rep} sigN={synth?.significance_n ?? 30} />
         {rep?.regime_mix_by_channel && Object.keys(rep.regime_mix_by_channel).length > 0 && (
