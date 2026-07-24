@@ -411,7 +411,9 @@ function StructureMapCard({ map, price, busy, onRecompute }) {
   }
   const maxScore = Math.max(1, ...strongest.map(z => z.score));
   const ladder = [...strongest].sort((a, b) => b.mid - a.mid);
-  const priceShown = price != null && ladder.length > 0;
+  // Nearest-each-side zones (#116) — emphasised in the map so they stay findable.
+  const emph = new Set([map?.nearest_resistance?.rank, map?.nearest_support?.rank]
+    .filter(r => r != null));
 
   return (
     <Card>
@@ -450,39 +452,15 @@ function StructureMapCard({ map, price, busy, onRecompute }) {
             })}
           </div>
 
-          {/* levels ladder — strongest zones, resistance above price / support below */}
-          {!ladder.length ? <Empty>No magnet zones.</Empty> : (
-            <div className="space-y-1">
-              {priceShown && price > ladder[0].mid && <PriceRow price={price} />}
-              {ladder.map((z, i) => {
-                const above = price != null && z.mid > price;
-                const prev = ladder[i - 1];
-                const showPrice = priceShown && prev && prev.mid > price && z.mid <= price;
-                const pct = price != null ? Math.abs(z.mid - price) / price * 100 : null;
-                return (
-                  <div key={z.rank}>
-                    {showPrice && <PriceRow price={price} />}
-                    <div className="flex items-center gap-3">
-                      <span className={`w-20 shrink-0 num text-sm text-right ${above ? "text-short" : price != null ? "text-long" : ""}`}>
-                        {fmt(z.mid, 2)}
-                      </span>
-                      <span className="flex-1 h-2 rounded-full bg-panel2 overflow-hidden">
-                        <span className="block h-full rounded-full bg-beacon/70"
-                          style={{ width: `${Math.max(6, (z.score / maxScore) * 100)}%` }} />
-                      </span>
-                      <span className="w-28 shrink-0 text-[11px] text-muted num text-right">
-                        {z.n_timeframes} TF · {fmt(z.score, 0)}{pct != null ? ` · ${fmt(pct, 1)}%` : ""}
-                      </span>
-                    </div>
-                  </div>
-                );
-              })}
-              {priceShown && price < ladder[ladder.length - 1].mid && <PriceRow price={price} />}
-            </div>
-          )}
+          {/* proportional price-band map — zones drawn at their true [low,high]
+              extent, positioned by price (not equal-spaced) (#121) */}
+          {!ladder.length ? <Empty>No magnet zones.</Empty>
+            : <PriceBandMap zones={ladder} price={price} maxScore={maxScore} emph={emph} />}
           <div className="text-[11px] text-muted">
-            Bar = confluence strength (Σ weight across timeframes). <span className="text-short">Red</span> = above price
-            (resistance), <span className="text-long">green</span> = below (support). Shadow only — nothing gates.
+            Each box spans a zone's real <b>[low, high]</b>, placed proportionally by price; fill
+            intensity = confluence strength (Σ weight across timeframes). <span className="text-short">Red</span>
+            = above price (resistance), <span className="text-long">green</span> = below (support); a ring marks
+            the nearest zone each side. Shadow only — nothing gates.
           </div>
         </div>
       )}
@@ -490,12 +468,82 @@ function StructureMapCard({ map, price, busy, onRecompute }) {
   );
 }
 
-function PriceRow({ price }) {
+// Proportional vertical price map (#121): each magnet zone is a box spanning its
+// real [low, high] band, positioned by price (not equal-spaced), so the vertical
+// geometry — how far levels sit apart, where price is relative to clustering —
+// reads at a glance. Percentage-positioned HTML so it scales on mobile with no
+// horizontal overflow, is theme-aware via tokens, and degrades to an sr-only list.
+const MAP_H = 320;   // px
+
+function PriceBandMap({ zones, price, maxScore, emph }) {
+  // Domain spans every zone's band plus the live price, padded so nothing sits on
+  // the edge. `hi` = top of the panel (higher price), `lo` = bottom.
+  const vals = zones.flatMap(z => z.band).concat(price != null ? [price] : []);
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  if (!(hi > lo)) { hi = hi + 1; lo = lo - 1; }   // single zero-width zone, no price
+  const pad = (hi - lo) * 0.06;
+  lo -= pad; hi += pad;
+  const span = hi - lo;
+  const yOf = (p) => ((hi - p) / span) * 100;      // price -> top %
+
   return (
-    <div className="flex items-center gap-3 my-1">
-      <span className="w-20 shrink-0 num text-sm text-right font-semibold text-beacon">{price.toFixed(2)}</span>
-      <span className="flex-1 border-t border-dashed border-beacon/50" />
-      <span className="w-28 shrink-0 text-[11px] text-beacon text-right">◀ price</span>
+    <div>
+      <div className="relative w-full rounded-lg border border-edge bg-panel2/40 overflow-hidden"
+        style={{ height: MAP_H }} role="img"
+        aria-label={`Magnet zone price map, ${zones.length} zones${price != null ? `, price ${price.toFixed(2)}` : ""}`}>
+        {zones.map(z => {
+          const [zl, zh] = z.band;
+          const top = yOf(zh);
+          const h = Math.max(1.4, yOf(zl) - yOf(zh));   // ensure a hairline for zero-width zones
+          const above = price != null && z.mid > price;
+          const tone = above ? "short" : price != null ? "long" : "beacon";
+          const isEmph = emph.has(z.rank);
+          const base = 0.18 + 0.62 * Math.min(1, z.score / maxScore);         // 0.18–0.80
+          const intensity = isEmph ? Math.max(0.7, base) : base;              // nearest stands out
+          const bg = { short: "var(--short)", long: "var(--long)", beacon: "var(--beacon)" }[tone];
+          return (
+            <div key={z.rank}
+              title={`${fmt(z.mid, 2)} · ${z.n_timeframes} TF · score ${fmt(z.score, 0)} · [${fmt(z.band[0], 2)}, ${fmt(z.band[1], 2)}]`}
+              className="absolute left-16 right-2 rounded"
+              style={{ top: `${top}%`, height: `${h}%`, background: bg, opacity: intensity,
+                       ...(isEmph ? { boxShadow: `0 0 0 1.5px ${bg}` } : {}) }} />
+          );
+        })}
+        {/* per-zone price + meta labels, vertically centred on each band */}
+        {zones.map(z => {
+          const mid = yOf(z.mid);
+          const above = price != null && z.mid > price;
+          const toneCls = above ? "text-short" : price != null ? "text-long" : "text-ink";
+          return (
+            <div key={`lbl-${z.rank}`} className="absolute left-0 right-2 flex items-center justify-between pointer-events-none"
+              style={{ top: `${mid}%`, transform: "translateY(-50%)" }}>
+              <span className={`num text-[11px] w-16 text-right pr-1 ${toneCls}`}>{fmt(z.mid, 2)}</span>
+              <span className="num text-[10px] text-muted pr-1">
+                {z.n_timeframes}TF · {fmt(z.score, 0)}
+              </span>
+            </div>
+          );
+        })}
+        {/* live price — a beacon rule woven through the bands */}
+        {price != null && (
+          <div className="absolute left-0 right-0 flex items-center pointer-events-none"
+            style={{ top: `${yOf(price)}%`, transform: "translateY(-50%)" }}>
+            <span className="num text-[11px] font-semibold text-beacon w-16 text-right pr-1">{price.toFixed(2)}</span>
+            <span className="flex-1 border-t border-dashed border-beacon/70" />
+            <span className="text-[10px] text-beacon pl-1 pr-1">price ▶</span>
+          </div>
+        )}
+      </div>
+      {/* Accessible / print fallback: the same zones as an ordered high→low list. */}
+      <ul className="sr-only">
+        {zones.map(z => (
+          <li key={`sr-${z.rank}`}>
+            {price != null ? (z.mid > price ? "resistance" : "support") : "zone"} at {fmt(z.mid, 2)},
+            band {fmt(z.band[0], 2)} to {fmt(z.band[1], 2)}, {z.n_timeframes} timeframes, score {fmt(z.score, 0)}
+            {emph.has(z.rank) ? " (nearest this side)" : ""}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
