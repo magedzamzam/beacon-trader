@@ -3,8 +3,19 @@ import { GitBranch, Trash2, LogIn, Filter, LogOut, Plus } from "lucide-react";
 import { Card, Table, Th, Td, Badge, Empty } from "../components/ui";
 import { Field, Input, Select, Toggle, Button, ErrorNote } from "../components/form";
 import SlRulesEditor from "../components/SlRulesEditor";
+import StagedEntryEditor from "../components/StagedEntryEditor";
 import HelpHint from "../components/HelpHint";
 import { api } from "../lib/api";
+
+// Mirrors beacon_core.execution.staging.DEFAULT_STAGED (keep in sync). Drives the
+// #129 confirmation-staged entry; inert unless entry_style === "staged".
+const STAGED_DEFAULTS = {
+  toe_in_tps: 1, runner_tps: 1, max_deferred_fraction: 0.6, min_deferred_fraction: 0.2,
+  reclaim_break_atr: 0.35, reclaim_break_cash: 0, reclaim_break_max_frac_of_stop: 0.5,
+  reclaim_break_abs_cap: 8, stop_offset_atr: 0.1,
+  runner_ttl_minutes: 45, reclaim_pending_ttl_minutes: 60, reclaim_armed_ttl_minutes: 60,
+  min_stop_atr: 0.5,
+};
 
 /**
  * Strategies (#84) — one execution strategy per (Account, Source), in three pillars:
@@ -27,7 +38,8 @@ const SL_PRESETS = {
 const TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"];
 const BLANK = () => ({
   id: null, account_id: "", source_id: "", label: "", enabled: true,
-  entry: { ttl_minutes: "", honor_market_hint: true, chase_tolerance_r: "", chase_tolerance_atr: "", beyond_tolerance: "limit", max_tp_distance_pct: "" },
+  entry: { ttl_minutes: "", honor_market_hint: true, chase_tolerance_r: "", chase_tolerance_atr: "", beyond_tolerance: "limit", max_tp_distance_pct: "",
+           entry_style: "", staged: { ...STAGED_DEFAULTS } },
   trend: { enabled: false, timeframe: "4h", ema_period: 200, mode: "skip", desize_factor: 0.25,
            require_slope: true, slope_lookback: 10, min_dist_atr: 0.5,
            require_htf_concordance: false, htf_timeframe: "1h" },
@@ -66,7 +78,8 @@ export default function Strategies() {
     setForm({
       id: row.id, account_id: row.account_id ?? "", source_id: row.source_id ?? "",
       label: row.label || "", enabled: row.enabled,
-      entry: { ...BLANK().entry, ...Object.fromEntries(Object.entries(ep).map(([k, v]) => [k, v ?? ""])) },
+      entry: { ...BLANK().entry, ...Object.fromEntries(Object.entries(ep).map(([k, v]) => [k, v ?? ""])),
+               staged: { ...STAGED_DEFAULTS, ...(ep.staged || {}) } },
       trend: { ...BLANK().trend, ...(ef.trend_alignment || {}) },
       rules: Array.isArray(ef.rules) ? ef.rules : [],
       exit: { sl_rules: Array.isArray(xp.sl_rules) ? xp.sl_rules : [],
@@ -83,6 +96,15 @@ export default function Strategies() {
       chase_tolerance_r: num(form.entry.chase_tolerance_r), chase_tolerance_atr: num(form.entry.chase_tolerance_atr),
       beyond_tolerance: form.entry.beyond_tolerance, max_tp_distance_pct: num(form.entry.max_tp_distance_pct),
     };
+    if (form.entry.entry_style) entry_policy.entry_style = form.entry.entry_style;
+    if (form.entry.entry_style === "staged") {                  // send the staged block, numbers coerced
+      const staged = {};
+      for (const [k, val] of Object.entries(form.entry.staged || {})) {
+        const nv = num(val);
+        if (nv !== undefined) staged[k] = nv;
+      }
+      entry_policy.staged = staged;
+    }
     const body = {
       account_id: form.account_id === "" ? null : form.account_id,
       source_id: form.source_id === "" ? null : form.source_id,
@@ -146,7 +168,17 @@ export default function Strategies() {
         {tab === "entry" && (
           <div className="p-4 space-y-3">
             <p className="text-[11px] text-muted"><HelpHint term="entry_policy_help" /> How the entry order is placed — TTL for working orders and the chase-guard (#67). Empty ⇒ the global default. Source-agnostic, so future non-Telegram entry types plug in here.</p>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            <Field label="Entry style" hint="single-shot (default) or confirmation-staged tranches (#129)">
+              <Select value={form.entry.entry_style} onChange={(e) => setSub("entry", "entry_style", e.target.value)}>
+                <option value="">Single-shot (default)</option>
+                <option value="staged">Confirmation-staged (DemoC)</option>
+              </Select>
+            </Field>
+            {form.entry.entry_style === "staged" && (
+              <StagedEntryEditor value={form.entry.staged}
+                onChange={(k, val) => setSub("entry", "staged", { ...form.entry.staged, [k]: val })} />
+            )}
+            <div className={`grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 ${form.entry.entry_style === "staged" ? "opacity-60" : ""}`}>
               <Field label="Entry TTL (min)" hint="working-order expiry"><Input type="number" value={form.entry.ttl_minutes} onChange={(e) => setSub("entry", "ttl_minutes", e.target.value)} /></Field>
               <Field label="Chase tolerance (× |entry−SL|)" hint="how far past the level a MARKET hint may still fill"><Input type="number" step="0.05" value={form.entry.chase_tolerance_r} onChange={(e) => setSub("entry", "chase_tolerance_r", e.target.value)} /></Field>
               <Field label="Chase tolerance (× ATR)" hint="0 = disabled; larger of the two wins"><Input type="number" step="0.1" value={form.entry.chase_tolerance_atr} onChange={(e) => setSub("entry", "chase_tolerance_atr", e.target.value)} /></Field>
@@ -245,6 +277,7 @@ export default function Strategies() {
                   <Td>{s.label || <span className="text-muted">—</span>}</Td>
                   <Td><span className="flex gap-1">
                     {s.entry_policy && <Badge tone="beacon">entry</Badge>}
+                    {s.entry_policy?.entry_style === "staged" && <Badge tone="warn">staged</Badge>}
                     {s.entry_filters && (s.entry_filters.trend_alignment?.enabled || s.entry_filters.rules?.length) ? <Badge tone="violet">filter</Badge> : null}
                     {s.exit_policy?.sl_rules && <Badge tone="long">exit</Badge>}
                   </span></Td>

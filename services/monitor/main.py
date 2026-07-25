@@ -13,6 +13,7 @@ should read /history for exact P&L attribution.
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 from decimal import Decimal
 
 from sqlalchemy import or_, select
@@ -24,10 +25,13 @@ from beacon_core.logging import get_logger
 from beacon_core.health import run_health_server
 from beacon_core.db.base import Session, init_models
 from beacon_core.db.models import (Account, Broker, Event, ExecutionStrategy, Leg,
-                                   PositionActivity, Signal, Source, Trade)
+                                   PositionActivity, Signal, Source, Trade,
+                                   StagedEntry, StagedTranche)
 from beacon_core.execution import strategy as ST
+from beacon_core.execution import staging as STG
 from beacon_core.brokers import build_adapter, symbol_map
-from beacon_core.brokers.types import AuthError, ModifyPositionRequest
+from beacon_core.brokers.types import (AuthError, ModifyPositionRequest, OrderSide,
+                                       OrderStatus, OrderType, PlaceOrderRequest)
 from beacon_core.strategy.rules import PositionCtx, evaluate, DEFAULT_SL_RULES
 from beacon_core.settings_store import get_setting, set_setting
 from beacon_core.analysis import structure as S
@@ -216,10 +220,118 @@ async def _analyze_outcome(session, trade, ai_cfg) -> None:
         log.warning("AI outcome analysis failed (trade %s): %s", trade.id, exc)
 
 
+async def _staged_pending(session, trade_id) -> list:
+    """Non-terminal tranches (pending) for a staged trade — the ones the DECIDE
+    engine still acts on. Once deployed/armed, a tranche's legs are ordinary
+    working orders and the normal reconciliation/TTL machinery owns them."""
+    return (await session.execute(select(StagedTranche).where(
+        StagedTranche.trade_id == trade_id,
+        StagedTranche.state == "pending"))).scalars().all()
+
+
+async def _drive_staged(session, trade, adapter, smap, mid, ttl_min) -> None:
+    """Drive the confirmation-staged entry engine (#129) for one trade, one tick:
+    update the max adverse excursion, then for each PENDING tranche run the DECIDE
+    engine and carry out the decision. DEPLOY places the tranche's frozen legs
+    (runner LIMIT at the deep edge, reclaim STOP at the reclaim trigger) and flips
+    them to 'working' with a fresh TTL clock — from there the existing monitor
+    machinery reconciles fills, ratchets stops, and TTL-cancels, so no new
+    fill/close code is introduced. EXPIRE abandons the never-deployed legs. This
+    is the monitor's ONLY order-placing path; it runs only for staged trades."""
+    se = (await session.execute(select(StagedEntry).where(
+        StagedEntry.trade_id == trade.id))).scalar_one_or_none()
+    if se is None:
+        return
+    pending = await _staged_pending(session, trade.id)
+    if not pending:
+        return
+
+    direction = se.direction
+    deep = float(se.deep_edge)
+    cfg = STG.staged_config(se.cfg)
+    # Running max adverse excursion beyond the deep edge (what arms the reclaim).
+    excursion = STG.beyond_deep(direction, float(mid), deep)
+    if excursion > float(se.max_adverse_beyond_deep or 0):
+        se.max_adverse_beyond_deep = Decimal(str(round(excursion, 6)))
+    ctx = STG.StagingContext(
+        direction=direction, near_edge=float(se.near_edge), deep_edge=deep,
+        sl=float(se.sl), price=float(mid),
+        atr=float(se.atr) if se.atr is not None else None,
+        max_adverse_beyond_deep=float(se.max_adverse_beyond_deep or 0))
+    now = utcnow()
+
+    for tr in pending:
+        minutes = (now - tr.state_since).total_seconds() / 60.0
+        decision = STG.decide_tranche(role=tr.role, state=tr.state, ctx=ctx, cfg=cfg,
+                                      minutes_in_state=minutes)
+        if decision.action == STG.WAIT:
+            continue
+        legs = (await session.execute(select(Leg).where(
+            Leg.id.in_(tr.leg_ids or []), Leg.status == "staged"))).scalars().all()
+        if decision.action in (STG.EXPIRE, STG.SKIP):
+            for leg in legs:                       # never placed at the broker -> just mark
+                leg.status = "expired"
+                leg.outcome = "expired"
+                leg.closed_at = now
+            tr.state = "expired" if decision.action == STG.EXPIRE else "skipped"
+            tr.state_since = now
+            tr.reason = (decision.reason or "")[:96]
+            session.add(Event(trade_id=trade.id, kind="staged_" + tr.state,
+                              payload={"tranche": tr.role, "reason": decision.reason}))
+            log.info("trade %s tranche %s -> %s (%s)", trade.id, tr.role, tr.state, decision.reason)
+            continue
+        if decision.action != STG.DEPLOY:
+            continue
+        # DEPLOY: place the frozen legs as LIMIT (runner) or STOP (reclaim).
+        good_till = utcnow() + timedelta(
+            minutes=effective_entry_ttl_min({"entry_ttl_minutes": ttl_min}))
+        side_buy = direction == "BUY"
+        placed = 0
+        for leg in legs:
+            try:
+                res = await adapter.place_order(PlaceOrderRequest(
+                    broker_symbol=smap.broker_epic,
+                    side=OrderSide.BUY if side_buy else OrderSide.SELL,
+                    order_type=OrderType.STOP if decision.mode == "STOP" else OrderType.LIMIT,
+                    quantity=leg.lot, limit_price=leg.entry,   # LIMIT level or STOP trigger
+                    stop_loss=leg.sl, take_profit=leg.tp, good_till=good_till))
+                if res.status == OrderStatus.REJECTED:
+                    leg.status, leg.outcome = "rejected", "rejected"
+                    session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="reject",
+                                      payload={"ref": res.broker_order_ref,
+                                               "reason": res.rejection_reason}))
+                else:
+                    leg.broker_order_ref = res.broker_order_ref
+                    leg.status = "working"
+                    leg.created_at = utcnow()      # reset the TTL clock: deployed/armed late
+                    tr.broker_order_ref = res.broker_order_ref
+                    placed += 1
+                    session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="staged_deployed",
+                                      payload={"tranche": tr.role, "mode": decision.mode,
+                                               "reason": decision.reason}))
+            except Exception as exc:               # one leg failing must not sink the tick
+                leg.status = "rejected"
+                session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="reject",
+                                  payload={"error": str(exc)[:300]}))
+                log.warning("staged deploy failed (trade %s leg %s): %s", trade.id, leg.id, exc)
+            await asyncio.sleep(1.0 / max(settings.broker_rate_per_sec, 0.1))
+        tr.state = "armed" if decision.mode == "STOP" else "deployed"
+        tr.state_since = utcnow()
+        tr.mode = decision.mode
+        if decision.level is not None:
+            tr.trigger_level = Decimal(str(decision.level))
+        tr.reason = (decision.reason or "")[:96]
+        log.info("trade %s tranche %s -> %s (%s legs, %s)", trade.id, tr.role, tr.state,
+                 placed, decision.reason)
+
+
 async def _process_trade(session, trade, ai_cfg=None) -> None:
     legs = (await session.execute(select(Leg).where(
         Leg.trade_id == trade.id, Leg.status.in_(OPEN_LEG)))).scalars().all()
-    if not legs:
+    # A staged trade stays alive while any tranche is still pending — even if its
+    # toe-in already filled and closed — so the runner/reclaim can still deploy (#129).
+    staged_pending = await _staged_pending(session, trade.id)
+    if not legs and not staged_pending:
         if trade.status != "closed":
             trade.status = "closed"
             _notify("trade_closed", {"symbol": trade.symbol, "direction": trade.direction,
@@ -611,6 +723,17 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                         "detail": f"TP{leg.tp_index} limit cancelled — trade progressed"})
                     log.info("trade %s leg %s cancelled — stale limit after progress", trade.id, leg.id)
 
+        # --- confirmation-staged entry (#129): drive the DECIDE engine off live
+        # price. Runs only for staged trades; deploys the runner at the deep edge
+        # and arms the reclaim STOP on a break — its deployed legs then flow through
+        # the same reconciliation/ratchet/TTL above on later ticks. Best-effort:
+        # a staging failure must never disturb capital management of open legs.
+        if staged_pending:                          # skip the StagedEntry query for normal trades
+            try:
+                await _drive_staged(session, trade, adapter, smap, mid, ttl_min)
+            except Exception as exc:
+                log.warning("staged-entry drive failed (trade %s): %s", trade.id, exc)
+
         # Persist the broker activity audit for this trade (best-effort).
         try:
             await _audit_activities()
@@ -620,11 +743,12 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
         # roll up trade
         remaining = (await session.execute(select(Leg).where(
             Leg.trade_id == trade.id, Leg.status.in_(OPEN_LEG)))).scalars().all()
+        still_staged = await _staged_pending(session, trade.id)
         closed = (await session.execute(select(Leg).where(
             Leg.trade_id == trade.id, Leg.status == "closed"))).scalars().all()
         trade.realized_pl = sum((Decimal(str(l.realized_pl)) for l in closed
                                  if l.realized_pl is not None), Decimal("0"))
-        if not remaining:
+        if not remaining and not still_staged:     # #129: don't close while a tranche is pending
             was_closed = trade.status == "closed"
             trade.status = "closed"
             if not was_closed:

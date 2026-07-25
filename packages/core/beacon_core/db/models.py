@@ -459,3 +459,45 @@ class EconEvent(Base):
     impact: Mapped[str | None] = mapped_column(String(16), nullable=True)      # high|medium|low|holiday
     title: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class StagedEntry(Base):
+    """Per-trade state for the confirmation-staged entry model (#129). Holds the
+    signal geometry the monitor needs to rebuild the staging context each tick,
+    the running max adverse excursion beyond the deep edge, and the frozen staged
+    config. NEW table -> auto-created by create_all (no ALTER; CLAUDE.md §6)."""
+    __tablename__ = "staged_entries"
+    __table_args__ = (UniqueConstraint("trade_id", name="uq_staged_entry_trade"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    trade_id: Mapped[int] = mapped_column(ForeignKey("trades.id"), index=True)
+    account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id"), nullable=True)
+    direction: Mapped[str] = mapped_column(String(4))                       # BUY | SELL
+    near_edge: Mapped[Decimal] = mapped_column(NUM)                         # zone edge price reaches first
+    deep_edge: Mapped[Decimal] = mapped_column(NUM)                         # deeper (better) fill edge
+    sl: Mapped[Decimal] = mapped_column(NUM)
+    atr: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)         # absolute ATR frozen at entry
+    max_adverse_beyond_deep: Mapped[Decimal] = mapped_column(NUM, default=0)  # running max excursion (monitor)
+    cfg: Mapped[dict] = mapped_column(JSON, default=dict)                   # frozen staged config
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class StagedTranche(Base):
+    """One tranche of a staged entry (#129): toe_in | runner | reclaim. Groups the
+    Leg rows it owns and carries the DECIDE-engine state with its OWN TTL clock
+    (`state_since`), distinct from Leg.created_at — a reclaim leg armed late must
+    not expire on the trade's clock. The reclaim tranche stores its STOP trigger +
+    the broker working-order ref once armed."""
+    __tablename__ = "staged_tranches"
+    __table_args__ = (Index("ix_staged_tranches_trade", "trade_id"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    trade_id: Mapped[int] = mapped_column(ForeignKey("trades.id"), index=True)
+    role: Mapped[str] = mapped_column(String(8))                           # toe_in | runner | reclaim
+    state: Mapped[str] = mapped_column(String(12), default="pending")      # pending|deployed|armed|filled|expired|skipped
+    mode: Mapped[str | None] = mapped_column(String(8), nullable=True)     # LIMIT | MARKET | STOP
+    trigger_level: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)  # reclaim STOP trigger
+    broker_order_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)  # armed STOP working-order id
+    leg_ids: Mapped[list] = mapped_column(JSON, default=list)              # the Leg ids this tranche owns
+    reason: Mapped[str | None] = mapped_column(String(96), nullable=True)  # last decision reason
+    state_since: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)  # per-tranche TTL clock
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)

@@ -14,8 +14,11 @@ from __future__ import annotations
 from ..strategy.rules import DEFAULT_SL_RULES
 
 # The entry-policy keys the planner/executor understand (chase guard #67 + TTL).
+# entry_style + staged drive the confirmation-staged entry model (#129); staged is
+# a nested block validated by execution.staging.clean_staged_config.
 ENTRY_POLICY_KEYS = ("ttl_minutes", "honor_market_hint", "chase_tolerance_r",
-                     "chase_tolerance_atr", "beyond_tolerance", "max_tp_distance_pct")
+                     "chase_tolerance_atr", "beyond_tolerance", "max_tp_distance_pct",
+                     "entry_style", "staged")
 
 
 def resolve_chain(strategies, account_id, source_id) -> list:

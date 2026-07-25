@@ -39,6 +39,11 @@ class PlannedLeg:
     risk_cash: Optional[Decimal] = None
     valid: bool = True
     skip_reason: Optional[str] = None
+    # Confirmation-staged entry (#129): which tranche this leg belongs to
+    # (toe_in|runner|reclaim) and, for a reclaim STOP, its trigger level. None on
+    # ordinary single-shot legs, so nothing downstream changes for them.
+    tranche: Optional[str] = None
+    trigger: Optional[Decimal] = None
 
 
 @dataclass

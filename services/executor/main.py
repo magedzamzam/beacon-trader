@@ -22,15 +22,17 @@ from beacon_core.logging import get_logger
 from beacon_core.health import run_health_server
 from beacon_core.db.base import Session, init_models
 from beacon_core.db.models import (Account, Event, Leg, Signal, Source, Trade,
-                                   ExecutionStrategy, AccountSourceRisk)
+                                   ExecutionStrategy, AccountSourceRisk,
+                                   StagedEntry, StagedTranche)
 from beacon_core.execution import strategy as ST
+from beacon_core.execution import staging as STG
 from beacon_core.brokers import build_adapter, symbol_map
 from beacon_core.brokers import fx
 from beacon_core.tasks import spawn_bg
 from beacon_core.timeutil import utcnow
 from beacon_core.brokers.types import (OrderSide, OrderStatus, OrderType, PlaceOrderRequest)
 from beacon_core.parsing.models import ParsedSignal
-from beacon_core.execution.planner import build_plan, DEFAULT_PLANNER
+from beacon_core.execution.planner import build_plan, FanoutPlan, DEFAULT_PLANNER
 from beacon_core.execution.guard import (should_auto_execute, risk_limit_reason,
                                           soft_breaker_decision, DEFAULT_RISK_LIMITS)
 from beacon_core.execution.trend_filter import trend_filter_cfg, decide as trend_decide
@@ -87,52 +89,49 @@ def _to_parsed(sig: Signal) -> ParsedSignal:
 
 async def _trend_read(adapter, epic: str, timeframe: str, ema_period: int,
                       price: float, slope_lookback: int = 0):
-    """(above, slope, dist_atr, atr) for the trend EMA at `timeframe`, or
-    (None,None,None,None) on any failure (fail-open — a missing indicator never
-    blocks a trade). above=price>EMA (#48); slope=EMA_now − EMA `slope_lookback`
-    bars ago (#79); dist_atr=|price−EMA| in ATR(14) units (#79); atr=absolute
-    ATR(14) in price units, reused for chase_tolerance_atr (#129 P5)."""
+    """(above, slope, dist_atr) for the trend EMA at `timeframe`, or (None,None,
+    None) on any failure (fail-open — a missing indicator never blocks a trade).
+    above=price>EMA (#48); slope=EMA_now − EMA `slope_lookback` bars ago (#79);
+    dist_atr=|price−EMA| in ATR(14) units (#79)."""
     resolution = TF_RESOLUTION.get(timeframe)
     if not resolution:
-        return None, None, None, None
+        return None, None, None
     try:
         bars = await adapter.get_bars(epic, resolution, max_bars=250)
     except Exception as exc:
         log.info("trend-filter bars failed (%s/%s): %s", epic, resolution, exc)
-        return None, None, None, None
+        return None, None, None
     highs = [float(b["h"]) for b in bars if b.get("h") is not None]
     lows = [float(b["l"]) for b in bars if b.get("l") is not None]
     closes = [float(b["c"]) for b in bars if b.get("c") is not None]
     series = _ema_full(closes, int(ema_period))
     val = series[-1] if series else None
     if val is None:
-        return None, None, None, None
+        return None, None, None
     above = price > val
     slope = None
     if slope_lookback > 0 and len(series) > slope_lookback \
             and series[-1 - slope_lookback] is not None:
         slope = series[-1] - series[-1 - slope_lookback]
-    dist_atr = atr_abs = None
+    dist_atr = None
     if len(highs) == len(closes) == len(lows) and len(closes) >= 15:
         a = _atr(highs, lows, closes, 14)
         if a and a > 0:
-            atr_abs = a
             dist_atr = abs(price - val) / a
-    return above, slope, dist_atr, atr_abs
+    return above, slope, dist_atr
 
 
-async def _live_atr(adapter, epic: str, timeframe: str, period: int = 14):
-    """Absolute ATR(period) on `timeframe` in price units, or None on any failure
-    (fail-open). Only called when chase_tolerance_atr is configured > 0 AND the
-    trend filter didn't already compute an ATR (#129 P5) — so a default install
-    (chase_tolerance_atr=0) makes no extra broker call and behaves exactly as before."""
+async def _atr_on(adapter, epic: str, timeframe: str, period: int = 14):
+    """Absolute ATR(period) on `timeframe`, or None on any failure (fail-open).
+    Used by the confirmation-staged entry (#129) to scale the break/reclaim
+    geometry; only fetched when a strategy sets entry_style='staged'."""
     resolution = TF_RESOLUTION.get(timeframe)
     if not resolution:
         return None
     try:
         bars = await adapter.get_bars(epic, resolution, max_bars=250)
     except Exception as exc:
-        log.info("chase-ATR bars failed (%s/%s): %s", epic, resolution, exc)
+        log.info("staged-ATR bars failed (%s/%s): %s", epic, resolution, exc)
         return None
     highs = [float(b["h"]) for b in bars if b.get("h") is not None]
     lows = [float(b["l"]) for b in bars if b.get("l") is not None]
@@ -298,16 +297,15 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         # Counter-trend entries (direction fighting the higher-TF trend) held ~95%
         # of the book's realized loss. Skip or de-size them. Fail-open.
         trend_size_factor = Decimal("1")
-        trend_atr = None                                  # #129 P5: reuse for chase_tolerance_atr
         tf_cfg = trend_filter_cfg(_entry_filters)
         if tf_cfg.get("enabled"):
-            _above, _slope, _dist, trend_atr = await _trend_read(
+            _above, _slope, _dist = await _trend_read(
                 adapter, smap.broker_epic, tf_cfg.get("timeframe", "4h"),
                 int(tf_cfg.get("ema_period", 200)), float(current),
                 slope_lookback=int(tf_cfg.get("slope_lookback", 0) or 0))
             _htf = None
             if tf_cfg.get("require_htf_concordance"):     # #79: only fetch when asked
-                _htf, _, _, _ = await _trend_read(
+                _htf, _, _ = await _trend_read(
                     adapter, smap.broker_epic, tf_cfg.get("htf_timeframe", "1h"),
                     int(tf_cfg.get("ema_period", 200)), float(current))
             _action, _factor, _aligned = trend_decide(
@@ -360,34 +358,53 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         # Default 0.5 (50%): catches parse-artifact TPs (e.g. tp=1530 vs gold ~4180,
         # ~60% away) while never tripping a real target. Tune via the entry policy.
         max_tp_pct = Decimal(str(planner_cfg.get("max_tp_distance_pct", "0.5")))
-        # #129 P5: activate chase_tolerance_atr — previously a silent no-op because
-        # build_plan was never given atr=. Reuse the ATR the trend filter already
-        # computed (no extra call); only when it's absent AND the operator has set
-        # chase_tolerance_atr>0 do we fetch it (config-gated — default 0 = unchanged).
-        chase_tol_atr = Decimal(str(planner_cfg.get("chase_tolerance_atr", "0")))
-        chase_atr = Decimal(str(trend_atr)) if trend_atr is not None else None
-        if chase_tol_atr > 0 and chase_atr is None:
-            _catr = await _live_atr(adapter, smap.broker_epic, str(tf_cfg.get("timeframe", "4h")))
-            chase_atr = Decimal(str(_catr)) if _catr is not None else None
-        plan = build_plan(
-            parsed, current_price=current,
-            candle_high=candle_high, candle_low=candle_low,
-            min_stop_distance=smap.min_stop_distance,
-            max_tp_distance_pct=max_tp_pct if max_tp_pct > 0 else None,
-            honor_market_hint=bool(planner_cfg.get("honor_market_hint", True)),
-            chase_tolerance_r=Decimal(str(planner_cfg.get("chase_tolerance_r", "0.25"))),
-            chase_tolerance_atr=chase_tol_atr,
-            beyond_tolerance=str(planner_cfg.get("beyond_tolerance", "limit")),
-            atr=chase_atr,
-        )
-        # Audit the chase-guard decision (#67) whenever it prevented a chase —
-        # a MARKET hint rested as a LIMIT, or was skipped — so a bad-fill-avoided
-        # is visible in the Activity feed, not silent.
-        _guarded = [d for d in plan.entry_decisions if d.get("decision") in ("limit", "skip")]
-        if _guarded:
-            session.add(Event(kind="entry_chase_guard",
-                              payload={"signal_id": sig.id, "account_id": acct.id,
-                                       "current_price": str(current), "decisions": _guarded}))
+        # --- Confirmation-staged entry (#129): when the resolved strategy sets
+        # entry_style='staged', plan tranche legs (toe-in now / runner at the deep
+        # edge / reclaim STOP armed on a break) instead of the single-shot fanout.
+        # Falls back to single-shot if ATR is unavailable or the stop is too tight
+        # to stage a break around. Everything else (sizing, caps, risk) is unchanged.
+        is_staged = str(planner_cfg.get("entry_style") or "") == "staged"
+        staged_geo = None
+        if is_staged:
+            staged_cfg = STG.staged_config(planner_cfg.get("staged"))
+            _near, _deep = STG.zone_edges(parsed.direction, parsed.entry_from, parsed.entry_to)
+            _satr = await _atr_on(adapter, smap.broker_epic, "1h")
+            _sl_dist = abs(float(_deep) - float(parsed.sl))
+            if _satr is None or STG.stop_too_tight(_sl_dist, _satr, staged_cfg):
+                is_staged = False
+                session.add(Event(kind="staged_fallback",
+                                  payload={"signal_id": sig.id, "account_id": acct.id,
+                                           "reason": "no_atr" if _satr is None else "stop_too_tight",
+                                           "atr": _satr, "stop_dist": _sl_dist}))
+                log.info("signal %s acct %s: staged -> single-shot fallback (atr=%s stop=%s)",
+                         sig.id, acct.id, _satr, _sl_dist)
+            else:
+                plan = FanoutPlan(
+                    symbol=parsed.symbol, direction=parsed.direction, order_type="LIMIT",
+                    legs=STG.build_staged_legs(
+                        direction=parsed.direction, tps=parsed.tps, near_edge=_near,
+                        deep_edge=_deep, sl=parsed.sl, atr=_satr, current_price=current,
+                        cfg=staged_cfg, min_stop_distance=smap.min_stop_distance))
+                staged_geo = {"near": _near, "deep": _deep, "atr": _satr, "cfg": staged_cfg}
+        if not is_staged:
+            plan = build_plan(
+                parsed, current_price=current,
+                candle_high=candle_high, candle_low=candle_low,
+                min_stop_distance=smap.min_stop_distance,
+                max_tp_distance_pct=max_tp_pct if max_tp_pct > 0 else None,
+                honor_market_hint=bool(planner_cfg.get("honor_market_hint", True)),
+                chase_tolerance_r=Decimal(str(planner_cfg.get("chase_tolerance_r", "0.25"))),
+                chase_tolerance_atr=Decimal(str(planner_cfg.get("chase_tolerance_atr", "0"))),
+                beyond_tolerance=str(planner_cfg.get("beyond_tolerance", "limit")),
+            )
+            # Audit the chase-guard decision (#67) whenever it prevented a chase —
+            # a MARKET hint rested as a LIMIT, or was skipped — so a bad-fill-avoided
+            # is visible in the Activity feed, not silent.
+            _guarded = [d for d in plan.entry_decisions if d.get("decision") in ("limit", "skip")]
+            if _guarded:
+                session.add(Event(kind="entry_chase_guard",
+                                  payload={"signal_id": sig.id, "account_id": acct.id,
+                                           "current_price": str(current), "decisions": _guarded}))
         # Session risk multiplier (#81): de-size entries in the higher-loss
         # London/NY overlap window while keeping London/Asian full. Config-driven
         # (trading_hours.sessions[].risk_mult); fail-open x1.0.
@@ -700,12 +717,26 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             minutes=effective_entry_ttl_min({"entry_ttl_minutes": planner_cfg.get("ttl_minutes")}))
 
         placed = 0
+        tranche_legs = {"toe_in": [], "runner": [], "reclaim": []}
         for pleg in valid:
             leg = Leg(trade_id=trade.id, tp_index=pleg.tp_index,
                       order_type=pleg.order_type, entry=pleg.entry, tp=pleg.tp,
                       sl=pleg.sl, lot=pleg.lot, status="pending")
             session.add(leg)
             await session.flush()
+            if getattr(pleg, "tranche", None):
+                tranche_legs.setdefault(pleg.tranche, []).append(leg.id)
+            # Staged runner/reclaim legs are NOT sent to the broker now — the
+            # monitor deploys the runner at the deep edge and arms the reclaim STOP
+            # after a break (#129). Persist as 'staged' with the level/mode on the
+            # Leg row so the monitor can place it later without re-planning.
+            if getattr(pleg, "tranche", None) in ("runner", "reclaim"):
+                leg.status = "staged"
+                session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="staged_leg",
+                                  payload={"tranche": pleg.tranche, "mode": pleg.order_type,
+                                           "entry": str(pleg.entry),
+                                           "trigger": str(pleg.trigger) if pleg.trigger is not None else None}))
+                continue
             try:
                 _is_market = pleg.order_type == "MARKET"
                 req = PlaceOrderRequest(
@@ -748,6 +779,30 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                                   payload={"error": str(exc)[:300]}))
                 log.warning("leg place failed (trade %s): %s", trade.id, exc)
             await asyncio.sleep(1.0 / max(settings.broker_rate_per_sec, 0.1))
+
+        # Persist the staged-entry state (#129) so the monitor can drive the DECIDE
+        # engine each tick: the geometry + frozen config + one tranche row per role
+        # (toe-in already deployed; runner/reclaim pending, with their own TTL clock).
+        if staged_geo is not None:
+            session.add(StagedEntry(
+                trade_id=trade.id, account_id=acct.id, direction=parsed.direction,
+                near_edge=Decimal(str(staged_geo["near"])), deep_edge=Decimal(str(staged_geo["deep"])),
+                sl=parsed.sl, atr=Decimal(str(staged_geo["atr"])),
+                max_adverse_beyond_deep=Decimal("0"), cfg=staged_geo["cfg"]))
+            for _role in ("toe_in", "runner", "reclaim"):
+                _ids = tranche_legs.get(_role) or []
+                if not _ids:
+                    continue
+                _pl = next((p for p in valid if getattr(p, "tranche", None) == _role), None)
+                session.add(StagedTranche(
+                    trade_id=trade.id, role=_role,
+                    state="deployed" if _role == "toe_in" else "pending",
+                    mode=(_pl.order_type if _pl else None),
+                    trigger_level=(_pl.trigger if _pl and _pl.trigger is not None else None),
+                    leg_ids=_ids))
+            log.info("signal %s acct %s: STAGED entry (toe-in %s / runner %s / reclaim %s legs)",
+                     sig.id, acct.id, len(tranche_legs["toe_in"]),
+                     len(tranche_legs["runner"]), len(tranche_legs["reclaim"]))
 
         await session.commit()
         await bus.publish(CH_TRADE_OPENED, {"trade_id": trade.id, "account_id": acct.id,
