@@ -129,6 +129,32 @@ def test_modifier_can_only_shrink_size():
     assert d3.action == S.WAIT            # can't turn a WAIT into a DEPLOY
 
 
+# ---- staged leg planner (#129 Phase 3) ----
+def test_build_staged_legs_buy():
+    legs = S.build_staged_legs(direction="BUY", tps=[4185, 4190, 4195], near_edge=4180,
+                               deep_edge=4176, sl=4168, atr=14, current_price=4182, cfg=D)
+    by_tp = {l.tp_index: l for l in legs}
+    assert by_tp[1].tranche == "toe_in" and by_tp[1].order_type == "LIMIT" and float(by_tp[1].entry) == 4180
+    assert by_tp[3].tranche == "runner" and by_tp[3].order_type == "LIMIT" and float(by_tp[3].entry) == 4176
+    assert by_tp[2].tranche == "reclaim" and by_tp[2].order_type == "STOP"
+    assert float(by_tp[2].entry) == 4176 + 0.10 * 14 and float(by_tp[2].trigger) == 4176 + 0.10 * 14
+    assert all(l.valid for l in legs)
+
+
+def test_build_staged_legs_toe_in_market_when_crossed():
+    legs = S.build_staged_legs(direction="BUY", tps=[4185, 4190, 4195], near_edge=4180,
+                               deep_edge=4176, sl=4168, atr=14, current_price=4179, cfg=D)
+    toe = next(l for l in legs if l.tranche == "toe_in")
+    assert toe.order_type == "MARKET" and float(toe.entry) == 4179   # price already in the zone
+
+
+def test_build_staged_legs_sell_mirror():
+    legs = S.build_staged_legs(direction="SELL", tps=[4171, 4166, 4161], near_edge=4176,
+                               deep_edge=4180, sl=4188, atr=14, current_price=4174, cfg=D)
+    rec = next(l for l in legs if l.tranche == "reclaim")
+    assert rec.order_type == "STOP" and float(rec.entry) == 4180 - 0.10 * 14   # offset below deep for SELL
+
+
 # ---- config validation (#129 Phase 1) ----
 def test_clean_entry_style():
     assert S.clean_entry_style("STAGED") == "staged"

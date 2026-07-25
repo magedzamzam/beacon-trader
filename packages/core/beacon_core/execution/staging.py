@@ -281,6 +281,58 @@ def partition_tps(tps: list, cfg: dict) -> dict:
     return {TOE_IN: toe, RUNNER: run, RECLAIM: rec}
 
 
+def _D(x):
+    from decimal import Decimal
+    return x if isinstance(x, Decimal) else Decimal(str(x))
+
+
+def build_staged_legs(*, direction: str, tps: list, near_edge, deep_edge, sl, atr,
+                      current_price, cfg: dict, min_stop_distance=None) -> list:
+    """Partition the TP ladder into tranches and produce ONE PlannedLeg per TP tier,
+    each tagged with its tranche + deploy level + order mode:
+      toe_in  -> near edge; MARKET if price already crossed it, else LIMIT (deploy now)
+      runner  -> deep edge; LIMIT (the monitor deploys it when price reaches deep)
+      reclaim -> reclaim STOP trigger (deep edge +/- offset); STOP (monitor arms on break)
+
+    Pure; returns a list[PlannedLeg] UNSIZED (the caller runs risk.size_legs off each
+    leg's `entry`). A leg whose geometry is broken (TP not beyond its deploy level,
+    SL on the wrong side) is marked invalid with a reason, mirroring build_plan."""
+    from .planner import PlannedLeg
+    part = partition_tps(tps, cfg)
+    role_by_tp = {i: role for role, idxs in part.items() for i in idxs}
+    near, deep, slD = _D(near_edge), _D(deep_edge), _D(sl)
+    atrD = _D(atr) if atr is not None else None
+    priceD = _D(current_price) if current_price is not None else None
+    off = (_D(cfg.get("stop_offset_atr") or 0) * atrD) if atrD else _D(0)
+    reclaim_trig = deep + off if direction == "BUY" else deep - off
+
+    legs = []
+    for i, tp in enumerate(tps or [], start=1):
+        role = role_by_tp.get(i)
+        if role is None:
+            continue
+        tpD = _D(tp)
+        if role == TOE_IN:
+            crossed = priceD is not None and (priceD <= near if direction == "BUY" else priceD >= near)
+            entry, mode, trigger = (priceD if crossed else near), ("MARKET" if crossed else "LIMIT"), None
+        elif role == RUNNER:
+            entry, mode, trigger = deep, "LIMIT", None
+        else:
+            entry, mode, trigger = reclaim_trig, "STOP", reclaim_trig
+        leg = PlannedLeg(side=direction, entry=entry, tp=tpD, sl=slD, tp_index=i,
+                         order_type=mode, tranche=role, trigger=trigger)
+        protective = entry > slD if direction == "BUY" else entry < slD
+        beyond = tpD > entry if direction == "BUY" else tpD < entry
+        if not protective:
+            leg.valid, leg.skip_reason = False, "sl on wrong side of entry"
+        elif not beyond:
+            leg.valid, leg.skip_reason = False, "tp already passed at deploy level"
+        elif min_stop_distance is not None and abs(tpD - entry) < _D(min_stop_distance):
+            leg.valid, leg.skip_reason = False, "tp within broker min distance"
+        legs.append(leg)
+    return legs
+
+
 # ============================ context + decision ==============================
 @dataclass(frozen=True)
 class StagingContext:
