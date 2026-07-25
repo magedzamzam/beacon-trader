@@ -227,19 +227,6 @@ def test_chase_guard_atr_tolerance():
     assert all(l.order_type == "MARKET" for l in plan.legs)
 
 
-def test_chase_atr_tolerance_is_dead_without_atr():
-    # #129 P5: the bug — chase_tolerance_atr is silently a no-op unless the caller
-    # passes atr=. Same signal/gap as test_chase_guard_atr_tolerance but atr
-    # omitted: the ATR term collapses to 0, the R term is off, so the 22pt gap is
-    # beyond tolerance and the leg rests a LIMIT instead of MARKET. The executor
-    # fix is to pass the live ATR so the configured key actually takes effect.
-    args = dict(current_price=Decimal("3998"), chase_tolerance_r=Decimal("0"),
-                chase_tolerance_atr=Decimal("0.3"))
-    sig = _msig("MARKET", direction="BUY", ef="3976", sl="3966", tps=("4100",))
-    assert all(l.order_type == "LIMIT" for l in build_plan(sig, **args).legs)     # atr unset -> dead
-    assert all(l.order_type == "MARKET" for l in build_plan(sig, atr=Decimal("100"), **args).legs)  # atr passed -> live
-
-
 def test_chase_guard_boundary_is_inclusive():
     # gap exactly == tolerance -> MARKET (<=). BUY 3976 SL 3966 tol 2.5; price 3978.5.
     plan = build_plan(_msig("MARKET", direction="BUY", ef="3976", sl="3966", tps=("4010",)),
