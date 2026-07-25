@@ -170,6 +170,18 @@ def _match_adx_regime(when, ctx) -> bool:
     return True
 
 
+def adx_rule_timeframes(rules, default: str = "4h") -> set:
+    """The timeframes an `adx_regime` rule set needs live ADX computed for (#132).
+    A rule without an explicit `timeframe` falls back to `default`. Empty when no
+    adx_regime rule is present — so the executor computes (and fetches) nothing
+    unless a rule actually references ADX (keeps the hot path free by default)."""
+    tfs = set()
+    for r in rules or []:
+        if isinstance(r, dict) and (r.get("when") or {}).get("type") == "adx_regime":
+            tfs.add((r.get("when") or {}).get("timeframe") or default)
+    return tfs
+
+
 def apply_filter_rules(rules, ctx) -> tuple:
     """Evaluate the extensible filtration rules against a trade CONTEXT (#84).
 
