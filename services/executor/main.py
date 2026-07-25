@@ -87,36 +87,61 @@ def _to_parsed(sig: Signal) -> ParsedSignal:
 
 async def _trend_read(adapter, epic: str, timeframe: str, ema_period: int,
                       price: float, slope_lookback: int = 0):
-    """(above, slope, dist_atr) for the trend EMA at `timeframe`, or (None,None,
-    None) on any failure (fail-open — a missing indicator never blocks a trade).
-    above=price>EMA (#48); slope=EMA_now − EMA `slope_lookback` bars ago (#79);
-    dist_atr=|price−EMA| in ATR(14) units (#79)."""
+    """(above, slope, dist_atr, atr) for the trend EMA at `timeframe`, or
+    (None,None,None,None) on any failure (fail-open — a missing indicator never
+    blocks a trade). above=price>EMA (#48); slope=EMA_now − EMA `slope_lookback`
+    bars ago (#79); dist_atr=|price−EMA| in ATR(14) units (#79); atr=absolute
+    ATR(14) in price units, reused for chase_tolerance_atr (#129 P5)."""
     resolution = TF_RESOLUTION.get(timeframe)
     if not resolution:
-        return None, None, None
+        return None, None, None, None
     try:
         bars = await adapter.get_bars(epic, resolution, max_bars=250)
     except Exception as exc:
         log.info("trend-filter bars failed (%s/%s): %s", epic, resolution, exc)
-        return None, None, None
+        return None, None, None, None
     highs = [float(b["h"]) for b in bars if b.get("h") is not None]
     lows = [float(b["l"]) for b in bars if b.get("l") is not None]
     closes = [float(b["c"]) for b in bars if b.get("c") is not None]
     series = _ema_full(closes, int(ema_period))
     val = series[-1] if series else None
     if val is None:
-        return None, None, None
+        return None, None, None, None
     above = price > val
     slope = None
     if slope_lookback > 0 and len(series) > slope_lookback \
             and series[-1 - slope_lookback] is not None:
         slope = series[-1] - series[-1 - slope_lookback]
-    dist_atr = None
+    dist_atr = atr_abs = None
     if len(highs) == len(closes) == len(lows) and len(closes) >= 15:
         a = _atr(highs, lows, closes, 14)
         if a and a > 0:
+            atr_abs = a
             dist_atr = abs(price - val) / a
-    return above, slope, dist_atr
+    return above, slope, dist_atr, atr_abs
+
+
+async def _live_atr(adapter, epic: str, timeframe: str, period: int = 14):
+    """Absolute ATR(period) on `timeframe` in price units, or None on any failure
+    (fail-open). Only called when chase_tolerance_atr is configured > 0 AND the
+    trend filter didn't already compute an ATR (#129 P5) — so a default install
+    (chase_tolerance_atr=0) makes no extra broker call and behaves exactly as before."""
+    resolution = TF_RESOLUTION.get(timeframe)
+    if not resolution:
+        return None
+    try:
+        bars = await adapter.get_bars(epic, resolution, max_bars=250)
+    except Exception as exc:
+        log.info("chase-ATR bars failed (%s/%s): %s", epic, resolution, exc)
+        return None
+    highs = [float(b["h"]) for b in bars if b.get("h") is not None]
+    lows = [float(b["l"]) for b in bars if b.get("l") is not None]
+    closes = [float(b["c"]) for b in bars if b.get("c") is not None]
+    if len(highs) == len(closes) == len(lows) and len(closes) >= 15:
+        a = _atr(highs, lows, closes, int(period))
+        if a and a > 0:
+            return a
+    return None
 
 
 async def _accounts_for(session, source: Source):
@@ -273,15 +298,16 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         # Counter-trend entries (direction fighting the higher-TF trend) held ~95%
         # of the book's realized loss. Skip or de-size them. Fail-open.
         trend_size_factor = Decimal("1")
+        trend_atr = None                                  # #129 P5: reuse for chase_tolerance_atr
         tf_cfg = trend_filter_cfg(_entry_filters)
         if tf_cfg.get("enabled"):
-            _above, _slope, _dist = await _trend_read(
+            _above, _slope, _dist, trend_atr = await _trend_read(
                 adapter, smap.broker_epic, tf_cfg.get("timeframe", "4h"),
                 int(tf_cfg.get("ema_period", 200)), float(current),
                 slope_lookback=int(tf_cfg.get("slope_lookback", 0) or 0))
             _htf = None
             if tf_cfg.get("require_htf_concordance"):     # #79: only fetch when asked
-                _htf, _, _ = await _trend_read(
+                _htf, _, _, _ = await _trend_read(
                     adapter, smap.broker_epic, tf_cfg.get("htf_timeframe", "1h"),
                     int(tf_cfg.get("ema_period", 200)), float(current))
             _action, _factor, _aligned = trend_decide(
@@ -334,6 +360,15 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         # Default 0.5 (50%): catches parse-artifact TPs (e.g. tp=1530 vs gold ~4180,
         # ~60% away) while never tripping a real target. Tune via the entry policy.
         max_tp_pct = Decimal(str(planner_cfg.get("max_tp_distance_pct", "0.5")))
+        # #129 P5: activate chase_tolerance_atr — previously a silent no-op because
+        # build_plan was never given atr=. Reuse the ATR the trend filter already
+        # computed (no extra call); only when it's absent AND the operator has set
+        # chase_tolerance_atr>0 do we fetch it (config-gated — default 0 = unchanged).
+        chase_tol_atr = Decimal(str(planner_cfg.get("chase_tolerance_atr", "0")))
+        chase_atr = Decimal(str(trend_atr)) if trend_atr is not None else None
+        if chase_tol_atr > 0 and chase_atr is None:
+            _catr = await _live_atr(adapter, smap.broker_epic, str(tf_cfg.get("timeframe", "4h")))
+            chase_atr = Decimal(str(_catr)) if _catr is not None else None
         plan = build_plan(
             parsed, current_price=current,
             candle_high=candle_high, candle_low=candle_low,
@@ -341,8 +376,9 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             max_tp_distance_pct=max_tp_pct if max_tp_pct > 0 else None,
             honor_market_hint=bool(planner_cfg.get("honor_market_hint", True)),
             chase_tolerance_r=Decimal(str(planner_cfg.get("chase_tolerance_r", "0.25"))),
-            chase_tolerance_atr=Decimal(str(planner_cfg.get("chase_tolerance_atr", "0"))),
+            chase_tolerance_atr=chase_tol_atr,
             beyond_tolerance=str(planner_cfg.get("beyond_tolerance", "limit")),
+            atr=chase_atr,
         )
         # Audit the chase-guard decision (#67) whenever it prevented a chase —
         # a MARKET hint rested as a LIMIT, or was skipped — so a bad-fill-avoided
