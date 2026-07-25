@@ -145,6 +145,70 @@ def test_range_break_fires_beyond_buffer_only():
     assert S.range_break(None, 100, 120, 10, 0.25) is None
 
 
+# ---- FVG magnet levels + per-kind confluence zones (#137) --------------------
+def test_find_fvgs_detects_gaps_and_fill_state():
+    # Build a clean bullish gap: bar t-2 high well below bar t low (3-candle imbalance).
+    # highs/lows indexed together; gap between high[t-2] and low[t].
+    highs = [10, 11, 12, 20, 21]
+    lows =  [8,  9, 10, 18, 19]           # low[3]=18 > high[1]=11 -> bullish FVG (bottom 11, top 18)
+    gaps = S.find_fvgs(highs, lows, atr=1.0, min_gap_atr=0.25, lookback=50)
+    assert gaps and any(g["direction"] == "bull" for g in gaps)
+    g = next(g for g in gaps if g["direction"] == "bull")
+    assert g["kind"] == "fvg" and g["bottom"] == 11 and g["top"] == 18
+    assert g["price"] == (11 + 18) / 2.0 and g["filled"] is False
+    # A later candle trading back into [11,18] marks it filled.
+    highs2 = highs + [15]
+    lows2 = lows + [12]
+    g2 = next(g for g in S.find_fvgs(highs2, lows2, atr=1.0) if g["direction"] == "bull")
+    assert g2["filled"] is True
+    # noise guard + bad input
+    assert S.find_fvgs(highs, lows, atr=1.0, min_gap_atr=100) == []
+    assert S.find_fvgs([1, 2], [1, 1], atr=1.0) == []
+
+
+def test_strength_bucket():
+    cfg = {"high": 5.0, "med": 2.5}
+    assert S.strength_bucket(6.0, cfg) == "HIGH"
+    assert S.strength_bucket(3.0, cfg) == "MED"
+    assert S.strength_bucket(1.0, cfg) == "LOW"
+
+
+def test_side_aware_kind_zones_splits_and_signs_distance():
+    # price=100. Levels below (discount/buy-side) and above (premium/sell-side).
+    levels = [
+        {"level_id": 1, "price": 95.0, "weight": 6.0, "timeframe": "1h", "kind": "fvg", "filled": False},
+        {"level_id": 2, "price": 90.0, "weight": 1.0, "timeframe": "4h", "kind": "fvg", "filled": True},
+        {"level_id": 3, "price": 105.0, "weight": 3.0, "timeframe": "1h", "kind": "fvg", "filled": False},
+        {"level_id": 4, "price": 112.0, "weight": 1.0, "timeframe": "1d", "kind": "fvg", "filled": False},
+    ]
+    cfg = {"cluster_atr": 0.5, "max_zone_width_atr": 1.0, "zone_strength": {"high": 5.0, "med": 2.5}}
+    out = S.side_aware_kind_zones(levels, price=100.0, ref_atr=2.0, cfg=cfg,
+                                  per_tf_atr={"1h": 2.0, "4h": 4.0, "1d": 8.0},
+                                  timeframes=["1h", "4h", "1d"])
+    # buy-side = below price, nearest first; distance is signed + (below).
+    assert out["buy_side"] and out["buy_side"][0]["mid"] == 95.0
+    assert out["buy_side"][0]["distance"] > 0 and out["buy_side"][0]["strength"] == "HIGH"
+    assert out["buy_side"][0]["status"] == "Open"
+    # the fully-filled 90.0 zone reports Filled
+    filled_zone = next(z for z in out["buy_side"] if z["mid"] == 90.0)
+    assert filled_zone["status"] == "Filled"
+    # sell-side = above price, distance signed − (above)
+    assert out["sell_side"] and out["sell_side"][0]["mid"] == 105.0
+    assert out["sell_side"][0]["distance"] < 0
+    # per-tf breakdown present for each contributing tf
+    assert set(out["per_tf"]) == {"1h", "4h", "1d"}
+    assert out["per_tf"]["1h"]["buy_side"][0]["mid"] == 95.0
+
+
+def test_side_aware_kind_zones_caps_nearest_three():
+    levels = [{"level_id": i, "price": 100.0 - i, "weight": 1.0, "timeframe": "1h",
+               "kind": "fvg"} for i in range(1, 8)]     # 7 buy-side levels
+    out = S.side_aware_kind_zones(levels, price=100.0, ref_atr=2.0,
+                                  cfg={"cluster_atr": 0.1, "max_zone_width_atr": 0.1},
+                                  per_tf_atr={"1h": 2.0}, timeframes=["1h"], top_n=3)
+    assert len(out["buy_side"]) == 3 and not out["sell_side"]
+
+
 if __name__ == "__main__":
     for n, f in sorted(globals().items()):
         if n.startswith("test_") and callable(f):

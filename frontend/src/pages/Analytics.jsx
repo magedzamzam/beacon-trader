@@ -5,6 +5,7 @@ import { Toggle, Button } from "../components/form";
 import RangeFilter, { useRange } from "../components/RangeFilter";
 import HelpHint from "../components/HelpHint";
 import StructureMapChart from "../components/StructureMapChart";
+import ConfluenceZonePanel from "../components/ConfluenceZonePanel";
 import { api } from "../lib/api";
 
 const REGIME_TONE = { trending: "beacon", ranging: "muted", high_vol: "warn", unknown: "muted" };
@@ -30,7 +31,6 @@ function biasFrom(map) {
  *  into "Details". Read-only observability — nothing here gates trading. */
 export default function Analytics() {
   const [rep, setRep] = useState(null);
-  const [struct, setStruct] = useState(null);
   const [synth, setSynth] = useState(null);
   const [signalRead, setSignalRead] = useState(null);
   const [cfg, setCfg] = useState(null);
@@ -71,10 +71,9 @@ export default function Analytics() {
     catch (e) { setErr(e.message); } finally { setMapBusy(false); }
   };
   useEffect(() => {
-    setRep(null); setStruct(null); setTrend(null); setSynth(null);
+    setRep(null); setTrend(null); setSynth(null);
     api.analyticsSynthesis(range.range).then(setSynth).catch(e => setErr(e.message));
     api.analyticsCorrelation(range.range).then(setRep).catch(e => setErr(e.message));
-    api.analyticsStructure(range.range).then(setStruct).catch(e => setErr(e.message));
     api.analyticsTrendAlignment(range.range).then(setTrend).catch(e => setErr(e.message));
   }, [range.fromIso, range.toIso]);
 
@@ -131,8 +130,8 @@ export default function Analytics() {
             ? [{ key: "regime_mix", label: "Regime mix",
                  node: <RegimeMixCard mix={rep.regime_mix_by_channel} /> }]
             : []),
-          { key: "fvg_ob", label: "FVG/OB",
-            node: <StructureAnalyses struct={struct} ready={!!struct} /> },
+          { key: "magnets", label: "Magnets",
+            node: <ConfluenceZonePanel kind="fvg" symbol="XAUUSD" price={price} /> },
         ]} />
       </Collapse>
     </div>
@@ -629,85 +628,6 @@ function PriceBandMap({ zones, price, maxScore, emph }) {
   );
 }
 
-// One on-demand "Structure analysis" surface (#117): the per-structure cuts (FVG,
-// Order Block, and any future ones) as a single accordion — collapsed by default,
-// at most one open at a time — instead of one always-visible card each. Adding an
-// analysis is one new row, never a new card.
-const STRUCTURE_ANALYSES = [
-  { key: "fvg", label: "Fair Value Gap — inside vs outside" },
-  { key: "ob", label: "Order Block — inside vs outside" },
-];
-
-function structureHeadline(rows) {
-  if (!rows || !rows.length) return "gathering data (N=0)";
-  const ins = rows.find(r => r.scope === "overall" && r.membership === "inside");
-  const out = rows.find(r => r.scope === "overall" && r.membership === "outside");
-  if (!ins && !out) return `N=${rows.reduce((s, r) => s + (r.n || 0), 0)}`;
-  const tag = (r) => (r ? `${pct0(r.win_rate)} (n=${r.n})` : "—");
-  return `inside ${tag(ins)} · outside ${tag(out)}`;
-}
-
-function StructureAnalyses({ struct, ready }) {
-  const [open, setOpen] = useState(null);   // key of the single open analysis (or null)
-  return (
-    <Card>
-      <div className="px-4 py-3 border-b border-edge text-sm font-medium flex items-center gap-2">
-        Structure analyses
-        <span className="text-muted font-normal text-[11px]">· open one on demand</span>
-      </div>
-      {!ready ? <Empty>Loading…</Empty> : (
-        <div className="divide-y divide-edge/60">
-          {STRUCTURE_ANALYSES.map(a => {
-            const rows = struct?.[a.key];
-            const isOpen = open === a.key;
-            const Chevron = isOpen ? ChevronDown : ChevronRight;
-            return (
-              <div key={a.key}>
-                <button onClick={() => setOpen(isOpen ? null : a.key)}
-                  className="w-full px-4 py-3 flex items-center justify-between gap-3 text-left">
-                  <span className="flex items-center gap-2 min-w-0">
-                    <Chevron className="w-4 h-4 text-muted shrink-0" />
-                    <span className="text-sm">{a.label}</span>
-                  </span>
-                  <span className="text-[11px] text-muted num truncate">{structureHeadline(rows)}</span>
-                </button>
-                {isOpen && (
-                  <div className="pb-2">
-                    {!rows || !rows.length
-                      ? <Empty>No labelled structure data yet — accrues as signals capture and trades close.</Empty>
-                      : <StructureRows rows={rows} />}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </Card>
-  );
-}
-
-// FVG/OB-vs-outcome cut (#59): win-rate & expectancy inside vs outside the zone,
-// overall then per channel/regime, with 90% credible intervals.
-function StructureRows({ rows }) {
-  return (
-    <Table>
-      <thead><tr className="border-b border-edge">
-        <Th>Scope</Th><Th>Zone</Th><Th right>n</Th><Th right>Win%</Th>
-        <Th right>90% CI</Th><Th right>Expectancy</Th>
-      </tr></thead>
-      <tbody>
-        {rows.map((r, i) => (
-          <tr key={i} className="border-b border-edge/60">
-            <Td><span className="text-xs text-muted">{r.scope === "overall" ? "all" : `${r.scope}: ${r.label}`}</span></Td>
-            <Td><Badge tone={r.membership === "inside" ? "beacon" : "muted"}>{r.membership}</Badge></Td>
-            <Td right mono>{r.n}</Td>
-            <Td right mono>{pct0(r.win_rate)}</Td>
-            <Td right mono>{pct0(r.ci_low)}–{pct0(r.ci_high)}</Td>
-            <Td right mono><span className={r.expectancy >= 0 ? "text-long" : "text-short"}>{fmt(r.expectancy)}</span></Td>
-          </tr>
-        ))}
-      </tbody>
-    </Table>
-  );
-}
+// The legacy "FVG / Order Block — inside vs outside" cards were removed (#137) in
+// favour of the reusable ConfluenceZonePanel (Details → Magnets tab). The outcome
+// cut still lives behind GET /analytics/structure if it's wanted again.

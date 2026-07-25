@@ -132,6 +132,12 @@ export const api = {
   signalAnalytics: (id) => req(`/analytics/signal/${id}`),
   structureMap: (symbol = "XAUUSD") => req(`/analytics/structure/map?symbol=${encodeURIComponent(symbol)}`),
   structureRecompute: () => req("/analytics/structure/recompute", { method: "POST" }),
+  // per-kind side-aware confluence zones for the panel (#137)
+  analyticsMagnets: (symbol = "XAUUSD", kind = "fvg", price = null) => {
+    const p = new URLSearchParams({ symbol, kind });
+    if (price != null) p.set("price", price);
+    return req(`/analytics/magnets?${p.toString()}`);
+  },
   // reconciliation: channel-claimed outcomes vs bot execution
   reconciliationSummary: (includeHistory = false, { from, to } = {}) => {
     const p = new URLSearchParams({ include_history: includeHistory });

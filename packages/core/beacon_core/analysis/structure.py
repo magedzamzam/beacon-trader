@@ -42,6 +42,15 @@ DEFAULT_STRUCTURE = {
                      "swing_high": 1.2, "swing_low": 1.2,
                      "equal_high": 1.0, "equal_low": 1.0,
                      "order_block": 1.0, "fvg": 0.8},
+    # FVG magnet levels (#137): emit fair-value-gap levels as their own `kind` so the
+    # per-kind confluence panel has data. Kept OUT of the all-kind magnet zones (the
+    # per-signal estimator reads those) — they cluster per-kind at query time.
+    "emit_fvg": True,
+    "fvg_min_gap_atr": 0.25,
+    "fvg_lookback": 50,
+    # Confluence-zone strength buckets (#137): score >= high -> HIGH, >= med -> MED,
+    # else LOW. Config so the operator can tune per the (weight-dependent) score scale.
+    "zone_strength": {"high": 5.0, "med": 2.5},
     "recompute_cadence_days": 1,     # daily, anchored to the UTC day boundary (#115)
     "break_trigger_tf": "4h",        # recompute on a range break on this anchor TF (#115)
     "break_atr_buffer": 0.25,        # break must exceed the range edge by this * ATR (noise guard)
@@ -210,6 +219,111 @@ def analyze_timeframe(bars: List[dict], *, atr: float, k: float,
         "range_low": low, "range_high": high, "atr": atr,
         "levels": levels,
     }
+
+
+def find_fvgs(highs: List[float], lows: List[float], atr: float,
+              min_gap_atr: float = 0.25, lookback: int = 50) -> List[dict]:
+    """All fair-value gaps in the lookback window as point-levels for magnet
+    clustering (#137). Bullish gap when low[t] > high[t-2]; bearish when
+    high[t] < low[t-2]. A gap is `filled` once a later candle trades back into
+    [bottom, top]. Gaps smaller than min_gap_atr×ATR are noise. Each level:
+    {kind:'fvg', price: mid, ratio: None, top, bottom, direction, filled}. Pure."""
+    n = len(highs)
+    if n < 3 or not atr or atr <= 0 or len(lows) < n:
+        return []
+    min_gap = max(0.0, float(min_gap_atr)) * float(atr)
+    start = max(2, n - int(lookback))
+    out = []
+    for t in range(start, n):
+        if lows[t] > highs[t - 2]:
+            direction, bottom, top = "bull", highs[t - 2], lows[t]
+        elif highs[t] < lows[t - 2]:
+            direction, bottom, top = "bear", highs[t], lows[t - 2]
+        else:
+            continue
+        if (top - bottom) < min_gap:
+            continue
+        filled = any(lows[j] <= top and highs[j] >= bottom for j in range(t + 1, n))
+        out.append({"kind": "fvg", "price": (top + bottom) / 2.0, "ratio": None,
+                    "top": top, "bottom": bottom, "direction": direction, "filled": filled})
+    return out
+
+
+def strength_bucket(score: float, cfg: Optional[dict] = None) -> str:
+    """Bucket a confluence score into HIGH / MED / LOW (#137). Thresholds from the
+    `zone_strength` config ({high, med}); defaults 5.0 / 2.5."""
+    c = cfg or {}
+    hi = float(c.get("high", 5.0))
+    med = float(c.get("med", 2.5))
+    s = float(score or 0.0)
+    return "HIGH" if s >= hi else ("MED" if s >= med else "LOW")
+
+
+def _zone_view(z: dict, price: float, filled_by_id: Optional[dict],
+               strength_cfg: Optional[dict]) -> dict:
+    """Shape one clustered zone for the confluence panel: signed $ distance
+    (+ below price / − above), HIGH/MED/LOW strength, Open/Filled status."""
+    mid = z["mid"]
+    members = z.get("members", [])
+    tfs = sorted({m.get("timeframe") for m in members if m.get("timeframe")})
+    status = "Open"
+    if filled_by_id:
+        flags = [filled_by_id.get(m.get("level_id")) for m in members]
+        flags = [f for f in flags if f is not None]
+        if flags and all(f is True for f in flags):
+            status = "Filled"
+    return {"rank": z.get("rank"), "band": [round(z["price_low"], 5), round(z["price_high"], 5)],
+            "mid": round(mid, 5), "score": z["score"],
+            "strength": strength_bucket(z["score"], strength_cfg),
+            "distance": round(price - mid, 5), "status": status,
+            "timeframes": tfs, "n_timeframes": z.get("n_timeframes", len(tfs))}
+
+
+def _split_sides(zones: List[dict], price: float, filled_by_id, strength_cfg,
+                 top_n: int) -> dict:
+    """Split clustered zones into buy-side (below price, discount) and sell-side
+    (above price, premium), each the nearest `top_n` by absolute distance."""
+    buy, sell = [], []
+    for z in zones:
+        v = _zone_view(z, price, filled_by_id, strength_cfg)
+        (buy if z["mid"] <= price else sell).append(v)
+    buy.sort(key=lambda v: abs(v["distance"]))
+    sell.sort(key=lambda v: abs(v["distance"]))
+    return {"buy_side": buy[:top_n], "sell_side": sell[:top_n]}
+
+
+def side_aware_kind_zones(levels: List[dict], price: float, *, ref_atr: float,
+                          cfg: Optional[dict] = None, per_tf_atr: Optional[dict] = None,
+                          timeframes: Optional[List[str]] = None, top_n: int = 3) -> dict:
+    """Per-kind, side-aware confluence zones for the panel (#137). `levels` are the
+    already-kind-filtered level dicts (price, weight, timeframe, level_id, and an
+    optional `filled` flag). Returns aggregated (all-TF) buy/sell nearest-`top_n`
+    zones plus a per-timeframe breakdown. Pure — no DB. Kind-agnostic: the caller
+    decides which kind's levels to pass."""
+    cfg = cfg or {}
+    strength_cfg = cfg.get("zone_strength")
+    ref_atr = float(ref_atr) if ref_atr else 0.0
+    tol = float(cfg.get("cluster_atr", 0.5)) * ref_atr
+    max_w = float(cfg.get("max_zone_width_atr", 1.0)) * ref_atr
+    filled_by_id = {l.get("level_id"): l.get("filled") for l in levels
+                    if l.get("level_id") is not None and "filled" in l}
+
+    agg = cluster_levels(levels, tolerance=tol, max_width=max_w) if ref_atr > 0 else []
+    out = _split_sides(agg, price, filled_by_id, strength_cfg, top_n)
+
+    per_tf = {}
+    for tf in (timeframes or sorted({l.get("timeframe") for l in levels if l.get("timeframe")})):
+        tf_levels = [l for l in levels if l.get("timeframe") == tf]
+        if not tf_levels:
+            continue
+        a = float((per_tf_atr or {}).get(tf) or ref_atr)
+        if a <= 0:
+            continue
+        tf_zones = cluster_levels(tf_levels, tolerance=float(cfg.get("cluster_atr", 0.5)) * a,
+                                  max_width=float(cfg.get("max_zone_width_atr", 1.0)) * a)
+        per_tf[tf] = _split_sides(tf_zones, price, filled_by_id, strength_cfg, top_n)
+    out["per_tf"] = per_tf
+    return out
 
 
 def cluster_levels(levels: List[dict], tolerance: float,

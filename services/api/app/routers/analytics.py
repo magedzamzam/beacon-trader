@@ -198,6 +198,24 @@ async def structure_map_view(symbol: str = "XAUUSD", price: float = None,
     }
 
 
+@router.get("/magnets")
+async def magnets(symbol: str = "XAUUSD", kind: str = "fvg", price: float = None,
+                  db: AsyncSession = Depends(get_db)):
+    """Side-aware, per-KIND confluence zones for the panel (#137). `kind` is a
+    first-class parameter (`fvg` today; `order_block` / fib kinds reuse the same
+    path) — nothing is FVG-hardcoded. Returns, relative to the current price:
+    `buy_side` (zones BELOW price, discount) and `sell_side` (ABOVE, premium), each
+    the nearest 3 aggregated-across-TF zones, plus a `per_tf` breakdown. Each zone
+    carries its band, HIGH/MED/LOW strength, signed $ distance (+ below / − above),
+    and Open/Filled status. Shadow analytics — never gates trading."""
+    z = await struct_map.kind_zones(db, symbol, kind, price=price)
+    if not z:
+        return {"symbol": symbol, "kind": kind, "version_id": None,
+                "reference_price": price, "buy_side": [], "sell_side": [],
+                "per_tf": {}, "timeframes": []}
+    return z
+
+
 @router.get("/signal/{signal_id}")
 async def signal_analytics(signal_id: int, db: AsyncSession = Depends(get_db)):
     row = (await db.execute(select(SignalAnalytics).where(
