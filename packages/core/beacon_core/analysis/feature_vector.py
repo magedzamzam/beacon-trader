@@ -70,6 +70,10 @@ def assemble(*, ta_features: dict = None, session_tag=None, utc_hour=None,
     adxr = a.get("adx_regime_shadow") or {}          # #127 measured edge-killer
     _put(fv, "analytics.adx.trending", adxr.get("trending"))
     _put(fv, "analytics.adx.value", adxr.get("primary_adx"))
+    geo = a.get("sl_geometry") or {}                 # #128 SL-vs-ATR geometry
+    _put(fv, "analytics.geo.sl_dist_atr", geo.get("sl_dist_atr"))
+    _put(fv, "analytics.geo.rr_to_tp1", geo.get("rr_to_tp1"))
+    _put(fv, "analytics.geo.sl_inside_1_atr", geo.get("sl_inside_1_atr"))
     if not regime.get("label"):
         fv["analytics.regime.label"] = "unknown"        # explicit missing marker
 

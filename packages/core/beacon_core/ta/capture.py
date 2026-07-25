@@ -107,7 +107,9 @@ async def capture_for_signal(session, sig, adapter, smap, *, max_bars: int = MAX
             await sidecar.capture_analytics(
                 signal_id=sig.id, symbol=sig.symbol, direction=sig.direction,
                 source_id=getattr(sig, "source_id", None), features=tf_features,
-                bars=analytics_bars, price=price, timeframe=a_tf, cfg=a_cfg)
+                bars=analytics_bars, price=price, timeframe=a_tf, cfg=a_cfg,
+                sl=getattr(sig, "sl", None), entry_from=getattr(sig, "entry_from", None),
+                entry_to=getattr(sig, "entry_to", None), tps=getattr(sig, "tps", None))
         except Exception as exc:
             log.warning("ANALYTICS-SIDECAR-DEGRADED: capture failed (signal %s): %s",
                         sig.id, exc)

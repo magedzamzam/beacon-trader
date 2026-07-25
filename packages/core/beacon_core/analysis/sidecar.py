@@ -76,6 +76,12 @@ class AnalyticsCtx:
     features: dict = field(default_factory=dict)     # multi-timeframe TA snapshot
     session: object = None                           # AsyncSession (optional)
     source_id: Optional[int] = None
+    # Signal geometry (#128): the parsed entry/SL/TP levels, for the SL-vs-ATR
+    # geometry estimator. Optional so existing callers/tests are unaffected.
+    sl: Optional[float] = None
+    entry_from: Optional[float] = None
+    entry_to: Optional[float] = None
+    tps: List[float] = field(default_factory=list)
 
 
 async def load_config(session) -> dict:
@@ -120,9 +126,19 @@ async def run_estimators(ctx: AnalyticsCtx, estimators=None):
     return analytics, degraded
 
 
+def _fnum(v):
+    """Coerce a Decimal/str/number to float, or None. Keeps ctx primitive."""
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 async def capture_analytics(*, signal_id: int, symbol: str, direction,
                             source_id, features: dict, bars: list, price,
-                            timeframe: str, cfg: dict = None) -> Optional[dict]:
+                            timeframe: str, cfg: dict = None,
+                            sl=None, entry_from=None, entry_to=None,
+                            tps=None) -> Optional[dict]:
     """Build the ctx, run the estimator suite, and upsert one SignalAnalytics row
     in its OWN session/transaction — fully isolated from TA capture, so an
     estimator's DB read (e.g. k-NN) can never poison the capture transaction or
@@ -144,6 +160,8 @@ async def capture_analytics(*, signal_id: int, symbol: str, direction,
             lows=bars_col(bars, "l"),
             volumes=bars_col(bars, "v"), features=features or {}, session=session,
             source_id=source_id,
+            sl=_fnum(sl), entry_from=_fnum(entry_from), entry_to=_fnum(entry_to),
+            tps=[f for f in (_fnum(t) for t in (tps or [])) if f is not None],
         )
         analytics, degraded = await run_estimators(ctx)
         regime = None

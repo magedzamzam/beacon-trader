@@ -51,6 +51,8 @@ class _Ctx:
     def __init__(self, closes, features, price=101.0, tf="1h"):
         self.closes, self.features, self.price, self.timeframe = closes, features, price, tf
         self.session = None
+        self.sl = self.entry_from = self.entry_to = None      # #128 geometry (optional)
+        self.tps = []
 
 
 def test_ctx_estimators_read_features():
@@ -129,6 +131,35 @@ def test_adx_regime_shadow_would_skip():
     assert rng["trending"] is False and rng["would_skip"] is False
     # no ADX anywhere -> None (nothing to measure), never gates
     assert E.adx_regime_shadow(_Ctx([], {})) is None
+
+
+def test_sl_geometry_atr_units():
+    # #128: BUY entry 4180, SL 4160 (20), TP1 4210 (30), ATR 10 (abs price units)
+    g = E.sl_geometry(4180, 4160, [4210, 4240], atr=10.0)
+    assert g["sl_dist_atr"] == 2.0                   # 20 / 10
+    assert g["tp1_dist_atr"] == 3.0                  # 30 / 10
+    assert g["rr_to_tp1"] == 1.5                     # 30 / 20
+    assert g["sl_inside_1_atr"] is False             # 20 > 10
+    # a tight stop inside one expected move
+    g2 = E.sl_geometry(100, 95, [110], atr=8.0)
+    assert g2["sl_inside_1_atr"] is True             # 5 <= 8
+    # entry band (range entry) measured in ATR
+    g3 = E.sl_geometry(100, 90, [120], atr=5.0, entry_from=100, entry_to=102.5)
+    assert g3["entry_band_atr"] == 0.5               # 2.5 / 5
+    # unusable inputs -> None (never gates)
+    assert E.sl_geometry(100, None, [110], atr=10.0) is None
+    assert E.sl_geometry(100, 95, [110], atr=0.0) is None
+
+
+def test_sl_geometry_estimator_reads_ctx():
+    ctx = _Ctx([], {"1h": {"atr_14": {"value": 10.0, "pct": 0.24}}}, price=4180.0)
+    ctx.sl, ctx.entry_from, ctx.entry_to, ctx.tps = 4160.0, 4180.0, 4180.0, [4210.0]
+    g = E.sl_geometry_estimator(ctx)
+    assert g["sl_dist_atr"] == 2.0 and g["rr_to_tp1"] == 1.5
+    # no ATR in features -> None
+    bare = _Ctx([], {}, price=4180.0)
+    bare.sl, bare.entry_from, bare.tps = 4160.0, 4180.0, [4210.0]
+    assert E.sl_geometry_estimator(bare) is None
 
 
 if __name__ == "__main__":

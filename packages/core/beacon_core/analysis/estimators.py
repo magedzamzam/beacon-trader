@@ -267,6 +267,51 @@ async def knn(ctx, k: int = 5) -> Optional[dict]:
                             "realized_pl": round(pl, 2)} for dist, sid, pl in ranked]}
 
 
+# --- SL-vs-ATR geometry (#128 feat 1) -----------------------------------------
+def sl_geometry(entry, sl, tps, atr, entry_from=None, entry_to=None) -> Optional[dict]:
+    """Stop/target geometry in ATR units — the cheapest lever on the variable that
+    dominates Beacon P&L (stop-outs). `atr` is ABSOLUTE (price units, the
+    `atr_14.value`), NOT percent. Pure; returns None when entry/SL/ATR are
+    unusable. Fields:
+      sl_dist_atr   = |entry-SL| / ATR   (how much noise the stop can absorb)
+      tp1_dist_atr  = |tp1-entry| / ATR
+      rr_to_tp1     = |tp1-entry| / |entry-SL|
+      entry_band_atr= |entry_from-entry_to| / ATR (0 for a point entry)
+      sl_inside_1_atr = |entry-SL| <= ATR (a stop tighter than one expected move)
+    """
+    try:
+        e, s, a = float(entry), float(sl), float(atr)
+    except (TypeError, ValueError):
+        return None
+    if a <= 0:
+        return None
+    sl_dist = abs(e - s)
+    out = {"atr": round(a, 5), "sl_dist_atr": round(sl_dist / a, 4),
+           "sl_inside_1_atr": sl_dist <= a}
+    tlist = [float(t) for t in (tps or []) if t is not None]
+    if tlist:
+        tp1_dist = abs(tlist[0] - e)
+        out["tp1_dist_atr"] = round(tp1_dist / a, 4)
+        out["rr_to_tp1"] = round(tp1_dist / sl_dist, 4) if sl_dist > 0 else None
+    if entry_from is not None and entry_to is not None:
+        try:
+            out["entry_band_atr"] = round(abs(float(entry_from) - float(entry_to)) / a, 4)
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def sl_geometry_estimator(ctx) -> Optional[dict]:
+    """SHADOW / measure-before-gate (#128). SL/TP geometry in ATR units for THIS
+    signal, from the plumbed entry/SL/TP levels + the analytics-timeframe ATR.
+    Never gates — feeds Lever 4 (reduce #SLs). Uses the signal's own entry level
+    (entry_from) as the reference, falling back to the live price if unplumbed."""
+    atr = _tf_num(_tf_features(ctx), "atr", "value")
+    entry = ctx.entry_from if ctx.entry_from is not None else ctx.price
+    return sl_geometry(entry, ctx.sl, ctx.tps, atr,
+                       entry_from=ctx.entry_from, entry_to=ctx.entry_to)
+
+
 # --- ADX-regime entry-filter shadow (#127) ------------------------------------
 ADX_FILTER_TF = "4h"          # 4h ADX-trending is the measured top edge-killer (#127)
 
@@ -407,4 +452,5 @@ ESTIMATORS = {
     "knn": knn,
     "structure_magnet": structure_magnet,
     "adx_regime_shadow": adx_regime_shadow,
+    "sl_geometry": sl_geometry_estimator,
 }

@@ -68,6 +68,13 @@ def estimator_contributions(name: str, detail) -> List[FeatureContribution]:
     if name == "knn":
         wr = detail.get("win_rate")
         return [fc("knn_win_rate", wr, None, 1.0, 1.0)] if wr is not None else []
+    if name == "sl_geometry":
+        out = []
+        if detail.get("sl_dist_atr") is not None:
+            out.append(fc("sl_dist_atr", detail.get("sl_dist_atr"), None, 1.0, 1.0))
+        if detail.get("rr_to_tp1") is not None:
+            out.append(fc("rr_to_tp1", detail.get("rr_to_tp1"), None, 1.0, 1.0))
+        return out
     if name == "adx_regime_shadow":
         tr = detail.get("trending")
         return [fc("adx_trending", tr, "trending" if tr else "range", 1.0, 1.0)] if tr is not None else []
