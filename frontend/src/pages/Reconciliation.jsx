@@ -1,9 +1,10 @@
 import { Fragment, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { Table, Card, KPI, Th, Td, Badge, Empty } from "../components/ui";
-import { Button, Toggle } from "../components/form";
+import { Button, Toggle, Select } from "../components/form";
 import RangeFilter, { useRange } from "../components/RangeFilter";
 import HelpHint from "../components/HelpHint";
+import TradeDetail from "../components/TradeDetail";
 import { api } from "../lib/api";
 import { useData, money, tone } from "./_useData";
 
@@ -12,19 +13,27 @@ const CAT = {
   no_fill: ["No fill", "short"],
   shortfall_stopped_before_tp: ["Stopped before TP", "warn"],
   shortfall_leg_missing: ["Leg missing", "warn"],
-  executed_no_trade: ["No trade placed", "short"],
-  not_executed: ["Not executed", "muted"],
+  executed_no_trade: ["No-trade bug", "short"],
+  not_executed: ["Protected / not-traded", "muted"],
   claim_sl: ["Channel SL", "muted"],
 };
 const catLabel = (c) => (CAT[c]?.[0] || c);
 const catTone = (c) => (CAT[c]?.[1] || "muted");
 const when = (s) => (s || "").slice(0, 16).replace("T", " ");
 
+// Operator outcome-override options (#136 pt3) — force-tag a misparsed follow-up.
+const OVERRIDE_OPTS = [
+  ["", "— parsed —"], ["sl_hit", "SL Hit"], ["tp1", "TP1"], ["tp2", "TP2"],
+  ["tp3", "TP3"], ["tp4", "TP4"], ["tp5", "TP5"], ["all_tp", "All TP"],
+  ["breakeven", "Breakeven"],
+];
+
 export default function Reconciliation() {
   const [includeHistory, setIncludeHistory] = useState(false);
   const [category, setCategory] = useState("");     // "" = all
   const [expanded, setExpanded] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [tradeId, setTradeId] = useState(null);     // trade whose TradeDetail modal is open (#136 pt1)
   const range = useRange("all");                    // anchored on Signal.created_at
   const { fromIso, toIso } = range;
 
@@ -34,6 +43,11 @@ export default function Reconciliation() {
     [includeHistory, category, busy, fromIso, toIso]);
 
   const refresh = async () => { setBusy(true); try { await api.reconciliationRefresh(); } finally { setBusy(v => !v); } };
+  // Set/clear a claim's operator override, then re-pull so the category recomputes.
+  const setOverride = async (claimId, outcome) => {
+    try { await api.reconciliationSetOverride(claimId, { override_outcome: outcome || null }); }
+    finally { setBusy(v => !v); }
+  };
 
   return (
     <div className="space-y-5">
@@ -55,13 +69,13 @@ export default function Reconciliation() {
         <>
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             <KPI label={<>Match rate<HelpHint term="match_rate" /></>} value={sum.match_rate != null ? `${sum.match_rate}%` : "—"}
-              tone="beacon" sub={`${sum.matched}/${sum.total} signals`} />
+              tone="beacon" sub={`${sum.matched}/${sum.evaluable ?? sum.total} executed`} />
             <KPI label={<>No fill<HelpHint term="no_fill" /></>} value={sum.categories.no_fill || 0} tone="short" sub="placed, never filled" />
             <KPI label={<>Stopped early<HelpHint term="shortfall_stopped_before_tp" /></>} value={sum.categories.shortfall_stopped_before_tp || 0}
               tone="warn" sub="filled, closed before TP" />
-            <KPI label={<>No trade<HelpHint term="executed_no_trade" /></>}
-              value={(sum.categories.executed_no_trade || 0) + (sum.categories.not_executed || 0)}
-              tone="muted" sub="signal placed nothing" />
+            <KPI label={<>Protected<HelpHint term="not_executed" /></>}
+              value={sum.protected ?? ((sum.categories.executed_no_trade || 0) + (sum.categories.not_executed || 0))}
+              tone="muted" sub="not traded — excluded from rate" />
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5">
@@ -126,19 +140,38 @@ export default function Reconciliation() {
                     {expanded === r.signal_id && (
                       <tr className="border-b border-edge/60 bg-panel2/40">
                         <td colSpan={7} className="px-4 py-3 space-y-3">
+                          {/* clickable Signal # + Trade # -> shared TradeDetail modal (#136 pt1) */}
+                          <div className="flex flex-wrap items-center gap-2 text-xs">
+                            {(r.trade_ids || []).length
+                              ? <button className="text-beacon hover:underline num" title="Open trade"
+                                  onClick={() => setTradeId(r.trade_ids[0])}>Signal #{r.signal_id}</button>
+                              : <span className="num text-muted">Signal #{r.signal_id}</span>}
+                            {(r.trade_ids || []).map(tid => (
+                              <button key={tid} className="text-beacon hover:underline num" title="Open trade"
+                                onClick={() => setTradeId(tid)}>Trade #{tid}</button>
+                            ))}
+                            {r.protected && r.protected_reason &&
+                              <span className="text-[11px] text-muted">· protected: {r.protected_reason}</span>}
+                          </div>
                           {r.signal_text && (
-                            <div>
-                              <div className="text-[10px] uppercase tracking-wider text-muted mb-1">Signal #{r.signal_id}</div>
-                              <div className="text-xs whitespace-pre-wrap break-words text-ink/90">{r.signal_text}</div>
-                            </div>
+                            <div className="text-xs whitespace-pre-wrap break-words text-ink/90">{r.signal_text}</div>
                           )}
                           {!!r.claims?.length && (
                             <div>
                               <div className="text-[10px] uppercase tracking-wider text-muted mb-1">Channel follow-ups</div>
                               {r.claims.map((c, i) => (
-                                <div key={i} className="text-xs text-ink/90 flex gap-2">
+                                <div key={c.id ?? i} className="text-xs text-ink/90 flex flex-wrap items-center gap-2 py-0.5">
                                   <span className="num text-muted shrink-0">{when(c.at)}</span>
-                                  <span className="break-words">{c.text}</span>
+                                  <span className="break-words flex-1 min-w-[8rem]">{c.text}</span>
+                                  {/* operator outcome override (#136 pt3) */}
+                                  <span className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
+                                    <span className="text-[10px] text-muted">outcome</span>
+                                    <Select value={c.override_outcome || ""}
+                                      onChange={(e) => c.id != null && setOverride(c.id, e.target.value)}>
+                                      {OVERRIDE_OPTS.map(([v, lbl]) => <option key={v} value={v}>{lbl}</option>)}
+                                    </Select>
+                                    {c.override_outcome && <span className="text-[10px] text-beacon" title="operator override active">●</span>}
+                                  </span>
                                 </div>
                               ))}
                             </div>
@@ -167,6 +200,8 @@ export default function Reconciliation() {
           </div>
         )}
       </Card>
+
+      {tradeId != null && <TradeDetail tradeId={tradeId} onClose={() => setTradeId(null)} />}
     </div>
   );
 }

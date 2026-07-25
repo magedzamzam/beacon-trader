@@ -281,6 +281,14 @@ class SignalClaim(Base):
     claim_confidence: Mapped[float | None] = mapped_column(Numeric(4, 3), nullable=True)
     claimed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Operator outcome override (#136) — the claim parser misreads some channel
+    # wording ("FULL TP HIT", "REVERSED AND HIT OUR RISK"). An operator can force-tag
+    # this message's outcome; the reconciler uses the override in place of the parsed
+    # value when present. Values: sl_hit | tp1 | tp2 | … | all_tp | breakeven | NULL.
+    # NEW COLUMNS -> need an explicit ALTER (create_all won't add them, CLAUDE.md §6).
+    override_outcome: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    override_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    override_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

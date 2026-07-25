@@ -215,9 +215,9 @@ export const GLOSSARY = [
   // ---- Reconciler -----------------------------------------------------------
   {
     id: "match_rate", term: "Match rate", section: "reconciler",
-    what: "The share of the channel's claimed outcomes that our execution actually reproduced.",
+    what: "The share of the channel's claimed outcomes that our execution actually reproduced, over the signals the bot actually engaged.",
     read: "A health check on execution, not on the channel. Low match rate = we are not tracking what we subscribed to.",
-    not: "NOT a win-rate and NOT a profit measure.",
+    not: "NOT a win-rate and NOT a profit measure. The denominator EXCLUDES protected/not-traded signals (risk-blocked, untrusted, skipped) — deliberate non-trades never drag it down.",
     act: "Investigate the miss taxonomy below before changing any strategy.",
   },
   {
@@ -236,10 +236,17 @@ export const GLOSSARY = [
   },
   {
     id: "executed_no_trade", term: "executed_no_trade", section: "reconciler",
-    what: "We marked the signal executed but no trade row exists — an internal/plumbing gap rather than a market event.",
-    read: "A bug-shaped symptom, not a trading one.",
+    what: "We marked the signal executed but no trade row exists AND no block is on record — an internal/plumbing gap rather than a market event.",
+    read: "A bug-shaped symptom, not a trading one. Risk-blocked / untrusted / skipped non-trades are NOT counted here — they land in 'Protected'.",
     not: "NOT a signal-quality or execution-quality measure.",
     act: "Treat as a defect to investigate, not a config to tune.",
+  },
+  {
+    id: "not_executed", term: "Protected / not-traded", section: "reconciler",
+    what: "The bot DELIBERATELY placed no trade — risk-limit block, untrusted/disabled channel, news blackout, or no mapped account.",
+    read: "Money protection working as intended, not an execution failure.",
+    not: "NOT a miss. These are EXCLUDED from the match-rate denominator so protection never looks like a defect.",
+    act: "Nothing to fix — review the reason only if you expected the signal to trade.",
   },
 
   // ---- Performance ----------------------------------------------------------

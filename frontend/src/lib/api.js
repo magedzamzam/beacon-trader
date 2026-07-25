@@ -147,6 +147,8 @@ export const api = {
     return req(`/reconciliation?${p.toString()}`);
   },
   reconciliationRefresh: (full = false) => post(`/reconciliation/refresh?full=${full}`, {}),
+  reconciliationSetOverride: (claimId, { override_outcome = null, override_note = null } = {}) =>
+    post(`/reconciliation/claims/${claimId}/override`, { override_outcome, override_note }),
   // brokers
   createBroker: (b) => post("/brokers", b),
   updateBroker: (id, b) => patch(`/brokers/${id}`, b),
