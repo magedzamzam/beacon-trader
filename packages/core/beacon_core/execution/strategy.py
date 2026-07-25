@@ -120,6 +120,53 @@ def resolve_entry_filters(chain, *, global_filters=None) -> dict:
     return dict(global_filters or {})
 
 
+def _adx_block(ctx, timeframe):
+    """The per-timeframe ADX block for an `adx_regime` rule (#127). ctx carries
+    `adx` as {tf: {"adx": float, "trending": bool}} (built from the persisted
+    per-TF `adx_14` feature). `timeframe` selects the TF; when omitted, the only
+    entry is used (ambiguous multi-TF without an explicit TF stays a no-op).
+    Returns the block dict, or None when the input isn't present (fail-open)."""
+    adx = ctx.get("adx")
+    if not isinstance(adx, dict) or not adx:
+        return None
+    if timeframe:
+        b = adx.get(timeframe)
+        return b if isinstance(b, dict) else None
+    if len(adx) == 1:
+        b = next(iter(adx.values()))
+        return b if isinstance(b, dict) else None
+    return None
+
+
+def _match_adx_regime(when, ctx) -> bool:
+    """`adx_regime` condition (#127): match on the per-TF ADX trend state.
+
+    Keys: timeframe (which TF's ADX), trending (bool — match when the TF's ADX
+    `trending` equals this), min_adx / max_adx (numeric ADX bounds). Every
+    supplied sub-condition must hold. FAIL-OPEN: if the referenced ADX value is
+    absent (no `adx` in ctx, TF missing, or the specific field is None), the rule
+    does NOT match — so it's a no-op until the ADX is plumbed into ctx (the
+    measure-before-gate posture: the evaluator ships inert). A rule with no
+    sub-condition also stays a no-op rather than matching everything."""
+    block = _adx_block(ctx, when.get("timeframe"))
+    if block is None:
+        return False
+    want_trending = when.get("trending")
+    min_adx, max_adx = when.get("min_adx"), when.get("max_adx")
+    if want_trending is None and min_adx is None and max_adx is None:
+        return False                                  # no condition -> no-op, not match-all
+    if want_trending is not None:
+        tr = block.get("trending")
+        if tr is None or bool(tr) != bool(want_trending):
+            return False
+    adx_val = block.get("adx")
+    if min_adx is not None and (adx_val is None or float(adx_val) < float(min_adx)):
+        return False
+    if max_adx is not None and (adx_val is None or float(adx_val) > float(max_adx)):
+        return False
+    return True
+
+
 def apply_filter_rules(rules, ctx) -> tuple:
     """Evaluate the extensible filtration rules against a trade CONTEXT (#84).
 
@@ -130,7 +177,9 @@ def apply_filter_rules(rules, ctx) -> tuple:
     don't fire until those features are wired. Currently understood conditions:
       session_in {sessions:[...]}          ctx['session'] in list
       always                               unconditional (baseline scaling)
-    Structure/regime/bayesian conditions are declared here as they're added."""
+      adx_regime {timeframe, trending,     ctx['adx'][tf] ADX trend state (#127);
+                  min_adx, max_adx}          fail-open when ADX absent from ctx
+    Structure/bayesian conditions are declared here as they're added."""
     factor, skip, reasons = 1.0, False, []
     for r in rules or []:
         if not isinstance(r, dict) or not r.get("enabled", True):
@@ -146,7 +195,9 @@ def apply_filter_rules(rules, ctx) -> tuple:
             if have is None and ctx.get("session") is not None:
                 have = [ctx["session"]]
             matched = bool(have) and any(s in want for s in have)
-        # (structure/regime/bayesian conditions plug in here — no-op until wired)
+        elif wtype == "adx_regime":
+            matched = _match_adx_regime(when, ctx)
+        # (structure/bayesian conditions plug in here — no-op until wired)
         if not matched:
             continue
         if r.get("action") == "skip":

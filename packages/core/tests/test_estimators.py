@@ -109,6 +109,28 @@ def test_regime_adx_feeds_knn_vector():
     assert vec[0] == 27.0 and vec[1] == 0.4
 
 
+def test_adx_by_tf_reads_trending_and_value():
+    # #127: per-TF ADX pulled from the persisted adx_14-style block (prefix-tolerant)
+    feats = {"4h": {"adx_14": {"adx": 31.2, "trending": True}},
+             "1h": {"adx": {"adx": 18.0, "trending": False}},
+             "1d": {"ema_200": {"value": 4100}}}          # no ADX -> omitted
+    m = E.adx_by_tf(feats)
+    assert m["4h"] == {"adx": 31.2, "trending": True}
+    assert m["1h"] == {"adx": 18.0, "trending": False}
+    assert "1d" not in m
+    assert E.adx_by_tf({}) == {}
+
+
+def test_adx_regime_shadow_would_skip():
+    # trending on 4h -> the shadow rule would skip; ranging -> would not.
+    trend = E.adx_regime_shadow(_Ctx([], {"4h": {"adx_14": {"adx": 34.0, "trending": True}}}))
+    assert trend["trending"] is True and trend["would_skip"] is True and trend["primary_adx"] == 34.0
+    rng = E.adx_regime_shadow(_Ctx([], {"4h": {"adx_14": {"adx": 12.0, "trending": False}}}))
+    assert rng["trending"] is False and rng["would_skip"] is False
+    # no ADX anywhere -> None (nothing to measure), never gates
+    assert E.adx_regime_shadow(_Ctx([], {})) is None
+
+
 if __name__ == "__main__":
     for n, f in sorted(globals().items()):
         if n.startswith("test_") and callable(f):

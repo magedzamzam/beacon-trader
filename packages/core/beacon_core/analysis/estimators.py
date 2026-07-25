@@ -267,6 +267,49 @@ async def knn(ctx, k: int = 5) -> Optional[dict]:
                             "realized_pl": round(pl, 2)} for dist, sid, pl in ranked]}
 
 
+# --- ADX-regime entry-filter shadow (#127) ------------------------------------
+ADX_FILTER_TF = "4h"          # 4h ADX-trending is the measured top edge-killer (#127)
+
+
+def adx_by_tf(features) -> dict:
+    """Per-timeframe ADX state read from the persisted TA snapshot:
+    {tf: {"adx": float|None, "trending": bool|None}}. Reads the `adx_14`-style
+    block prefix-tolerantly (#111). This is the WORKING ADX signal (per-TF
+    `adx_14.trending`), not the dead `signal_analytics.regime` (#111)."""
+    out = {}
+    for tf, inds in (features or {}).items():
+        if not isinstance(inds, dict):
+            continue
+        adx_val, trending = None, None
+        for key, block in inds.items():
+            if (key == "adx" or key.startswith("adx_")) and isinstance(block, dict):
+                adx_val = _num(block, "adx")
+                if "trending" in block:
+                    trending = bool(block["trending"])
+                break
+        if adx_val is not None or trending is not None:
+            out[tf] = {"adx": adx_val, "trending": trending}
+    return out
+
+
+def adx_regime_shadow(ctx) -> Optional[dict]:
+    """SHADOW / measure-before-gate (#127). Records the per-TF ADX-trending state
+    at signal time and what an "ADX-trending -> skip" entry filter WOULD do to
+    this trade, so the offline forward-R report can compare the ADX-trending
+    cohort vs the ranging cohort. Purely observational — the live evaluator
+    (`execution.strategy.apply_filter_rules` :: `when.type: adx_regime`) stays
+    inert until an A/B graduates it. Reads only persisted features."""
+    by_tf = adx_by_tf(ctx.features)
+    if not by_tf:
+        return None
+    primary = by_tf.get(ADX_FILTER_TF) or {}
+    trending = primary.get("trending")
+    return {"tf": ADX_FILTER_TF, "by_tf": by_tf,
+            "primary_adx": primary.get("adx"), "trending": trending,
+            # the operator-hypothesised rule: 4h ADX-trending -> skip the entry.
+            "would_skip": bool(trending) if trending is not None else None}
+
+
 def _htf_alignment(direction, structures) -> str:
     """Signal direction vs the higher-timeframe (1W/1D) structure labels."""
     if not direction:
@@ -363,4 +406,5 @@ ESTIMATORS = {
     "vwap_deviation": vwap_deviation,
     "knn": knn,
     "structure_magnet": structure_magnet,
+    "adx_regime_shadow": adx_regime_shadow,
 }

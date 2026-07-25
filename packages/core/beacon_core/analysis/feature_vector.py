@@ -67,6 +67,9 @@ def assemble(*, ta_features: dict = None, session_tag=None, utc_hour=None,
     knn = a.get("knn") or {}
     _put(fv, "analytics.knn.win_rate", knn.get("win_rate"))
     _put(fv, "analytics.knn.expectancy", knn.get("expectancy"))
+    adxr = a.get("adx_regime_shadow") or {}          # #127 measured edge-killer
+    _put(fv, "analytics.adx.trending", adxr.get("trending"))
+    _put(fv, "analytics.adx.value", adxr.get("primary_adx"))
     if not regime.get("label"):
         fv["analytics.regime.label"] = "unknown"        # explicit missing marker
 

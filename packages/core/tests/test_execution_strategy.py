@@ -130,6 +130,43 @@ def test_apply_filter_rules():
     assert ST.apply_filter_rules(sk, {})[1] is False
 
 
+def test_adx_regime_evaluator():
+    # #127: 4h ADX-trending -> skip (the operator-hypothesised edge-killer rule).
+    rule = [{"enabled": True, "name": "adx4h skip",
+             "when": {"type": "adx_regime", "timeframe": "4h", "trending": True},
+             "action": "skip"}]
+    trending = {"adx": {"4h": {"adx": 31.2, "trending": True}}}
+    ranging = {"adx": {"4h": {"adx": 18.0, "trending": False}}}
+    assert ST.apply_filter_rules(rule, trending)[1] is True         # trending -> skip
+    assert ST.apply_filter_rules(rule, ranging)[1] is False         # ranging -> pass
+
+    # de-size variant (action: scale) matches on trending
+    scale = [{"when": {"type": "adx_regime", "timeframe": "4h", "trending": True},
+              "action": "scale", "factor": 0.5, "name": "adx desize"}]
+    assert ST.apply_filter_rules(scale, trending)[0] == 0.5
+    assert ST.apply_filter_rules(scale, ranging)[0] == 1.0
+
+    # numeric bound: min_adx
+    hi = [{"when": {"type": "adx_regime", "timeframe": "4h", "min_adx": 30}, "action": "skip", "name": "hi adx"}]
+    assert ST.apply_filter_rules(hi, trending)[1] is True           # 31.2 >= 30
+    assert ST.apply_filter_rules(hi, {"adx": {"4h": {"adx": 27.0, "trending": True}}})[1] is False
+
+
+def test_adx_regime_fail_open():
+    # #127 fail-open: absent ADX in ctx, missing TF, None field, or empty condition
+    # are all no-ops (the evaluator ships INERT until ADX is plumbed into ctx).
+    rule = [{"when": {"type": "adx_regime", "timeframe": "4h", "trending": True}, "action": "skip", "name": "r"}]
+    assert ST.apply_filter_rules(rule, {})[1] is False                                   # no 'adx' key
+    assert ST.apply_filter_rules(rule, {"adx": {}})[1] is False                          # empty map
+    assert ST.apply_filter_rules(rule, {"adx": {"1h": {"adx": 40, "trending": True}}})[1] is False  # wrong TF
+    assert ST.apply_filter_rules(rule, {"adx": {"4h": {"adx": None, "trending": None}}})[1] is False  # None field
+    empty = [{"when": {"type": "adx_regime", "timeframe": "4h"}, "action": "skip", "name": "e"}]
+    assert ST.apply_filter_rules(empty, {"adx": {"4h": {"adx": 40, "trending": True}}})[1] is False   # no sub-condition -> no match
+    # single-TF ctx without an explicit timeframe resolves to that TF
+    notf = [{"when": {"type": "adx_regime", "trending": True}, "action": "skip", "name": "n"}]
+    assert ST.apply_filter_rules(notf, {"adx": {"4h": {"adx": 40, "trending": True}}})[1] is True
+
+
 if __name__ == "__main__":
     for n, f in sorted(globals().items()):
         if n.startswith("test_") and callable(f):
