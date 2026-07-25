@@ -152,6 +152,17 @@ def test_adx_regime_evaluator():
     assert ST.apply_filter_rules(hi, {"adx": {"4h": {"adx": 27.0, "trending": True}}})[1] is False
 
 
+def test_adx_rule_timeframes():
+    # #132: which TFs the executor must compute live ADX for (empty unless a rule uses it)
+    assert ST.adx_rule_timeframes([]) == set()
+    assert ST.adx_rule_timeframes([{"when": {"type": "session_in", "sessions": ["x"]}}]) == set()
+    rules = [{"when": {"type": "adx_regime", "timeframe": "4h", "trending": True}, "action": "skip"},
+             {"when": {"type": "adx_regime", "min_adx": 30}, "action": "scale", "factor": 0.5},  # no tf -> default
+             {"when": {"type": "adx_regime", "timeframe": "1h", "trending": False}, "action": "skip"}]
+    assert ST.adx_rule_timeframes(rules) == {"4h", "1h"}
+    assert ST.adx_rule_timeframes(rules, default="1d") == {"4h", "1d", "1h"}
+
+
 def test_adx_regime_fail_open():
     # #127 fail-open: absent ADX in ctx, missing TF, None field, or empty condition
     # are all no-ops (the evaluator ships INERT until ADX is plumbed into ctx).

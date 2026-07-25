@@ -42,7 +42,8 @@ from beacon_core.risk import cluster as CL
 from beacon_core.ta import capture as ta_capture
 from beacon_core.trading_hours import service as th_service
 from beacon_core.ta.registry import TF_RESOLUTION
-from beacon_core.ta.indicators import ema as _ema, ema_full as _ema_full, atr as _atr
+from beacon_core.ta.indicators import (ema as _ema, ema_full as _ema_full,
+                                       atr as _atr, adx as _adx_ind)
 from beacon_core import notifications as notify
 
 log = get_logger("executor")
@@ -140,6 +141,30 @@ async def _atr_on(adapter, epic: str, timeframe: str, period: int = 14):
         a = _atr(highs, lows, closes, int(period))
         if a and a > 0:
             return a
+    return None
+
+
+async def _adx_read(adapter, epic: str, timeframe: str, period: int = 14):
+    """Live per-TF ADX {adx, trending} for the adx_regime entry filter (#132), or
+    None on any failure (fail-open). Signal features are captured in the background
+    AFTER execution, so the live filter can't read a persisted `adx_14` — it
+    computes ADX in the hot path, and only when an adx_regime rule references the
+    timeframe (so the default install fetches nothing extra)."""
+    resolution = TF_RESOLUTION.get(timeframe)
+    if not resolution:
+        return None
+    try:
+        bars = await adapter.get_bars(epic, resolution, max_bars=250)
+    except Exception as exc:
+        log.info("adx bars failed (%s/%s): %s", epic, resolution, exc)
+        return None
+    highs = [float(b["h"]) for b in bars if b.get("h") is not None]
+    lows = [float(b["l"]) for b in bars if b.get("l") is not None]
+    closes = [float(b["c"]) for b in bars if b.get("c") is not None]
+    if len(highs) == len(closes) == len(lows) and len(closes) >= 15:
+        d = _adx_ind(highs, lows, closes, int(period))
+        if d and d.get("adx") is not None:
+            return {"adx": d["adx"], "trending": bool(d.get("trending"))}
     return None
 
 
@@ -419,7 +444,19 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         _frules = (_entry_filters or {}).get("rules") or []
         if _frules:
             _active = await th_service.active_sessions(session)
-            _ff, _skip, _reasons = ST.apply_filter_rules(_frules, {"sessions": _active})
+            _filter_ctx = {"sessions": _active}
+            # #132: graduate the adx_regime filter (#127) from shadow to LIVE. Build
+            # the per-TF ADX ctx by computing it in the hot path (features are
+            # captured post-execution, so they're not persisted yet). Only fetches
+            # the timeframes an adx_regime rule references; fail-open on any miss.
+            _adx_ctx = {}
+            for _tf in ST.adx_rule_timeframes(_frules):
+                _a = await _adx_read(adapter, smap.broker_epic, _tf)
+                if _a is not None:
+                    _adx_ctx[_tf] = _a
+            if _adx_ctx:
+                _filter_ctx["adx"] = _adx_ctx
+            _ff, _skip, _reasons = ST.apply_filter_rules(_frules, _filter_ctx)
             if _skip:
                 log.info("signal %s acct %s: SKIP by filtration (%s)", sig.id, acct.id, _reasons)
                 session.add(Event(kind="entry_filtered", payload={
