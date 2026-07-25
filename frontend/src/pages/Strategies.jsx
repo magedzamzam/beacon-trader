@@ -1,11 +1,32 @@
 import { useEffect, useMemo, useState } from "react";
-import { GitBranch, Trash2, LogIn, Filter, LogOut, Plus } from "lucide-react";
+import { GitBranch, Trash2, LogIn, Filter, LogOut } from "lucide-react";
 import { Card, Table, Th, Td, Badge, Empty } from "../components/ui";
 import { Field, Input, Select, Toggle, Button, ErrorNote } from "../components/form";
 import SlRulesEditor from "../components/SlRulesEditor";
 import StagedEntryEditor from "../components/StagedEntryEditor";
+import EntryFilterRules from "../components/EntryFilterRules";
 import HelpHint from "../components/HelpHint";
 import { api } from "../lib/api";
+
+// Trend Alignment is stored in the legacy entry_filters.trend_alignment block so
+// the executor's trend path is unchanged; the UI presents it as one rule among the
+// unified list. These map the block <-> a trend_alignment rule on load/save.
+const num = (v) => (v === "" || v == null ? undefined : Number(v));
+const trendBlockToRule = (b) => ({
+  enabled: b.enabled !== false, name: "",
+  when: { type: "trend_alignment", timeframe: b.timeframe ?? "4h", ema_period: b.ema_period ?? 200,
+          require_slope: b.require_slope !== false, slope_lookback: b.slope_lookback ?? 10,
+          min_dist_atr: b.min_dist_atr ?? 0.5, require_htf_concordance: !!b.require_htf_concordance,
+          htf_timeframe: b.htf_timeframe ?? "1h" },
+  action: b.mode === "skip" ? "skip" : "scale", factor: b.desize_factor ?? 0.25,
+});
+const trendRuleToBlock = (r) => ({
+  enabled: r.enabled !== false, timeframe: r.when.timeframe ?? "4h", ema_period: num(r.when.ema_period) ?? 200,
+  mode: r.action === "skip" ? "skip" : "desize", desize_factor: num(r.factor) ?? 0.25,
+  require_slope: r.when.require_slope !== false, slope_lookback: num(r.when.slope_lookback) ?? 10,
+  min_dist_atr: num(r.when.min_dist_atr) ?? 0.5, require_htf_concordance: !!r.when.require_htf_concordance,
+  htf_timeframe: r.when.htf_timeframe ?? "1h",
+});
 
 // Mirrors beacon_core.execution.staging.DEFAULT_STAGED (keep in sync). Drives the
 // #129 confirmation-staged entry; inert unless entry_style === "staged".
@@ -40,13 +61,9 @@ const BLANK = () => ({
   id: null, account_id: "", source_id: "", label: "", enabled: true,
   entry: { ttl_minutes: "", honor_market_hint: true, chase_tolerance_r: "", chase_tolerance_atr: "", beyond_tolerance: "limit", max_tp_distance_pct: "",
            entry_style: "", staged: { ...STAGED_DEFAULTS } },
-  trend: { enabled: false, timeframe: "4h", ema_period: 200, mode: "skip", desize_factor: 0.25,
-           require_slope: true, slope_lookback: 10, min_dist_atr: 0.5,
-           require_htf_concordance: false, htf_timeframe: "1h" },
-  rules: [],
+  rules: [],          // unified entry-filter rules (Trend Alignment / ADX Regime / Session)
   exit: { sl_rules: [], cancel_pending_on_stop: true },
 });
-const num = (v) => (v === "" || v == null ? undefined : Number(v));
 const INPUT = "w-full bg-panel2 border border-edge rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-beacon";
 const TABS = [["entry", "Entry Strategy", LogIn], ["filter", "Entry Filtration", Filter], ["exit", "Exit Strategy", LogOut]];
 
@@ -80,8 +97,9 @@ export default function Strategies() {
       label: row.label || "", enabled: row.enabled,
       entry: { ...BLANK().entry, ...Object.fromEntries(Object.entries(ep).map(([k, v]) => [k, v ?? ""])),
                staged: { ...STAGED_DEFAULTS, ...(ep.staged || {}) } },
-      trend: { ...BLANK().trend, ...(ef.trend_alignment || {}) },
-      rules: Array.isArray(ef.rules) ? ef.rules : [],
+      // Unified rule list: the legacy trend_alignment block becomes the first rule.
+      rules: [...(ef.trend_alignment ? [trendBlockToRule(ef.trend_alignment)] : []),
+              ...(Array.isArray(ef.rules) ? ef.rules : [])],
       exit: { sl_rules: Array.isArray(xp.sl_rules) ? xp.sl_rules : [],
               cancel_pending_on_stop: xp.cancel_pending_on_stop !== false },
     });
@@ -105,22 +123,29 @@ export default function Strategies() {
       }
       entry_policy.staged = staged;
     }
+    // Split the unified rule list back into storage: the Trend Alignment rule ->
+    // the legacy trend_alignment block (executor path unchanged); the rest ->
+    // entry_filters.rules. ADX rules get their `when` cleaned (min_adx coerced).
+    const trendRule = form.rules.find((r) => r.when?.type === "trend_alignment");
+    const otherRules = form.rules.filter((r) => r.when?.type !== "trend_alignment").map((r) => {
+      if (r.when?.type !== "adx_regime") return r;
+      const w = { type: "adx_regime", timeframe: r.when.timeframe || "4h", trending: r.when.trending !== false };
+      const ma = num(r.when.min_adx); if (ma !== undefined) w.min_adx = ma;
+      return { ...r, when: w };
+    });
     const body = {
       account_id: form.account_id === "" ? null : form.account_id,
       source_id: form.source_id === "" ? null : form.source_id,
       label: form.label || null, enabled: form.enabled,
       entry_policy,
-      entry_filters: { trend_alignment: form.trend, rules: form.rules },
+      entry_filters: { trend_alignment: trendRule ? trendRuleToBlock(trendRule) : { enabled: false },
+                       rules: otherRules },
       exit_policy: { sl_rules, cancel_pending_on_stop: form.exit.cancel_pending_on_stop },
     };
     try { const r = await api.saveStrategy(body); setSaved(true); await load(); editRow(r); }
     catch (e) { setErr(e.message); }
   };
   const del = async (id) => { try { await api.deleteStrategy(id); if (form.id === id) newAt(); await load(); } catch (e) { setErr(e.message); } };
-
-  const addRule = () => setF("rules", [...form.rules, { enabled: true, name: "", when: { type: "session_in", sessions: [] }, action: "scale", factor: 0.5 }]);
-  const setRule = (i, patch) => setF("rules", form.rules.map((r, j) => (j === i ? { ...r, ...patch } : r)));
-  const delRule = (i) => setF("rules", form.rules.filter((_, j) => j !== i));
 
   const scopeLabel = `${acctName(form.account_id)} · ${srcName(form.source_id)}`;
   return (
@@ -193,56 +218,9 @@ export default function Strategies() {
         )}
 
         {tab === "filter" && (
-          <div className="p-4 space-y-4">
-            <p className="text-[11px] text-muted"><HelpHint term="filtration_help" /> Rules that can <b>skip</b>, <b>de-size</b>, or <b>up-size</b> a trade from Analytics / session / structure signals. Fail-open: a rule whose inputs aren't available yet is a no-op.</p>
-            <div className="rounded-lg border border-edge p-3 space-y-3">
-              <div className="flex items-center gap-2 text-sm font-medium">Trend alignment
-                <Toggle checked={form.trend.enabled} onChange={(v) => setSub("trend", "enabled", v)} label={form.trend.enabled ? "on" : "off"} />
-                <span className="text-[11px] text-muted">counter-trend entries held ~95% of losses (#48/#79)</span></div>
-              <div className={`grid grid-cols-2 lg:grid-cols-4 gap-3 ${form.trend.enabled ? "" : "opacity-60"}`}>
-                <Field label="Timeframe" hint="trend timeframe, e.g. 4h"><Input value={form.trend.timeframe} onChange={(e) => setSub("trend", "timeframe", e.target.value)} /></Field>
-                <Field label="EMA period"><Input type="number" value={form.trend.ema_period} onChange={(e) => setSub("trend", "ema_period", Number(e.target.value))} /></Field>
-                <Field label="Counter-trend action" hint="skip = reject · desize = trade smaller"><Select value={form.trend.mode} onChange={(e) => setSub("trend", "mode", e.target.value)}><option value="skip">skip</option><option value="desize">desize</option></Select></Field>
-                <Field label="De-size factor" hint="counter-trend size × this (desize mode)"><Input type="number" step="0.05" value={form.trend.desize_factor} onChange={(e) => setSub("trend", "desize_factor", Number(e.target.value))} /></Field>
-                <Field label="Min distance (ATR)" hint="#79 · price must be ≥ this many ATR beyond the EMA (skip the chop band)"><Input type="number" step="0.1" value={form.trend.min_dist_atr} onChange={(e) => setSub("trend", "min_dist_atr", Number(e.target.value))} /></Field>
-                <Field label="Slope lookback (bars)" hint="#79 · bars back used to measure the EMA slope"><Input type="number" value={form.trend.slope_lookback ?? 10} onChange={(e) => setSub("trend", "slope_lookback", Number(e.target.value))} /></Field>
-                <Field label="HTF concordance TF" hint="#79 · the timeframe that must agree when concordance is on">
-                  <Select value={form.trend.htf_timeframe ?? "1h"} onChange={(e) => setSub("trend", "htf_timeframe", e.target.value)}>
-                    {TIMEFRAMES.map((t) => <option key={t} value={t}>{t}</option>)}
-                  </Select></Field>
-              </div>
-              <div className={`flex flex-wrap gap-x-8 gap-y-2 ${form.trend.enabled ? "" : "opacity-60"}`}>
-                <label className="flex items-center gap-2 text-xs text-muted">Require EMA slope (#79)
-                  <Toggle checked={form.trend.require_slope} onChange={(v) => setSub("trend", "require_slope", v)} /></label>
-                <label className="flex items-center gap-2 text-xs text-muted">Require HTF concordance (#79)
-                  <Toggle checked={form.trend.require_htf_concordance ?? false} onChange={(v) => setSub("trend", "require_htf_concordance", v)} /></label>
-              </div>
-            </div>
-            <div className="rounded-lg border border-edge p-3 space-y-2">
-              <div className="flex items-center justify-between"><span className="text-sm font-medium">Custom rules</span>
-                <Button variant="ghost" onClick={addRule}><Plus className="w-3.5 h-3.5 inline -mt-0.5" /> Add rule</Button></div>
-              {!form.rules.length ? <div className="text-[11px] text-muted">No custom rules. Add one, e.g. <i>when session_in [New York] → scale ×0.5</i>.</div> : (
-                <div className="space-y-2">
-                  {form.rules.map((r, i) => (
-                    <div key={i} className="flex items-center gap-2 flex-wrap text-xs bg-panel2 rounded-lg px-2.5 py-2">
-                      <Toggle checked={r.enabled !== false} onChange={(v) => setRule(i, { enabled: v })} />
-                      <input placeholder="name" value={r.name || ""} onChange={(e) => setRule(i, { name: e.target.value })} className={`${INPUT} w-28`} />
-                      <span className="text-muted">when</span>
-                      <select value={r.when?.type || "session_in"} onChange={(e) => setRule(i, { when: e.target.value === "always" ? { type: "always" } : { type: "session_in", sessions: r.when?.sessions || [] } })} className={`${INPUT} w-32`}>
-                        <option value="session_in">session in</option><option value="always">always</option>
-                      </select>
-                      {r.when?.type === "session_in" && (
-                        <input placeholder="London, New York" value={(r.when.sessions || []).join(", ")}
-                          onChange={(e) => setRule(i, { when: { type: "session_in", sessions: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) } })} className={`${INPUT} w-44`} />)}
-                      <span className="text-muted">→</span>
-                      <select value={r.action || "scale"} onChange={(e) => setRule(i, { action: e.target.value })} className={`${INPUT} w-24`}><option value="scale">scale</option><option value="skip">skip</option></select>
-                      {r.action === "scale" && <input type="number" step="0.05" value={r.factor ?? 0.5} onChange={(e) => setRule(i, { factor: Number(e.target.value) })} className={`${INPUT} w-20`} />}
-                      <button onClick={() => delRule(i)} className="ml-auto text-short"><Trash2 className="w-3.5 h-3.5" /></button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
+          <div className="p-4 space-y-3">
+            <p className="text-[11px] text-muted"><HelpHint term="filtration_help" /> One list for every entry filter — add a rule and pick its type (Trend Alignment · ADX Regime · Session). Each can <b>skip</b> or <b>scale</b> (de-size ×factor) a trade. Fail-open: a rule whose inputs aren't available is a no-op. Most-specific strategy scope wins.</p>
+            <EntryFilterRules rules={form.rules} onChange={(rules) => setF("rules", rules)} />
           </div>
         )}
 

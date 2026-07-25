@@ -22,7 +22,7 @@ router = APIRouter(prefix="/strategies", tags=["strategies"],
 
 _SL_TARGETS = {"entry", "previous_tp", "tp", "number"}
 _SL_TRIGGERS = {"tp_hit", "price_move", "be_lock_at_r"}   # be_lock_at_r: #109
-_FILTER_WHEN = {"always", "session_in"}       # extensible; see execution/strategy.apply_filter_rules
+_FILTER_WHEN = {"always", "session_in", "adx_regime"}   # extensible; see execution/strategy.apply_filter_rules
 _FILTER_ACTIONS = {"skip", "scale"}
 
 
