@@ -1,6 +1,5 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@config "../tailwind.config.js";
 
 :root {
   --bg: #090c12; --panel: #10151f; --panel-2: #0c1119; --edge: #1c2430;
