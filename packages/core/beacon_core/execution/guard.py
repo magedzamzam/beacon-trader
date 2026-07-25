@@ -5,6 +5,7 @@ in isolation (see services/executor/tests/test_guard.py).
 """
 from __future__ import annotations
 
+from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Optional, Tuple
 
@@ -27,6 +28,14 @@ DEFAULT_RISK_LIMITS = {
     # source. 0 disables. Sized above a normal even/1% plan so it only bites
     # stacked fanouts.
     "max_signal_risk_pct": 2.0,
+    # Graduated daily-loss breaker (#126): a SOFT limit below the hard
+    # `daily_loss_limit` that PAUSES new entries (existing positions keep
+    # managing) instead of halting the whole day. 0 disables it (default) → the
+    # breaker is a single hard halt, exactly as before. `breaker_cooldown_minutes`
+    # arms a timed pause that outlasts a P&L recovery; 0 = pause only while the
+    # day's realized stays in the soft zone (auto-resume when winners recover it).
+    "daily_soft_loss_limit": 0,
+    "breaker_cooldown_minutes": 0,
 }
 
 
@@ -102,3 +111,76 @@ def risk_limit_reason(*, planned_risk, day_realized, open_risk_symbol,
         return (f"open account risk would reach {_dec(open_risk_account) + pr}, "
                 f"over cap {_dec(cap_acct)}")
     return None
+
+
+# --- Graduated daily-loss circuit breaker (#126) ------------------------------
+# The single hard "-N -> halt-for-the-day" is redesigned into three states:
+#   ok       -> trade normally
+#   cooldown -> SOFT breach: pause NEW entries (existing positions keep managing),
+#               either for a timed window or while the day stays in the soft zone
+#   halt     -> HARD breach: halt for the day (the existing risk_limit_reason path)
+# `daily_loss_state` is the pure classifier; `soft_breaker_decision` adds the
+# cooldown timing. The HARD halt itself stays in risk_limit_reason unchanged, so
+# these are ADDITIVE — with daily_soft_loss_limit=0 (default) they are inert and
+# behaviour is byte-identical to the single hard halt.
+#
+# BASIS: `day_realized` must be broker-truth realized (deduped position_activities),
+# NOT the ledger sum of trades.realized_pl, which over-states the loss (#74) and
+# trips the breaker ~30-50% early. Feeding the honest basis is caller-side work.
+
+def daily_loss_state(day_realized, cfg: Optional[dict]) -> str:
+    """'halt' | 'soft' | 'ok' from the day's realized loss vs the hard
+    (`daily_loss_limit`) and soft (`daily_soft_loss_limit`) thresholds. Pure,
+    deterministic, and account-agnostic — the same cfg + basis yields the same
+    state on every A/B account (the symmetry the exit experiment needs)."""
+    cfg = cfg or {}
+    r = _dec(day_realized)
+    hard = abs(_dec(cfg.get("daily_loss_limit")))
+    soft = abs(_dec(cfg.get("daily_soft_loss_limit")))
+    if hard > 0 and r <= -hard:
+        return "halt"
+    if soft > 0 and r <= -soft:
+        return "soft"
+    return "ok"
+
+
+def soft_breaker_decision(*, day_realized, cfg: Optional[dict], now,
+                          cooldown_until=None) -> dict:
+    """Graduated SOFT breaker + cooldown (#126). The HARD halt stays in
+    risk_limit_reason; this covers ONLY the soft band, so it never double-counts
+    the hard halt. Pure: the caller passes `now` and the persisted `cooldown_until`
+    (tz-aware datetimes), persists the returned `cooldown_until`, and logs a
+    `breaker_state` event when `state` changes.
+
+    Returns {state, block, reason, cooldown_until}:
+      state 'ok' | 'cooldown'
+      block True  -> pause NEW entries (existing positions keep managing)
+      A soft breach arms/extends a `breaker_cooldown_minutes` window (0 = pause
+      only while realized stays in the soft zone). Inert when the master switch is
+      off or daily_soft_loss_limit=0."""
+    cfg = cfg or {}
+    if not cfg.get("enabled"):
+        return {"state": "ok", "block": False, "reason": None, "cooldown_until": None}
+    soft = abs(_dec(cfg.get("daily_soft_loss_limit")))
+    if soft <= 0:
+        return {"state": "ok", "block": False, "reason": None, "cooldown_until": None}
+    r = _dec(day_realized)
+    try:
+        mins = int(_dec(cfg.get("breaker_cooldown_minutes")))
+    except (TypeError, ValueError):
+        mins = 0
+    armed = cooldown_until
+    if r <= -soft:
+        block = True
+        if mins > 0:
+            armed = now + timedelta(minutes=mins)      # arm/extend a timed pause
+    else:
+        block = armed is not None and now < armed      # timed window still open
+        if not block:
+            armed = None
+    if block:
+        tail = (f"; paused until {armed.isoformat()}" if armed is not None
+                else "; new entries paused")
+        return {"state": "cooldown", "block": True, "cooldown_until": armed,
+                "reason": f"daily soft-loss cooldown (today {r} <= -{soft}){tail}"}
+    return {"state": "ok", "block": False, "reason": None, "cooldown_until": None}

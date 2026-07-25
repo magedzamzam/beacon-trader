@@ -32,7 +32,7 @@ from beacon_core.brokers.types import (OrderSide, OrderStatus, OrderType, PlaceO
 from beacon_core.parsing.models import ParsedSignal
 from beacon_core.execution.planner import build_plan, DEFAULT_PLANNER
 from beacon_core.execution.guard import (should_auto_execute, risk_limit_reason,
-                                          DEFAULT_RISK_LIMITS)
+                                          soft_breaker_decision, DEFAULT_RISK_LIMITS)
 from beacon_core.execution.trend_filter import trend_filter_cfg, decide as trend_decide
 from beacon_core.risk.sizing import (RiskConfig, InstrumentSpec, size_legs,
                                       plan_total_risk, cap_total_risk, resolve_risk_config)
@@ -603,6 +603,28 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                 await session.commit()
                 log.warning("signal %s acct %s: RISK-LIMIT BLOCK — %s",
                             sig.id, acct.id, reason)
+                return
+
+            # --- Graduated soft-loss cooldown (#126) — ADDITIVE to the hard halt
+            # above. Inert unless risk_limits.daily_soft_loss_limit is set (default
+            # 0). Stateless mode: pause NEW entries while the day's realized sits in
+            # the soft band (existing positions keep managing), auto-resuming when
+            # closed winners recover it. The timed-window variant (breaker_cooldown_
+            # minutes) is implemented+tested in guard.soft_breaker_decision but needs
+            # a persisted per-account cooldown_until to fire live — a follow-up.
+            # Same cfg + basis on every A/B account -> symmetric by construction.
+            # NOTE (#74/#126): day_realized is the LEDGER sum, which over-states the
+            # loss; feed broker-truth realized before enabling this in anger.
+            _bd = soft_breaker_decision(day_realized=day_realized, cfg=rl_cfg,
+                                        now=utcnow(), cooldown_until=None)
+            if _bd["block"]:
+                session.add(Event(kind="breaker_state",
+                                  payload={"signal_id": sig.id, "account_id": acct.id,
+                                           "state": _bd["state"], "day_realized": str(day_realized),
+                                           "reason": _bd["reason"]}))
+                await session.commit()
+                log.warning("signal %s acct %s: SOFT-BREAKER %s — %s",
+                            sig.id, acct.id, _bd["state"], _bd["reason"])
                 return
 
         # --- AI execution review ---

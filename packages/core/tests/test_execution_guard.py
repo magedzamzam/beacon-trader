@@ -1,7 +1,9 @@
 """Risk-limit guard (#7) + planner TP-geometry bound (#13)."""
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from beacon_core.execution.guard import risk_limit_reason, should_auto_execute
+from beacon_core.execution.guard import (risk_limit_reason, should_auto_execute,
+                                         daily_loss_state, soft_breaker_decision)
 from beacon_core.execution.planner import build_plan
 from beacon_core.parsing.models import ParsedSignal
 
@@ -70,6 +72,61 @@ def test_daily_circuit_breaker():
         planned_risk=10, day_realized=-500, open_risk_symbol=0, open_risk_account=0, cfg=cfg)
     assert risk_limit_reason(planned_risk=10, day_realized=-499, open_risk_symbol=0,
                              open_risk_account=0, cfg=cfg) is None
+
+
+# ---- graduated soft-loss breaker (#126) ----
+BRK = {"enabled": True, "daily_loss_limit": 10000, "daily_soft_loss_limit": 3000}
+T0 = datetime(2026, 7, 23, 7, 0, tzinfo=timezone.utc)
+
+
+def test_daily_loss_state_three_bands():
+    assert daily_loss_state(-500, BRK) == "ok"        # above soft
+    assert daily_loss_state(-3000, BRK) == "soft"     # at soft
+    assert daily_loss_state(-9999, BRK) == "soft"     # in [soft, hard)
+    assert daily_loss_state(-10000, BRK) == "halt"    # at hard
+    # soft off (default) -> only the hard band exists, back-compat
+    assert daily_loss_state(-5000, {"enabled": True, "daily_loss_limit": 10000}) == "ok"
+
+
+def test_soft_breaker_inert_by_default():
+    # no soft limit, or master switch off -> never blocks (byte-identical to before)
+    assert soft_breaker_decision(day_realized=-9999, cfg={"enabled": True, "daily_loss_limit": 10000},
+                                 now=T0)["block"] is False
+    assert soft_breaker_decision(day_realized=-9999, cfg={**BRK, "enabled": False},
+                                 now=T0)["block"] is False
+
+
+def test_soft_breaker_stateless_zone_pause_and_resume():
+    # stateless mode (cooldown_minutes=0): pause while in the soft band, resume on recovery
+    d1 = soft_breaker_decision(day_realized=-4000, cfg=BRK, now=T0)
+    assert d1["state"] == "cooldown" and d1["block"] is True and "soft-loss" in d1["reason"]
+    d2 = soft_breaker_decision(day_realized=-2000, cfg=BRK, now=T0 + timedelta(hours=2))
+    assert d2["state"] == "ok" and d2["block"] is False       # winners recovered it -> resume
+    # the hard band is NOT this function's job (risk_limit_reason halts there); it
+    # still reports 'cooldown' block, and the hard halt fires in parallel.
+    assert soft_breaker_decision(day_realized=-10000, cfg=BRK, now=T0)["block"] is True
+
+
+def test_soft_breaker_timed_cooldown_outlasts_recovery():
+    # cooldown_minutes>0: a soft breach arms a window that blocks even after P&L recovers.
+    cfg = {**BRK, "breaker_cooldown_minutes": 240}
+    breach = soft_breaker_decision(day_realized=-3500, cfg=cfg, now=T0)
+    assert breach["state"] == "cooldown" and breach["cooldown_until"] == T0 + timedelta(minutes=240)
+    # 1h later, realized has recovered above soft, but the timed window still blocks
+    still = soft_breaker_decision(day_realized=-1000, cfg=cfg,
+                                  now=T0 + timedelta(hours=1), cooldown_until=breach["cooldown_until"])
+    assert still["block"] is True and still["state"] == "cooldown"
+    # past the window with realized recovered -> resume, window cleared
+    after = soft_breaker_decision(day_realized=-1000, cfg=cfg,
+                                  now=T0 + timedelta(hours=5), cooldown_until=breach["cooldown_until"])
+    assert after["block"] is False and after["cooldown_until"] is None
+
+
+def test_soft_breaker_symmetric_across_ab_accounts():
+    # #126 acceptance: identical cfg + basis -> identical decision on both A/B arms.
+    a = soft_breaker_decision(day_realized=-4200, cfg=BRK, now=T0)
+    b = soft_breaker_decision(day_realized=-4200, cfg=BRK, now=T0)
+    assert a == b
 
 
 def test_open_risk_caps():
