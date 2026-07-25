@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from beacon_core.db.models import Account, ExecutionStrategy, Source
 from beacon_core.execution import strategy as ST
+from beacon_core.execution import staging as STG
 from beacon_core.execution.strategy import ENTRY_POLICY_KEYS
 from beacon_core.timeutil import utcnow
 from ..deps import get_db
@@ -42,12 +43,27 @@ def _valid_sl_rules(rules) -> bool:
 
 
 def _clean_entry_policy(ep) -> dict | None:
-    """Keep only known entry-policy keys (#67 chase guard + TTL)."""
+    """Keep only known entry-policy keys (#67 chase guard + TTL), validating the
+    #129 staged-entry keys: entry_style (enum) and staged (nested block)."""
     if ep is None:
         return None
     if not isinstance(ep, dict):
         raise HTTPException(422, "entry_policy must be an object")
-    return {k: ep[k] for k in ENTRY_POLICY_KEYS if k in ep and ep[k] is not None} or None
+    out = {k: ep[k] for k in ENTRY_POLICY_KEYS
+           if k in ep and ep[k] is not None and k not in ("entry_style", "staged")}
+    if ep.get("entry_style") is not None:
+        try:
+            out["entry_style"] = STG.clean_entry_style(ep["entry_style"])
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+    if ep.get("staged") is not None:
+        try:
+            staged = STG.clean_staged_config(ep["staged"])
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        if staged:
+            out["staged"] = staged
+    return out or None
 
 
 def _clean_entry_filters(ef) -> dict | None:

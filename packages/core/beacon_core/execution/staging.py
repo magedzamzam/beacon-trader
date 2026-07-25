@@ -37,6 +37,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
+# The entry-order styles a strategy may choose. "staged" turns this engine on;
+# "market"/"limit" are the existing single-shot behaviours (the planner default).
+ENTRY_STYLES = ("market", "limit", "staged")
+
 # --- tranche roles ------------------------------------------------------------
 TOE_IN = "toe_in"
 RUNNER = "runner"
@@ -89,6 +93,77 @@ DEFAULT_STAGED = {
     #     the caller falls back to a single-shot entry. ---
     "min_stop_atr": 0.5,
 }
+
+
+# ============================ config validation ===============================
+# Per-key kind for the staged block. "frac" = 0..1, "float+"/"int+" = non-negative.
+_STAGED_SPEC = {
+    "enabled": "bool",
+    "toe_in_tps": "int+", "runner_tps": "int+",
+    "max_deferred_fraction": "frac", "min_deferred_fraction": "frac",
+    "reclaim_break_atr": "float+", "reclaim_break_cash": "float+",
+    "reclaim_break_max_frac_of_stop": "frac", "reclaim_break_abs_cap": "float+",
+    "stop_offset_atr": "float+",
+    "runner_ttl_minutes": "int+", "reclaim_pending_ttl_minutes": "int+",
+    "reclaim_armed_ttl_minutes": "int+", "min_stop_atr": "float+",
+}
+
+
+def _coerce(kind: str, key: str, v):
+    if kind == "bool":
+        if isinstance(v, bool):
+            return v
+        raise ValueError(f"{key} must be true or false")
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        raise ValueError(f"{key} must be a number")
+    if kind == "frac":
+        if not (0.0 <= f <= 1.0):
+            raise ValueError(f"{key} must be between 0 and 1")
+        return f
+    if f < 0:
+        raise ValueError(f"{key} must be >= 0")
+    return int(f) if kind == "int+" else f
+
+
+def clean_entry_style(v) -> str:
+    """Validate the entry_style enum (lower-cased). Raises ValueError otherwise."""
+    s = str(v).strip().lower()
+    if s not in ENTRY_STYLES:
+        raise ValueError(f"entry_style must be one of {', '.join(ENTRY_STYLES)}")
+    return s
+
+
+def clean_staged_config(raw) -> Optional[dict]:
+    """Validate + coerce a raw `staged` config block (from the UI/API). Keeps only
+    known keys, coerces types, range-checks, and raises ValueError(msg) on an
+    invalid value (the API translates that to a 422). Unknown keys are dropped
+    (forward-compat). Stores only the keys the caller set — read-time overlay
+    (`staged_config`) fills the rest from DEFAULT_STAGED."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("staged must be an object")
+    out = {}
+    for k, v in raw.items():
+        if k not in _STAGED_SPEC or v is None:
+            continue
+        out[k] = _coerce(_STAGED_SPEC[k], k, v)
+    lo, hi = out.get("min_deferred_fraction"), out.get("max_deferred_fraction")
+    if lo is not None and hi is not None and lo > hi:
+        raise ValueError("min_deferred_fraction cannot exceed max_deferred_fraction")
+    return out or None
+
+
+def staged_config(stored) -> dict:
+    """Effective staged config: DEFAULT_STAGED overlaid with a stored block (known
+    keys only). The engine always reads a complete cfg through this."""
+    cfg = dict(DEFAULT_STAGED)
+    if isinstance(stored, dict):
+        cfg.update({k: v for k, v in stored.items()
+                    if k in DEFAULT_STAGED and v is not None})
+    return cfg
 
 
 # ============================ geometry helpers ================================

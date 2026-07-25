@@ -129,6 +129,52 @@ def test_modifier_can_only_shrink_size():
     assert d3.action == S.WAIT            # can't turn a WAIT into a DEPLOY
 
 
+# ---- config validation (#129 Phase 1) ----
+def test_clean_entry_style():
+    assert S.clean_entry_style("STAGED") == "staged"
+    assert S.clean_entry_style("limit") == "limit"
+    for bad in ("staggered", "", None):
+        try:
+            S.clean_entry_style(bad)
+            assert False, f"expected reject for {bad!r}"
+        except ValueError:
+            pass
+
+
+def test_clean_staged_config_valid_and_coerced():
+    out = S.clean_staged_config({"toe_in_tps": "2", "reclaim_break_atr": "0.4",
+                                 "enabled": True, "runner_ttl_minutes": 30})
+    assert out == {"toe_in_tps": 2, "reclaim_break_atr": 0.4, "enabled": True,
+                   "runner_ttl_minutes": 30}
+    assert S.clean_staged_config({"nonsense_key": 5}) is None      # unknown keys dropped
+    assert S.clean_staged_config(None) is None
+
+
+def test_clean_staged_config_rejects_bad_values():
+    for bad in ({"max_deferred_fraction": 1.5},        # frac out of range
+                {"reclaim_break_atr": -1},             # negative
+                {"toe_in_tps": "abc"},                 # non-numeric
+                {"enabled": "yes"},                    # bool required
+                {"min_deferred_fraction": 0.8, "max_deferred_fraction": 0.5}):  # min>max
+        try:
+            S.clean_staged_config(bad)
+            assert False, f"expected reject for {bad}"
+        except ValueError:
+            pass
+    try:
+        S.clean_staged_config([1, 2])                  # not an object
+        assert False
+    except ValueError:
+        pass
+
+
+def test_staged_config_overlay_completes_cfg():
+    cfg = S.staged_config({"reclaim_break_atr": 0.5})
+    assert cfg["reclaim_break_atr"] == 0.5             # override applied
+    assert cfg["runner_ttl_minutes"] == D["runner_ttl_minutes"]   # default filled
+    assert S.staged_config(None) == D                 # no stored -> pure defaults
+
+
 def test_broken_modifier_never_crashes_or_opens():
     boom = lambda **k: (_ for _ in ()).throw(RuntimeError("bad decider"))
     # on a WAIT it stays WAIT; on a DEPLOY the base survives (conservative)
