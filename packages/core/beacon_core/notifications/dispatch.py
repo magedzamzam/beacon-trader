@@ -151,6 +151,38 @@ async def notify(session, event_id: str, ctx: Optional[dict] = None) -> dict:
     return {"event": event_id, "results": results}
 
 
+async def render_event(session, event_id: str, ctx: Optional[dict] = None) -> tuple[str, str]:
+    """(subject, text) for `event_id` using the operator's stored custom
+    templates — the exact rendering the live dispatch produces. For dry-run
+    previews / manual tests (no delivery)."""
+    stored = await _load(session)
+    return format_message(event_id, ctx, stored.get("templates"))
+
+
+async def send_event_to_channel(session, event_id: str, ctx: Optional[dict],
+                                channel_id: str) -> str:
+    """Render `event_id` (with templates) and deliver it to ONE channel,
+    regardless of routing — for testing a specific channel with real data.
+    Returns the same status strings as `notify` (ok / disabled / no_sender /
+    error: …). Never raises."""
+    sender = SENDERS.get(channel_id)
+    if sender is None:
+        return "no_sender"
+    try:
+        stored = await _load(session)
+    except Exception as exc:
+        return f"error: {exc}"
+    cfg = resolve_channel(channel_id, stored)
+    if not cfg.get("enabled"):
+        return "disabled"
+    subject, text = format_message(event_id, ctx, stored.get("templates"))
+    try:
+        await sender(cfg, subject, text)
+        return "ok"
+    except Exception as exc:
+        return f"error: {exc}"
+
+
 async def send_test(session, channel_id: str) -> dict:
     """Send a one-off test message to a single channel (Send-test button)."""
     sender = SENDERS.get(channel_id)

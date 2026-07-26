@@ -15,10 +15,11 @@ __all__ = [
     "CHANNELS", "EVENT_GROUPS", "EVENT_IDS", "CHANNEL_IDS", "DEFAULT_CONFIG",
     "SETTING_KEY", "catalog", "sanitize_config", "public_config",
     "field_descriptor", "sample_ctx",
-    "notify", "send_test", "format_message",
+    "notify", "send_test", "format_message", "render_event", "send_event_to_channel",
 ]
 
-_LAZY = {"notify", "send_test", "format_message"}
+_LAZY = {"notify", "send_test", "format_message", "render_event",
+         "send_event_to_channel"}
 
 
 def __getattr__(name):

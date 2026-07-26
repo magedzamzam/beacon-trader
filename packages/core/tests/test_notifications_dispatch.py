@@ -140,6 +140,51 @@ def test_send_test_unbuilt_channel():
     assert res["ok"] is False and "not built" in res["error"].lower()
 
 
+def test_render_event_applies_stored_template():
+    async def fake_get_setting(session, key, default=None):
+        return {"templates": {"trade_closed": {"subject": "Closed {symbol} {pl}"}}}
+
+    orig = D.get_setting
+    D.get_setting = fake_get_setting
+    try:
+        subj, _ = asyncio.run(D.render_event(None, "trade_closed",
+                                             {"symbol": "XAUUSD", "pl": "+42.10"}))
+    finally:
+        D.get_setting = orig
+    assert subj == "Closed XAUUSD +42.10"
+
+
+def test_send_event_to_channel_renders_and_reports_status():
+    sent = []
+
+    async def fake(cfg, subject, text):
+        sent.append((subject, text))
+
+    async def fake_get_setting(session, key, default=None):
+        return {
+            "channels": {"telegram": {"enabled": True, "bot_token_enc": "t", "chat_id": "1"},
+                         "sms": {"enabled": False}},
+            "templates": {"tp_hit": {"body": "hit {price}"}},
+        }
+
+    orig_get, orig_senders = D.get_setting, dict(S.SENDERS)
+    D.get_setting = fake_get_setting
+    S.SENDERS["telegram"] = fake
+    try:
+        ok = asyncio.run(D.send_event_to_channel(None, "tp_hit", {"price": "2400"}, "telegram"))
+        disabled = asyncio.run(D.send_event_to_channel(None, "tp_hit", {}, "sms"))
+        nosender = asyncio.run(D.send_event_to_channel(None, "tp_hit", {}, "push"))
+    finally:
+        D.get_setting = orig_get
+        S.SENDERS.clear()
+        S.SENDERS.update(orig_senders)
+    assert ok == "ok" and len(sent) == 1
+    assert sent[0][1] == "hit 2400"                 # body rendered from the template
+    assert "Take-profit hit" in sent[0][0]          # subject fell back to default
+    assert disabled == "disabled"          # routed-agnostic, but channel must be enabled
+    assert nosender == "no_sender"
+
+
 def test_resolve_channel_passes_plaintext_and_defaults():
     stored = {"channels": {"email": {"enabled": True, "smtp_host": "smtp.x", "smtp_port": 587,
                                      "use_tls": True, "smtp_password_enc": "plaintext-passthrough"}}}
