@@ -42,6 +42,21 @@ ADDITIVE_MIGRATIONS: tuple[str, ...] = (
     # FRESH table; add it explicitly for the existing-table path (IF NOT EXISTS
     # keeps it a no-op elsewhere — no double CREATE).
     "CREATE INDEX IF NOT EXISTS ix_trades_cluster_id ON trades (cluster_id)",
+    # Operator outcome override on an existing table (#136, models.py override_*);
+    # the model comment flagged the ALTER but it was omitted → reads AND writes 500
+    # on the pre-existing Postgres box (#138). Types mirror the model.
+    "ALTER TABLE signal_claims "
+    "ADD COLUMN IF NOT EXISTS override_outcome VARCHAR(16)",   # String(16) (#136)
+    "ALTER TABLE signal_claims "
+    "ADD COLUMN IF NOT EXISTS override_note TEXT",             # Text (#136)
+    "ALTER TABLE signal_claims "
+    "ADD COLUMN IF NOT EXISTS override_at TIMESTAMPTZ",        # DateTime(tz=True) (#136)
+    # Dealing-range low/high added to the existing market_structure table
+    # (#113/#137, models.py range_low/range_high) — same missed-ALTER as above (#138).
+    "ALTER TABLE market_structure "
+    "ADD COLUMN IF NOT EXISTS range_low NUMERIC(18, 6)",       # NUM = Numeric(18,6) (#113/#137)
+    "ALTER TABLE market_structure "
+    "ADD COLUMN IF NOT EXISTS range_high NUMERIC(18, 6)",      # ^ (#113/#137)
 )
 
 
