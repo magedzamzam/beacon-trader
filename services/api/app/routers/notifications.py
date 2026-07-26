@@ -13,8 +13,17 @@ router = APIRouter(prefix="/notifications", tags=["notifications"],
 
 @router.get("/catalog")
 async def get_catalog():
-    """Channels + event-type metadata that drives the config UI."""
+    """Channels + event-type metadata that drives the config UI (also carries the
+    template field descriptor + sample object for the message editor)."""
     return notif.catalog()
+
+
+@router.get("/fields")
+async def get_fields():
+    """The template field descriptor + a sample object for the live preview.
+    Derived from the same registry the renderer resolves, so the picker can never
+    advertise a token the renderer can't resolve."""
+    return {"fields": notif.field_descriptor(), "sample": notif.sample_ctx()}
 
 
 @router.get("/config")
@@ -57,6 +66,11 @@ async def put_config(body: dict, db: AsyncSession = Depends(get_db)):
         stored["routing"] = {
             e: [c for c in (routing.get(e) or []) if c in notif.CHANNEL_IDS]
             for e in notif.EVENT_IDS}
+
+    if "templates" in incoming:
+        # Replace wholesale (the editor sends the full set); sanitize_config drops
+        # unknown events and empty subject/body below.
+        stored["templates"] = incoming.get("templates") or {}
 
     clean = notif.sanitize_config(stored)
     await set_setting(db, notif.SETTING_KEY, clean)

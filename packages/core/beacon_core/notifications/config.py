@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+from . import templates as _T
+
 SETTING_KEY = "notifications"
 
 
@@ -116,12 +118,16 @@ def _default_channel(ch):
 DEFAULT_CONFIG = {
     "channels": {c["id"]: _default_channel(c) for c in CHANNELS},
     "routing": {e: [] for e in EVENT_IDS},
+    "templates": {},
 }
 
 
 def catalog() -> dict:
-    """Everything the UI needs to render the channels + routing matrix."""
-    return {"channels": CHANNELS, "event_groups": EVENT_GROUPS}
+    """Everything the UI needs to render the channels + routing matrix + the
+    per-event template editor (fields come from the same registry the renderer
+    resolves, and a sample object to power the live preview)."""
+    return {"channels": CHANNELS, "event_groups": EVENT_GROUPS,
+            "fields": _T.field_descriptor(), "sample": _T.sample_ctx()}
 
 
 def sanitize_config(cfg: Optional[dict]) -> dict:
@@ -153,7 +159,10 @@ def sanitize_config(cfg: Optional[dict]) -> dict:
                 seen.add(c)
                 keep.append(c)
         out_routing[e] = keep
-    return {"channels": out_channels, "routing": out_routing}
+
+    out_templates = _T.sanitize_templates(cfg.get("templates"), EVENT_IDS)
+    return {"channels": out_channels, "routing": out_routing,
+            "templates": out_templates}
 
 
 def public_config(cfg: Optional[dict]) -> dict:

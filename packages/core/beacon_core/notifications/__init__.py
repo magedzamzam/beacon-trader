@@ -9,10 +9,12 @@ from .config import (
     CHANNELS, EVENT_GROUPS, EVENT_IDS, CHANNEL_IDS, DEFAULT_CONFIG,
     SETTING_KEY, catalog, sanitize_config, public_config,
 )
+from .templates import field_descriptor, sample_ctx
 
 __all__ = [
     "CHANNELS", "EVENT_GROUPS", "EVENT_IDS", "CHANNEL_IDS", "DEFAULT_CONFIG",
     "SETTING_KEY", "catalog", "sanitize_config", "public_config",
+    "field_descriptor", "sample_ctx",
     "notify", "send_test", "format_message",
 ]
 

@@ -58,6 +58,15 @@ def _notify(event_id: str, ctx: dict) -> None:
             log.debug("notify %s failed: %s", event_id, exc)
     spawn_bg(_run())
 
+
+def _ntime(value) -> str | None:
+    """Format a datetime for a notification token (UTC, minute resolution).
+    Best-effort — a bad/None value just yields None so the token renders empty."""
+    try:
+        return value.strftime("%Y-%m-%d %H:%M") if value is not None else None
+    except Exception:                            # pragma: no cover - defensive
+        return None
+
 # |realized P&L| at or below this (in the ACCOUNT currency) counts as a
 # break-even close. The primary BE signal is the SL being ratcheted to ~entry
 # and then hit; this catches a residual-near-zero close too.
@@ -335,7 +344,8 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
         if trade.status != "closed":
             trade.status = "closed"
             _notify("trade_closed", {"symbol": trade.symbol, "direction": trade.direction,
-                                     "pl": str(trade.realized_pl) if trade.realized_pl is not None else None})
+                                     "pl": str(trade.realized_pl) if trade.realized_pl is not None else None,
+                                     "open_time": _ntime(trade.created_at), "close_time": _ntime(utcnow())})
             await _analyze_outcome(session, trade, ai_cfg)
         return
 
@@ -753,7 +763,8 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
             trade.status = "closed"
             if not was_closed:
                 _notify("trade_closed", {"symbol": trade.symbol, "direction": trade.direction,
-                                         "pl": str(trade.realized_pl) if trade.realized_pl is not None else None})
+                                         "pl": str(trade.realized_pl) if trade.realized_pl is not None else None,
+                                         "open_time": _ntime(trade.created_at), "close_time": _ntime(utcnow())})
                 await _analyze_outcome(session, trade, ai_cfg)
         elif closed:
             trade.status = "partial"

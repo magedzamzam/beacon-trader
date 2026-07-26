@@ -1,8 +1,21 @@
-import { Fragment, useEffect, useState } from "react";
-import { Bell, Mail, Send, MessageCircle, Smartphone, Webhook, BellRing } from "lucide-react";
+import { Fragment, useEffect, useRef, useState } from "react";
+import { Bell, Mail, Send, MessageCircle, Smartphone, Webhook, BellRing, MessageSquare } from "lucide-react";
 import { Card, Empty } from "../components/ui";
 import { Button, Field, Input, NumberInput, Select, Toggle, ErrorNote } from "../components/form";
 import { api } from "../lib/api";
+
+const _inputCls = "w-full bg-panel2 border border-edge rounded-lg px-3 py-2 text-sm text-ink focus:border-beacon outline-none";
+
+// Client-side mirror of templates.render (core) for the live preview: same
+// `{token}` grammar + safe dotted key-walk. Kept trivially in sync — the tokens
+// come from the server field descriptor, so the preview can't invent fields.
+const _walk = (obj, path) =>
+  path.split(".").reduce((o, k) => (o && typeof o === "object" && k in o ? o[k] : undefined), obj);
+const renderPreview = (tmpl, sample) =>
+  (tmpl || "").replace(/\{([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)\}/g, (_, p) => {
+    const v = _walk(sample, p);
+    return v === undefined || v === null || v === "" ? "" : String(v);
+  });
 
 const CHANNEL_ICON = {
   email: Mail, telegram: Send, whatsapp: MessageCircle,
@@ -25,6 +38,10 @@ export default function Notifications() {
   const [saved, setSaved] = useState(false);
   const [testing, setTesting] = useState({});   // channelId -> bool
   const [testRes, setTestRes] = useState({});   // channelId -> {ok} | {ok:false,error}
+  const [selEvent, setSelEvent] = useState(null);   // event id being template-edited
+  const subjectRef = useRef(null);
+  const bodyRef = useRef(null);
+  const focusRef = useRef("body");   // which box a clicked chip inserts into
 
   const load = async () => {
     try {
@@ -67,10 +84,52 @@ export default function Notifications() {
         }
         channels[ch.id] = out;
       }
-      const res = await api.saveNotificationsConfig({ channels, routing: cfg.routing });
+      const res = await api.saveNotificationsConfig({
+        channels, routing: cfg.routing, templates: cfg.templates || {} });
       setCfg(res); setSecrets({}); setSaved(true);
       return true;
     } catch (e) { setErr(e.message); return false; }
+  };
+
+  // ---- per-event message templates (#139) ----
+  const setTemplate = (eventId, part, value) => {
+    setCfg(c => {
+      const t = { ...(c.templates || {}) };
+      const entry = { ...(t[eventId] || {}) };
+      if (value) entry[part] = value; else delete entry[part];
+      if (Object.keys(entry).length) t[eventId] = entry; else delete t[eventId];
+      return { ...c, templates: t };
+    });
+    touch();
+  };
+  // Insert `{token}` at the caret of the subject/body box (click-a-chip path).
+  const insertToken = (eventId, part, token) => {
+    const el = (part === "subject" ? subjectRef : bodyRef).current;
+    const cur = ((cfg.templates || {})[eventId] || {})[part] || "";
+    const start = el && el.selectionStart != null ? el.selectionStart : cur.length;
+    const end = el && el.selectionEnd != null ? el.selectionEnd : start;
+    const tok = `{${token}}`;
+    const next = cur.slice(0, start) + tok + cur.slice(end);
+    setTemplate(eventId, part, next);
+    requestAnimationFrame(() => {
+      if (el) { el.focus(); const p = start + tok.length; el.setSelectionRange(p, p); }
+    });
+  };
+  // Drop a dragged chip at the drop point (falls back to the caret / end).
+  const dropToken = (eventId, part, e) => {
+    e.preventDefault();
+    const tok = e.dataTransfer.getData("text/plain");
+    if (!tok) return;
+    const el = (part === "subject" ? subjectRef : bodyRef).current;
+    const cur = ((cfg.templates || {})[eventId] || {})[part] || "";
+    let pos = cur.length;
+    try {
+      if (document.caretPositionFromPoint) {
+        const cp = document.caretPositionFromPoint(e.clientX, e.clientY);
+        if (cp && typeof cp.offset === "number") pos = cp.offset;
+      } else if (el && el.selectionStart != null) { pos = el.selectionStart; }
+    } catch { /* fall back to end */ }
+    setTemplate(eventId, part, cur.slice(0, pos) + tok + cur.slice(pos));
   };
 
   // Save first (so freshly-typed secrets are persisted+encrypted), then test.
@@ -220,6 +279,94 @@ export default function Notifications() {
           </table>
         </div>
       </Card>
+
+      {/* ---- Message templates (#139) ---- */}
+      {(() => {
+        const events = cat.event_groups.flatMap(g => g.events);
+        const curEvent = selEvent || events[0]?.id;
+        const curTmpl = (cfg.templates || {})[curEvent] || {};
+        const fields = cat.fields || [];
+        const sample = cat.sample || {};
+        const box = (part, ref, rows, placeholder) => (
+          <textarea
+            ref={ref} rows={rows} className={`${_inputCls} font-mono`} placeholder={placeholder}
+            value={curTmpl[part] || ""}
+            onFocus={() => { focusRef.current = part; }}
+            onChange={e => setTemplate(curEvent, part, e.target.value)}
+            onDragOver={e => e.preventDefault()}
+            onDrop={e => dropToken(curEvent, part, e)} />
+        );
+        return (
+          <Card>
+            <div className="px-4 py-3 border-b border-edge flex items-center justify-between">
+              <div className="text-sm font-medium flex items-center gap-2">
+                <MessageSquare className="w-4 h-4 text-beacon" /> Message templates
+              </div>
+              <span className="text-[11px] text-muted">
+                Customize the wording per event. Leave blank to keep the default.
+              </span>
+            </div>
+            <div className="p-4 space-y-4">
+              <div className="flex items-center gap-3">
+                <span className="text-xs uppercase tracking-wider text-muted">Event</span>
+                <div className="max-w-xs w-full">
+                  <Select value={curEvent} onChange={e => setSelEvent(e.target.value)}>
+                    {cat.event_groups.map(g => (
+                      <optgroup key={g.group} label={g.group}>
+                        {g.events.map(ev => (
+                          <option key={ev.id} value={ev.id}>
+                            {ev.label}{(cfg.templates || {})[ev.id] ? " •" : ""}
+                          </option>
+                        ))}
+                      </optgroup>
+                    ))}
+                  </Select>
+                </div>
+              </div>
+
+              {/* field chips — click to insert at the caret, or drag into a box */}
+              <div>
+                <div className="text-[11px] text-muted mb-1.5">
+                  Click a field to insert it at the cursor of the last-focused box, or drag it
+                  straight into the subject or body.
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {fields.map(f => (
+                    <button
+                      key={f.token} type="button" draggable
+                      onDragStart={e => e.dataTransfer.setData("text/plain", `{${f.token}}`)}
+                      onClick={() => insertToken(curEvent, focusRef.current, f.token)}
+                      title={`{${f.token}} — e.g. ${f.example}`}
+                      className="text-[11px] border border-edge rounded-full px-2 py-0.5 text-muted hover:text-ink hover:border-beacon cursor-grab active:cursor-grabbing">
+                      {f.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <Field label="Subject">{box("subject", subjectRef, 1, "Default headline (emoji + direction + symbol + P&L)")}</Field>
+              <Field label="Body">{box("body", bodyRef, 4, "Default aligned detail block")}</Field>
+
+              {/* live preview against the sample object */}
+              <div>
+                <div className="text-[11px] uppercase tracking-wider text-muted mb-1.5">Preview (sample data)</div>
+                <div className="bg-panel2 border border-edge rounded-lg p-3 text-sm space-y-1">
+                  <div className="font-medium">
+                    {curTmpl.subject ? renderPreview(curTmpl.subject, sample)
+                      : <span className="text-muted italic">default headline</span>}
+                  </div>
+                  <pre className="whitespace-pre-wrap font-mono text-xs text-muted">
+                    {curTmpl.body ? renderPreview(curTmpl.body, sample) : "default detail block"}
+                  </pre>
+                </div>
+                <div className="text-[11px] text-muted mt-1.5">
+                  A field with no value in a real event renders empty — never an error.
+                </div>
+              </div>
+            </div>
+          </Card>
+        );
+      })()}
 
       <div className="flex items-center justify-end gap-3">
         {saved && <span className="text-xs text-long">Saved.</span>}

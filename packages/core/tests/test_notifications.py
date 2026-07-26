@@ -89,3 +89,24 @@ def test_secret_passthrough_and_masking():
 def test_select_field_clamped_to_options():
     s = N.sanitize_config({"channels": {"webhook": {"method": "DELETE"}}})
     assert s["channels"]["webhook"]["method"] == "POST"        # invalid -> default
+
+
+def test_sanitize_config_carries_templates():
+    s = N.sanitize_config({"templates": {
+        "trade_closed": {"subject": "Closed {symbol}", "body": "P&L {pl}"},
+        "bogus": {"subject": "x"},                              # unknown event -> dropped
+    }})
+    assert s["templates"]["trade_closed"] == {"subject": "Closed {symbol}", "body": "P&L {pl}"}
+    assert "bogus" not in s["templates"]
+    # default config has an empty templates map (no regression on old stored blobs)
+    assert N.sanitize_config(None)["templates"] == {}
+
+
+def test_catalog_exposes_field_descriptor_and_sample():
+    cat = N.catalog()
+    tokens = {f["token"] for f in cat["fields"]}
+    assert {"symbol", "channel", "pl", "ai.verdict"} <= tokens
+    # the sample resolves every advertised token (picker/renderer parity)
+    from beacon_core.notifications import templates as T
+    for f in cat["fields"]:
+        assert T.render("{" + f["token"] + "}", cat["sample"]) == f["example"]

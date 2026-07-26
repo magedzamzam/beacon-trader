@@ -26,6 +26,42 @@ def test_format_message_negative_pl_and_aligned_rows():
     assert "\n" in text and "Price:" in text and "Account:" in text
 
 
+def test_format_message_default_when_no_template():
+    # no templates arg -> byte-for-byte the built-in format (backward compat)
+    a = D.format_message("tp_hit", {"symbol": "XAUUSD", "direction": "BUY", "pl": "5"})
+    b = D.format_message("tp_hit", {"symbol": "XAUUSD", "direction": "BUY", "pl": "5"}, {})
+    assert a == b
+    assert a[0].startswith("🎯")
+
+
+def test_format_message_custom_template_overrides():
+    tmpl = {"trade_closed": {"subject": "Done {symbol} {pl}",
+                             "body": "Channel {channel} at {close_time}"}}
+    subj, text = D.format_message(
+        "trade_closed",
+        {"symbol": "XAUUSD", "pl": "+42.10", "channel": "Gold VIP",
+         "close_time": "2026-07-26 14:32"},
+        tmpl)
+    assert subj == "Done XAUUSD +42.10"
+    assert text == "Channel Gold VIP at 2026-07-26 14:32"
+
+
+def test_format_message_partial_template_keeps_default_body():
+    # only a custom subject -> body falls back to the default aligned block
+    tmpl = {"sl_hit": {"subject": "STOP {symbol}"}}
+    subj, text = D.format_message(
+        "sl_hit", {"symbol": "XAUUSD", "price": "2400", "account": "Gold"}, tmpl)
+    assert subj == "STOP XAUUSD"
+    assert "Price:" in text and "Account:" in text        # default detail preserved
+
+
+def test_format_message_template_missing_token_renders_empty():
+    tmpl = {"tp_hit": {"subject": "{symbol} {nope}", "body": "{ai.verdict}"}}
+    subj, text = D.format_message("tp_hit", {"symbol": "XAUUSD"}, tmpl)
+    assert subj == "XAUUSD "                               # missing token -> empty
+    assert text == ""
+
+
 class _FakeResp:
     status_code = 200
     text = "ok"

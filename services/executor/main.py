@@ -243,7 +243,7 @@ async def handle_signal(signal_id: int) -> None:
         _notify("new_signal", {
             "symbol": sig.symbol, "direction": sig.direction, "entry": _entry,
             "sl": sig.sl, "tp": ", ".join(sig.tps) if sig.tps else None,
-            "source": source.name if source else None})
+            "channel": source.name if source else None})
 
         parsed = _to_parsed(sig)
         ai_cfg = await ai_service.load_config(session)
@@ -847,6 +847,7 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         if placed:
             _notify("order_placed", {
                 "symbol": sig.symbol, "direction": sig.direction, "account": acct.name,
+                "channel": source.name if source else None,
                 "detail": f"{placed}/{len(valid)} legs placed"})
         # Non-blocking review mode: run the AI for the record after placing.
         if review_on and ai_cfg.review_mode == "background" and placed:

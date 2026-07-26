@@ -10,6 +10,7 @@ from ..crypto import decrypt
 from ..logging import get_logger
 from ..settings_store import get_setting
 from . import config as C
+from . import templates as T
 from .senders import SENDERS
 
 log = get_logger("notifications")
@@ -47,12 +48,30 @@ def resolve_channel(channel_id: str, stored: dict) -> dict:
     return out
 
 
-def format_message(event_id: str, ctx: Optional[dict]) -> tuple[str, str]:
-    """(subject, text). `subject` is the at-a-glance headline (emoji + ACTION +
-    ASSET + Net P&L) for <1s comprehension; `text` is the aligned detail block.
-    Channel-agnostic and plain text — the Telegram sender does the escaping. All
-    `ctx` values are optional (#39)."""
+def format_message(event_id: str, ctx: Optional[dict],
+                   templates: Optional[dict] = None) -> tuple[str, str]:
+    """(subject, text). Renders the operator's custom template for `event_id`
+    when one is set (#139), else the built-in default. `templates` is the
+    `templates` section of the notifications config: `{event_id: {subject, body}}`.
+    A custom subject or body overrides only that part — an unset part keeps the
+    default, so with no template the output is byte-for-byte the old format.
+    Rendering is injection-safe and never raises (see `templates.render`)."""
     ctx = ctx or {}
+    subject, text = _default_message(event_id, ctx)
+    tmpl = (templates or {}).get(event_id) or {}
+    if isinstance(tmpl, dict):
+        if tmpl.get("subject"):
+            subject = T.render(tmpl["subject"], ctx)
+        if tmpl.get("body"):
+            text = T.render(tmpl["body"], ctx)
+    return subject, text
+
+
+def _default_message(event_id: str, ctx: dict) -> tuple[str, str]:
+    """The built-in message: `subject` is the at-a-glance headline (emoji +
+    ACTION + ASSET + Net P&L) for <1s comprehension; `text` is the aligned detail
+    block. Channel-agnostic and plain text — the Telegram sender does the
+    escaping. All `ctx` values are optional (#39)."""
     _label = EVENT_LABEL.get(event_id, event_id)
     _emoji = _EMOJI.get(event_id, "🔔")
     _sym = ctx.get("symbol") or ""
@@ -83,7 +102,7 @@ def format_message(event_id: str, ctx: Optional[dict]) -> tuple[str, str]:
     add("TP", ctx.get("tp"))
     add("SL", ctx.get("sl"))
     add("Account", ctx.get("account"))
-    add("Source", ctx.get("source"))
+    add("Source", ctx.get("channel") or ctx.get("source"))
 
     _w = max((len(k) for k, _ in _rows), default=0)
     _body = "\n".join(f"{(k + ':').ljust(_w + 1)} {v}" for k, v in _rows)
@@ -110,7 +129,7 @@ async def notify(session, event_id: str, ctx: Optional[dict] = None) -> dict:
     if not targets:
         return {"event": event_id, "results": {}}
 
-    subject, text = format_message(event_id, ctx)
+    subject, text = format_message(event_id, ctx, stored.get("templates"))
     results = {}
     for ch_id in targets:
         sender = SENDERS.get(ch_id)
