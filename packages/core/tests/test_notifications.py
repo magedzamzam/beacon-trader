@@ -114,9 +114,12 @@ def test_catalog_exposes_field_descriptor_and_sample():
 
 def test_catalog_exposes_per_event_fields_and_emitted():
     cat = N.catalog()
-    # per-event lists are honest: trade_closed carries no channel/account
+    # per-event lists are honest: trade_closed carries channel + account (enriched)
     tc = {f["token"] for f in cat["fields_by_event"]["trade_closed"]}
-    assert "pl" in tc and "channel" not in tc and "account" not in tc
+    assert {"pl", "channel", "account"} <= tc
+    # order_filled does NOT carry channel/account -> not advertised
+    of = {f["token"] for f in cat["fields_by_event"]["order_filled"]}
+    assert "channel" not in of and "account" not in of
     # non-emitted events are flagged and empty
     assert cat["emitted"]["daily_summary"] is False
     assert cat["fields_by_event"]["daily_summary"] == []

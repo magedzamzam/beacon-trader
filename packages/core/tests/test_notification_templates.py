@@ -76,9 +76,13 @@ def test_event_fields_are_all_known_tokens():
 def test_field_descriptor_is_per_event_and_honest():
     d = T.field_descriptor("trade_closed")
     tokens = [f["token"] for f in d]
-    assert tokens == ["symbol", "direction", "pl", "open_time", "close_time"]  # FIELDS order
-    # trade_closed does NOT carry channel/account/entry/price -> not advertised
-    assert "channel" not in tokens and "account" not in tokens and "price" not in tokens
+    # emitted in FIELDS order; trade_closed now carries channel + account
+    assert tokens == ["symbol", "direction", "channel", "account",
+                      "pl", "open_time", "close_time"]
+    assert "price" not in tokens and "entry" not in tokens   # runtime/signal-only, not sent
+    # tp_hit is a different set that does NOT carry channel/account
+    tp = {f["token"] for f in T.field_descriptor("tp_hit")}
+    assert tp == {"symbol", "direction", "price", "pl", "detail"}
     # new_signal is a different, disjoint-ish set
     ns = {f["token"] for f in T.field_descriptor("new_signal")}
     assert ns == {"symbol", "direction", "entry", "sl", "tp", "channel"}

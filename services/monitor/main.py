@@ -39,6 +39,7 @@ from beacon_core.analysis import structure_map as struct_map
 from beacon_core.tasks import spawn_bg
 from beacon_core.timeutil import utcnow, parse_iso_utc
 from beacon_core import notifications as notify
+from beacon_core.notifications.context import build_ctx
 
 log = get_logger("monitor")
 settings = get_settings()
@@ -59,13 +60,17 @@ def _notify(event_id: str, ctx: dict) -> None:
     spawn_bg(_run())
 
 
-def _ntime(value) -> str | None:
-    """Format a datetime for a notification token (UTC, minute resolution).
-    Best-effort — a bad/None value just yields None so the token renders empty."""
+async def _closed_ctx(session, trade) -> dict:
+    """The trade_closed notification ctx, assembled by the SAME build_ctx the
+    test-fire uses — so the live message and a test render identically (joins
+    channel + account + open/close times + P&L). Best-effort; never raises here
+    because the caller fires it fire-and-forget."""
     try:
-        return value.strftime("%Y-%m-%d %H:%M") if value is not None else None
-    except Exception:                            # pragma: no cover - defensive
-        return None
+        return await build_ctx(session, "trade_closed", trade=trade)
+    except Exception as exc:                     # pragma: no cover - defensive
+        log.debug("trade_closed ctx build failed (trade %s): %s", trade.id, exc)
+        return {"symbol": trade.symbol, "direction": trade.direction,
+                "pl": str(trade.realized_pl) if trade.realized_pl is not None else None}
 
 # |realized P&L| at or below this (in the ACCOUNT currency) counts as a
 # break-even close. The primary BE signal is the SL being ratcheted to ~entry
@@ -343,9 +348,7 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
     if not legs and not staged_pending:
         if trade.status != "closed":
             trade.status = "closed"
-            _notify("trade_closed", {"symbol": trade.symbol, "direction": trade.direction,
-                                     "pl": str(trade.realized_pl) if trade.realized_pl is not None else None,
-                                     "open_time": _ntime(trade.created_at), "close_time": _ntime(utcnow())})
+            _notify("trade_closed", await _closed_ctx(session, trade))
             await _analyze_outcome(session, trade, ai_cfg)
         return
 
@@ -762,9 +765,7 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
             was_closed = trade.status == "closed"
             trade.status = "closed"
             if not was_closed:
-                _notify("trade_closed", {"symbol": trade.symbol, "direction": trade.direction,
-                                         "pl": str(trade.realized_pl) if trade.realized_pl is not None else None,
-                                         "open_time": _ntime(trade.created_at), "close_time": _ntime(utcnow())})
+                _notify("trade_closed", await _closed_ctx(session, trade))
                 await _analyze_outcome(session, trade, ai_cfg)
         elif closed:
             trade.status = "partial"

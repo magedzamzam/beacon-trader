@@ -53,8 +53,12 @@ async def build_ctx(session, event_id: str = None, *,
     account = (await session.get(Account, trade.account_id)
                if trade is not None else None)
 
+    # Only join the AI assessment when the event's contract references it — skip
+    # the extra query for events (like trade_closed) that don't surface ai.*.
+    want_ai = event_id is None or any(
+        t.split(".")[0] == "ai" for t in EVENT_FIELDS.get(event_id, []))
     ai = None
-    if signal is not None:
+    if signal is not None and want_ai:
         ai = (await session.execute(
             select(AiAssessment).where(AiAssessment.signal_id == signal.id)
             .order_by(AiAssessment.id.desc()).limit(1))).scalars().first()
