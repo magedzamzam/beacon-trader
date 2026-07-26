@@ -39,6 +39,9 @@ export default function Notifications() {
   const [testing, setTesting] = useState({});   // channelId -> bool
   const [testRes, setTestRes] = useState({});   // channelId -> {ok} | {ok:false,error}
   const [selEvent, setSelEvent] = useState(null);   // event id being template-edited
+  const [evTestCh, setEvTestCh] = useState("");     // "" = routed channels
+  const [evTesting, setEvTesting] = useState(false);
+  const [evTestRes, setEvTestRes] = useState(null); // {results} | {error}
   const subjectRef = useRef(null);
   const bodyRef = useRef(null);
   const focusRef = useRef("body");   // which box a clicked chip inserts into
@@ -130,6 +133,20 @@ export default function Notifications() {
       } else if (el && el.selectionStart != null) { pos = el.selectionStart; }
     } catch { /* fall back to end */ }
     setTemplate(eventId, part, cur.slice(0, pos) + tok + cur.slice(pos));
+  };
+  // Fire a real notification for this event (sample data) so you can see the
+  // template land in a channel. Saves first so the send uses what you just typed.
+  const sendEventTest = async (eventId) => {
+    setEvTestRes(null); setEvTesting(true);
+    try {
+      if (!(await save())) { setEvTesting(false); return; }
+      const body = { event_id: eventId, send: true };
+      if (evTestCh) body.channel_id = evTestCh;
+      const res = await api.testNotificationEvent(body);
+      setEvTestRes({ results: res.results || {} });
+    } catch (e) {
+      setEvTestRes({ error: e.message });
+    } finally { setEvTesting(false); }
   };
 
   // Save first (so freshly-typed secrets are persisted+encrypted), then test.
@@ -285,8 +302,11 @@ export default function Notifications() {
         const events = cat.event_groups.flatMap(g => g.events);
         const curEvent = selEvent || events[0]?.id;
         const curTmpl = (cfg.templates || {})[curEvent] || {};
-        const fields = cat.fields || [];
-        const sample = cat.sample || {};
+        // honest per-event field list + preview sample (only what this event carries)
+        const fields = (cat.fields_by_event && cat.fields_by_event[curEvent]) || cat.fields || [];
+        const sample = (cat.samples && cat.samples[curEvent]) || cat.sample || {};
+        const emitted = !cat.emitted || cat.emitted[curEvent] !== false;
+        const testable = cat.channels.filter(ch => cfg.channels[ch.id]?.enabled && BUILT.has(ch.id));
         const box = (part, ref, rows, placeholder) => (
           <textarea
             ref={ref} rows={rows} className={`${_inputCls} font-mono`} placeholder={placeholder}
@@ -310,12 +330,14 @@ export default function Notifications() {
               <div className="flex items-center gap-3">
                 <span className="text-xs uppercase tracking-wider text-muted">Event</span>
                 <div className="max-w-xs w-full">
-                  <Select value={curEvent} onChange={e => setSelEvent(e.target.value)}>
+                  <Select value={curEvent}
+                    onChange={e => { setSelEvent(e.target.value); setEvTestRes(null); }}>
                     {cat.event_groups.map(g => (
                       <optgroup key={g.group} label={g.group}>
                         {g.events.map(ev => (
                           <option key={ev.id} value={ev.id}>
                             {ev.label}{(cfg.templates || {})[ev.id] ? " •" : ""}
+                            {cat.emitted && cat.emitted[ev.id] === false ? " (not emitted)" : ""}
                           </option>
                         ))}
                       </optgroup>
@@ -324,24 +346,36 @@ export default function Notifications() {
                 </div>
               </div>
 
-              {/* field chips — click to insert at the caret, or drag into a box */}
+              {!emitted && (
+                <div className="text-xs text-warn bg-warn/10 rounded-lg px-3 py-2">
+                  This event isn't fired by any service yet — you can pre-write a template,
+                  but nothing will send until it's wired up. It carries no fields.
+                </div>
+              )}
+
+              {/* field chips — click to insert at the caret, or drag into a box.
+                  Only the fields THIS event actually carries are shown. */}
               <div>
                 <div className="text-[11px] text-muted mb-1.5">
-                  Click a field to insert it at the cursor of the last-focused box, or drag it
-                  straight into the subject or body.
+                  Fields available for <b>{events.find(e => e.id === curEvent)?.label}</b> — click
+                  to insert at the cursor of the last-focused box, or drag one into the subject or body.
                 </div>
-                <div className="flex flex-wrap gap-1.5">
-                  {fields.map(f => (
-                    <button
-                      key={f.token} type="button" draggable
-                      onDragStart={e => e.dataTransfer.setData("text/plain", `{${f.token}}`)}
-                      onClick={() => insertToken(curEvent, focusRef.current, f.token)}
-                      title={`{${f.token}} — e.g. ${f.example}`}
-                      className="text-[11px] border border-edge rounded-full px-2 py-0.5 text-muted hover:text-ink hover:border-beacon cursor-grab active:cursor-grabbing">
-                      {f.label}
-                    </button>
-                  ))}
-                </div>
+                {fields.length ? (
+                  <div className="flex flex-wrap gap-1.5">
+                    {fields.map(f => (
+                      <button
+                        key={f.token} type="button" draggable
+                        onDragStart={e => e.dataTransfer.setData("text/plain", `{${f.token}}`)}
+                        onClick={() => insertToken(curEvent, focusRef.current, f.token)}
+                        title={`{${f.token}} — e.g. ${f.example}`}
+                        className="text-[11px] border border-edge rounded-full px-2 py-0.5 text-muted hover:text-ink hover:border-beacon cursor-grab active:cursor-grabbing">
+                        {f.label}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-[11px] text-muted italic">This event carries no fields.</div>
+                )}
               </div>
 
               <Field label="Subject">{box("subject", subjectRef, 1, "Default headline (emoji + direction + symbol + P&L)")}</Field>
@@ -362,6 +396,33 @@ export default function Notifications() {
                 <div className="text-[11px] text-muted mt-1.5">
                   A field with no value in a real event renders empty — never an error.
                 </div>
+              </div>
+
+              {/* send a real test notification for this event (sample data) */}
+              <div className="border-t border-edge pt-4 flex flex-wrap items-center gap-3">
+                <span className="text-xs uppercase tracking-wider text-muted">Send test</span>
+                <div className="w-44">
+                  <Select value={evTestCh} onChange={e => setEvTestCh(e.target.value)}>
+                    <option value="">Routed channels</option>
+                    {testable.map(ch => <option key={ch.id} value={ch.id}>{ch.label}</option>)}
+                  </Select>
+                </div>
+                <Button variant="ghost" disabled={!emitted || evTesting}
+                  onClick={() => sendEventTest(curEvent)}>
+                  {evTesting ? "Sending…" : "Save & send test"}
+                </Button>
+                {evTestRes?.error && <span className="text-xs text-short truncate">✗ {evTestRes.error}</span>}
+                {evTestRes?.results && Object.keys(evTestRes.results).length === 0 &&
+                  <span className="text-xs text-muted">No channels routed for this event — pick one on the left.</span>}
+                {evTestRes?.results && Object.entries(evTestRes.results).map(([ch, st]) => (
+                  <span key={ch} className={`text-xs ${st === "ok" ? "text-long" : "text-short"}`}>
+                    {st === "ok" ? "✓" : "✗"} {ch}{st === "ok" ? "" : `: ${st}`}
+                  </span>
+                ))}
+                <span className="text-[11px] text-muted w-full">
+                  Uses sample data so wording + delivery are verified instantly. To test a real
+                  historical trade, call <code>POST /notifications/test-event</code> with a <code>trade_id</code>.
+                </span>
               </div>
             </div>
           </Card>

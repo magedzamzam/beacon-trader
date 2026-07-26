@@ -124,9 +124,9 @@ async def test_event(body: dict, db: AsyncSession = Depends(get_db)):
             raise HTTPException(404, f"signal {body['signal_id']} not found")
 
     if trade is None and signal is None:
-        ctx = notif.sample_ctx()                  # no id -> deterministic sample
+        ctx = notif.sample_ctx(event_id)          # no id -> deterministic sample
     else:
-        ctx = await build_ctx(db, trade=trade, signal=signal)
+        ctx = await build_ctx(db, event_id, trade=trade, signal=signal)
 
     subject, text = await notif.render_event(db, event_id, ctx)
     out = {"event": event_id, "subject": subject, "body": text, "ctx": ctx, "sent": False}

@@ -64,6 +64,50 @@ def test_field_descriptor_matches_sample_and_renderer():
         assert T.render("{" + f["token"] + "}", sample) == f["example"]
 
 
+def test_event_fields_are_all_known_tokens():
+    known = {name for name, _l, _e in T.FIELDS}
+    for ev, toks in T.EVENT_FIELDS.items():
+        for tok in toks:
+            assert tok in known, (ev, tok)          # no contract invents a token
+    # every routing-matrix event has a contract entry (even if empty)
+    assert set(T.EVENT_FIELDS) == set(N.EVENT_IDS)
+
+
+def test_field_descriptor_is_per_event_and_honest():
+    d = T.field_descriptor("trade_closed")
+    tokens = [f["token"] for f in d]
+    assert tokens == ["symbol", "direction", "pl", "open_time", "close_time"]  # FIELDS order
+    # trade_closed does NOT carry channel/account/entry/price -> not advertised
+    assert "channel" not in tokens and "account" not in tokens and "price" not in tokens
+    # new_signal is a different, disjoint-ish set
+    ns = {f["token"] for f in T.field_descriptor("new_signal")}
+    assert ns == {"symbol", "direction", "entry", "sl", "tp", "channel"}
+
+
+def test_non_emitted_event_has_no_fields():
+    assert T.field_descriptor("daily_summary") == []
+    assert T.sample_ctx("daily_summary") == {}
+    assert T.is_emitted("daily_summary") is False
+    assert T.is_emitted("trade_closed") is True
+
+
+def test_per_event_sample_matches_descriptor():
+    """Preview parity, per event: every advertised token resolves against that
+    event's sample to exactly its example."""
+    for ev in N.EVENT_IDS:
+        sample = T.sample_ctx(ev)
+        for f in T.field_descriptor(ev):
+            assert T.render("{" + f["token"] + "}", sample) == f["example"]
+        # the sample carries ONLY the event's roots — nothing extra
+        roots = {t.split(".")[0] for t in T.EVENT_FIELDS[ev]}
+        assert set(sample) == roots
+
+
+def test_no_arg_descriptor_is_full_set_backcompat():
+    assert len(T.field_descriptor()) == len(T.FIELDS)
+    assert "ai" in T.sample_ctx()                    # full set still nests ai.*
+
+
 def test_sanitize_templates_keeps_known_events_and_nonempty_parts():
     raw = {
         "trade_closed": {"subject": "Closed {symbol}", "body": ""},   # empty body dropped

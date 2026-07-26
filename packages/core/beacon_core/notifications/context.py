@@ -13,6 +13,7 @@ from sqlalchemy import select
 
 from ..db.models import Account, AiAssessment, Signal, Source, Trade
 from ..timeutil import utcnow
+from .templates import EVENT_FIELDS
 
 
 def _fmt_time(v) -> Optional[str]:
@@ -32,11 +33,19 @@ def _entry(signal) -> Optional[str]:
     return str(signal.entry_from)
 
 
-async def build_ctx(session, *, trade: Trade = None, signal: Signal = None) -> dict:
-    """Full notification ctx (keys == `templates.FIELDS` tokens) resolved from a
-    trade and/or signal, joining source / account / latest AI assessment. Uses
-    explicit `session.get` (no lazy relationship access) so it's safe under async
-    SQLAlchemy."""
+async def build_ctx(session, event_id: str = None, *,
+                    trade: Trade = None, signal: Signal = None) -> dict:
+    """Notification ctx resolved from a trade and/or signal (joining source /
+    account / latest AI assessment), using explicit `session.get` (no lazy
+    relationship access) so it's async-safe.
+
+    When `event_id` is given, the result is FILTERED to that event's field
+    contract (`templates.EVENT_FIELDS`) — so a test-fire renders exactly the
+    fields the live emitter would carry, never a richer superset. Runtime-only
+    fields the emitter computes at event time (e.g. `price`, `detail`) aren't
+    reconstructable from a historical trade and are simply absent (→ empty token,
+    never an error). Without `event_id`, the full reconstructable set is returned.
+    """
     if signal is None and trade is not None and trade.signal_id is not None:
         signal = await session.get(Signal, trade.signal_id)
     source = (await session.get(Source, signal.source_id)
@@ -65,4 +74,9 @@ async def build_ctx(session, *, trade: Trade = None, signal: Signal = None) -> d
     if ai is not None:
         ctx["ai"] = {"verdict": ai.verdict,
                      "confidence": str(ai.confidence) if ai.confidence is not None else None}
+
+    if event_id is not None:
+        # keep only the roots in this event's contract, so test == live emitter
+        roots = {t.split(".")[0] for t in EVENT_FIELDS.get(event_id, [])}
+        ctx = {k: v for k, v in ctx.items() if k in roots}
     return ctx

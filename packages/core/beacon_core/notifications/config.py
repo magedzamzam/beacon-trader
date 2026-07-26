@@ -124,10 +124,17 @@ DEFAULT_CONFIG = {
 
 def catalog() -> dict:
     """Everything the UI needs to render the channels + routing matrix + the
-    per-event template editor (fields come from the same registry the renderer
-    resolves, and a sample object to power the live preview)."""
-    return {"channels": CHANNELS, "event_groups": EVENT_GROUPS,
-            "fields": _T.field_descriptor(), "sample": _T.sample_ctx()}
+    per-event template editor. `fields_by_event`/`samples` are the honest
+    per-event field lists + preview objects (only what each event carries);
+    `emitted` flags events that aren't fired by any service yet. `fields`/`sample`
+    are the full set, kept for back-compat."""
+    return {
+        "channels": CHANNELS, "event_groups": EVENT_GROUPS,
+        "fields": _T.field_descriptor(), "sample": _T.sample_ctx(),
+        "fields_by_event": {e: _T.field_descriptor(e) for e in EVENT_IDS},
+        "samples": {e: _T.sample_ctx(e) for e in EVENT_IDS},
+        "emitted": {e: _T.is_emitted(e) for e in EVENT_IDS},
+    }
 
 
 def sanitize_config(cfg: Optional[dict]) -> dict:

@@ -42,6 +42,48 @@ FIELDS: list[tuple[str, str, str]] = [
     ("detail",        "Detail",           "TP1 — tp_hit"),
 ]
 
+# Per-event field CONTRACT — the tokens each event's emitter actually populates
+# today. This is the honest, per-event field set: picking "Trade closed" must
+# show only trade_closed's dict, not a global list. Signal-stage events read a
+# Signal; execution/position events read a Trade. An event mapped to `[]` is in
+# the routing matrix but NOT emitted by any service yet, so it carries nothing.
+#
+# SINGLE SOURCE OF TRUTH: this drives the field picker, the preview sample, AND
+# the test-fire ctx (context.build_ctx) — so the editor, the test, and the live
+# message can never disagree. To make a field available on an event that lacks it
+# (e.g. {channel} on trade_closed), ENRICH that emitter, then add it here — don't
+# advertise a token the emitter won't send. Every token must exist in FIELDS.
+EVENT_FIELDS: dict[str, list[str]] = {
+    "new_signal":       ["symbol", "direction", "entry", "sl", "tp", "channel"],
+    "signal_validated": [],
+    "signal_rejected":  [],
+    "order_placed":     ["symbol", "direction", "account", "channel", "detail"],
+    "order_filled":     ["symbol", "direction", "price", "detail"],
+    "order_cancelled":  ["symbol", "direction", "detail"],
+    "tp_hit":           ["symbol", "direction", "price", "pl", "detail"],
+    "sl_hit":           ["symbol", "direction", "price", "pl", "detail"],
+    "sl_moved":         ["symbol", "direction", "sl", "detail"],
+    "trade_closed":     ["symbol", "direction", "pl", "open_time", "close_time"],
+    "broker_error":     [],
+    "daily_summary":    [],
+}
+
+
+def is_emitted(event_id: str) -> bool:
+    """True if some service actually fires this event today (non-empty contract).
+    The routing matrix lists events that aren't wired up yet — the editor flags
+    those so an operator doesn't write a template that never sends."""
+    return bool(EVENT_FIELDS.get(event_id))
+
+
+def _tokens_for(event_id: Optional[str]) -> list[str]:
+    """The token list for an event, or every FIELDS token when event_id is None
+    (back-compat full view)."""
+    if event_id is None:
+        return [name for name, _l, _e in FIELDS]
+    return EVENT_FIELDS.get(event_id, [])
+
+
 # `{token}` where token is letters/digits/underscore, dot-separated. Anything
 # else (spaces, braces, punctuation) is left untouched as literal text.
 _TOKEN = re.compile(r"\{([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)\}")
@@ -84,27 +126,33 @@ def _set_path(d: dict, path: str, value) -> None:
     cur[parts[-1]] = value
 
 
-def sample_ctx() -> dict:
-    """A fully-populated, representative ctx — the object the editor introspects
-    and the live preview renders against. Built from FIELDS so it stays in
-    lockstep with the field descriptor."""
+def sample_ctx(event_id: Optional[str] = None) -> dict:
+    """A representative ctx the editor introspects and the live preview renders
+    against. With an `event_id`, contains ONLY that event's contract fields (so
+    the preview matches what the event can actually carry); without one, the full
+    set (back-compat). Built from FIELDS so it stays in lockstep with the
+    descriptor."""
+    toks = set(_tokens_for(event_id))
     out: dict = {}
     for name, _label, example in FIELDS:
-        _set_path(out, name, example)
+        if name in toks:
+            _set_path(out, name, example)
     return out
 
 
-def field_descriptor() -> list[dict]:
-    """Per-token descriptor powering the @-picker and drag chips: token, label,
-    and the example value RESOLVED from sample_ctx (so the advertised example is
-    exactly what the renderer produces). One data source, two interaction
-    modes."""
-    sample = sample_ctx()
+def field_descriptor(event_id: Optional[str] = None) -> list[dict]:
+    """Per-token descriptor powering the field chips: token, label, and the
+    example value RESOLVED from the sample (so the advertised example is exactly
+    what the renderer produces). With an `event_id`, only that event's contract
+    fields — the honest per-event list."""
+    toks = set(_tokens_for(event_id))
+    sample = sample_ctx()                        # full sample for example lookup
     out = []
     for name, label, _example in FIELDS:
-        v = _walk(sample, name)
-        out.append({"token": name, "label": label,
-                    "example": "" if v is None else str(v)})
+        if name in toks:
+            v = _walk(sample, name)
+            out.append({"token": name, "label": label,
+                        "example": "" if v is None else str(v)})
     return out
 
 

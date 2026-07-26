@@ -118,6 +118,7 @@ export const api = {
   notificationsConfig: () => req("/notifications/config"),
   saveNotificationsConfig: (c) => req("/notifications/config", { method: "PUT", body: JSON.stringify(c) }),
   testNotificationChannel: (id) => post(`/notifications/test/${id}`, {}),
+  testNotificationEvent: (body) => post("/notifications/test-event", body),
   // risk limits + kill switch
   riskLimits: () => req("/risk-limits/config"),
   saveRiskLimits: (c) => req("/risk-limits/config", { method: "PUT", body: JSON.stringify(c) }),

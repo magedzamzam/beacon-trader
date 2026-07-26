@@ -110,3 +110,15 @@ def test_catalog_exposes_field_descriptor_and_sample():
     from beacon_core.notifications import templates as T
     for f in cat["fields"]:
         assert T.render("{" + f["token"] + "}", cat["sample"]) == f["example"]
+
+
+def test_catalog_exposes_per_event_fields_and_emitted():
+    cat = N.catalog()
+    # per-event lists are honest: trade_closed carries no channel/account
+    tc = {f["token"] for f in cat["fields_by_event"]["trade_closed"]}
+    assert "pl" in tc and "channel" not in tc and "account" not in tc
+    # non-emitted events are flagged and empty
+    assert cat["emitted"]["daily_summary"] is False
+    assert cat["fields_by_event"]["daily_summary"] == []
+    assert cat["emitted"]["trade_closed"] is True
+    assert set(cat["samples"]["new_signal"]) == {"symbol", "direction", "entry", "sl", "tp", "channel"}
