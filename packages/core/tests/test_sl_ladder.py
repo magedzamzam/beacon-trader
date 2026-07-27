@@ -154,3 +154,42 @@ def test_levels_reached_group1_toe_in_still_registers():
 def test_levels_reached_sell_side():
     ladder = {1: D("99"), 2: D("98"), 3: D("97")}
     assert levels_reached("SELL", D("97.5"), ladder) == {1, 2}
+
+
+# ---- next_mfe: max-favorable-excursion latch for sub-poll spikes (#149) --------
+from beacon_core.strategy.rules import next_mfe
+
+
+def test_next_mfe_seeds_from_live_price_when_null():
+    # First tick / pre-feature trade (NULL MFE) -> seed with the live price;
+    # behaviour is identical to detecting off live price alone.
+    assert next_mfe("BUY", None, D("4075")) == D("4075")
+    assert next_mfe("SELL", None, D("97.5")) == D("97.5")
+
+
+def test_next_mfe_is_monotonic_buy():
+    assert next_mfe("BUY", D("4080"), D("4082")) == D("4082")   # new high advances
+    assert next_mfe("BUY", D("4080"), D("4075")) == D("4080")   # retrace never walks back
+
+
+def test_next_mfe_is_monotonic_sell():
+    assert next_mfe("SELL", D("98"), D("97")) == D("97")        # new low advances
+    assert next_mfe("SELL", D("98"), D("99")) == D("98")        # retrace never walks back
+
+
+def test_mfe_latches_retraced_tp_for_staged_runner():
+    # THE #149 scenario: price spikes through TP2 (4079) then retraces below it
+    # before the next poll. Detecting off the instantaneous price misses TP2;
+    # detecting off the MFE keeps it latched so the runner still ratchets.
+    mfe = next_mfe("BUY", None, D("4070"))          # tick 1: below TP1
+    mfe = next_mfe("BUY", mfe, D("4081"))           # tick 2: spikes through TP2
+    mfe = next_mfe("BUY", mfe, D("4076"))           # tick 3: retraced (past TP1, below TP2)
+    assert mfe == D("4081")
+    # live price on tick 3 alone would report only TP1; the MFE reports TP1+TP2.
+    assert levels_reached("BUY", D("4076"), _LADDER) == {1}
+    assert levels_reached("BUY", mfe, _LADDER) == {1, 2}
+    rules = [{"trigger": {"type": "tp_hit", "index": 2},
+              "action": {"type": "move_sl_to", "target": "entry"}}]
+    runner = PositionCtx(side="BUY", entry=D("4069"), current_sl=D("4052"),
+                         current_price=D("4076"), tps=_LADDER)
+    assert evaluate(runner, rules, levels_reached("BUY", mfe, _LADDER)) == D("4069")

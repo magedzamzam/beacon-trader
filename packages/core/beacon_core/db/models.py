@@ -118,6 +118,15 @@ class Trade(Base):
     # is enabled (needs the ALTER — new columns don't auto-appear, CLAUDE.md §6).
     cluster_id: Mapped[str | None] = mapped_column(String(48), nullable=True, index=True)
     cluster_alloc: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Max-favorable excursion (#149): the best price the market has printed for
+    # this trade (highest for BUY, lowest for SELL), updated by the monitor each
+    # tick. Latches TP-hit detection for a still-open staged runner so a TP the
+    # market reached then retraced BETWEEN polls still ratchets its SL — closing
+    # the sub-poll-spike gap the open-legs->full-ladder fix (#148) left. NULL
+    # until the feature ships: needs the ALTER (new columns don't auto-appear,
+    # CLAUDE.md §6); NULL falls back to live price, so pre-feature trades behave
+    # exactly as before on their first tick, then start tracking.
+    max_favorable_price: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
     signal: Mapped["Signal"] = relationship(back_populates="trades")
     legs: Mapped[list["Leg"]] = relationship(back_populates="trade")

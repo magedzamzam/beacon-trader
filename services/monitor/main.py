@@ -33,7 +33,7 @@ from beacon_core.brokers import build_adapter, symbol_map
 from beacon_core.brokers.types import (AuthError, ModifyPositionRequest, OrderSide,
                                        OrderStatus, OrderType, PlaceOrderRequest)
 from beacon_core.strategy.rules import (PositionCtx, evaluate, levels_reached,
-                                        DEFAULT_SL_RULES)
+                                        next_mfe, DEFAULT_SL_RULES)
 from beacon_core.settings_store import get_setting, set_setting
 from beacon_core.analysis import structure as S
 from beacon_core.analysis import structure_map as struct_map
@@ -390,7 +390,19 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
         _all_legs = (await session.execute(select(Leg).where(
             Leg.trade_id == trade.id))).scalars().all()
         tp_levels = {l.tp_index: Decimal(str(l.tp)) for l in _all_legs}
-        tps_hit = levels_reached(trade.direction, price, tp_levels)
+        # Persist the max-favorable excursion and detect hits off IT, not just the
+        # instantaneous price (#149). A staged runner's intervening TPs are reclaim
+        # STOPs that expire without closing `tp_hit`, so nothing latches a level the
+        # market reached then retraced between two polls — the single-shot LIMIT arms
+        # fill on the spike at broker granularity, the runner only sees our ticks.
+        # Tracking the best price (max for BUY, min for SELL) keeps a reached TP
+        # latched for the open runner. NULL MFE (pre-#149 trades / DB without the
+        # ALTER, CLAUDE.md §6) falls back to live price → behaviour unchanged.
+        prev_mfe = trade.max_favorable_price
+        mfe = next_mfe(trade.direction, prev_mfe, price)
+        if prev_mfe is None or Decimal(str(prev_mfe)) != mfe:
+            trade.max_favorable_price = mfe
+        tps_hit = levels_reached(trade.direction, mfe, tp_levels)
 
         # Positions already linked to an open leg of ANY trade (not just this one)
         # so the epic+direction heuristic can never re-claim a broker position

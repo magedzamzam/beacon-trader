@@ -139,3 +139,17 @@ def levels_reached(direction: str, price, tp_levels: Dict[int, Decimal]) -> Set[
         elif direction == "SELL" and price <= lvl:
             hit.add(idx)
     return hit
+
+
+def next_mfe(direction: str, prev, price) -> Decimal:
+    """The updated max-favorable excursion: the best price the trade has printed —
+    HIGHEST for BUY, LOWEST for SELL. `prev` is the stored MFE (None on the first
+    tick, where the live price seeds it). Feeding this (instead of the instantaneous
+    price) into `levels_reached` latches a TP the market reached then retraced
+    BETWEEN polls, so a still-open staged runner ratchets its SL like the single-shot
+    LIMIT arms that fill at broker granularity (#149). Monotonic: never walks back."""
+    price = Decimal(str(price))
+    if prev is None:
+        return price
+    prev = Decimal(str(prev))
+    return max(prev, price) if direction == "BUY" else min(prev, price)
