@@ -32,7 +32,8 @@ from beacon_core.execution import staging as STG
 from beacon_core.brokers import build_adapter, symbol_map
 from beacon_core.brokers.types import (AuthError, ModifyPositionRequest, OrderSide,
                                        OrderStatus, OrderType, PlaceOrderRequest)
-from beacon_core.strategy.rules import PositionCtx, evaluate, DEFAULT_SL_RULES
+from beacon_core.strategy.rules import (PositionCtx, evaluate, levels_reached,
+                                        DEFAULT_SL_RULES)
 from beacon_core.settings_store import get_setting, set_setting
 from beacon_core.analysis import structure as S
 from beacon_core.analysis import structure_map as struct_map
@@ -197,17 +198,6 @@ def _classify_outcome(close_px, entry_px, tp, sl, sl_moved, tol, realized_pl=Non
         if realized_pl < 0:
             return "sl_hit"
     return "manual"
-
-
-def _tps_hit(direction: str, price: Decimal, legs) -> set[int]:
-    hit = set()
-    for l in legs:
-        tp = Decimal(str(l.tp))
-        if direction == "BUY" and price >= tp:
-            hit.add(l.tp_index)
-        elif direction == "SELL" and price <= tp:
-            hit.add(l.tp_index)
-    return hit
 
 
 async def _analyze_outcome(session, trade, ai_cfg) -> None:
@@ -391,12 +381,16 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
         # placed it (Capital.com's position.workingOrderId == our order dealId).
         pos_by_wo = {p.working_order_ref: p for p in positions.values() if p.working_order_ref}
         rules, strat, ttl_min, initial_sl = await _rules_for(session, trade)
-        tps_hit = _tps_hit(trade.direction, price, legs)
-        # TP price map across ALL legs of the trade, so a ratchet rule that
-        # references a TP whose legs already closed still resolves its level.
+        # TP price map across ALL legs of the trade, so (a) a ratchet rule that
+        # references a TP whose legs already closed still resolves its level, and
+        # (b) hit-DETECTION runs off the FULL ladder — a TP consumed as a staged
+        # reclaim STOP that expired still counts as reached once price trades
+        # through it, so the runner ratchets to BE like the single-shot arms
+        # (#148). Detecting hits off the open legs only silently dropped it.
         _all_legs = (await session.execute(select(Leg).where(
             Leg.trade_id == trade.id))).scalars().all()
         tp_levels = {l.tp_index: Decimal(str(l.tp)) for l in _all_legs}
+        tps_hit = levels_reached(trade.direction, price, tp_levels)
 
         # Positions already linked to an open leg of ANY trade (not just this one)
         # so the epic+direction heuristic can never re-claim a broker position

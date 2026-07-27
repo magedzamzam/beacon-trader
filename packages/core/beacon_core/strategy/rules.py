@@ -117,3 +117,25 @@ def evaluate(ctx: PositionCtx, rules: List[dict],
         if best is None or _is_improvement(ctx.side, cand, best):
             best = cand
     return best
+
+
+def levels_reached(direction: str, price, tp_levels: Dict[int, Decimal]) -> Set[int]:
+    """TP indices whose price level the market has reached, over the FULL ladder.
+
+    `tp_levels` maps tp_index -> level for **all** of a trade's legs (any status),
+    not just the open ones. Hit-detection has to run off the full ladder so a TP
+    whose leg already closed or expired still counts as reached once price trades
+    through it. This is load-bearing for staged trades (#148): the confirmation-
+    staging partition can assign the BE-trigger TP (e.g. TP2) to a *reclaim* STOP
+    leg that EXPIRES without ever closing `tp_hit`; detecting hits off open legs
+    only dropped that TP index, so the runner's SL never ratcheted to breakeven
+    while the single-shot arms did. Union this with the persisted set of
+    `tp_hit`-closed legs so a TP that was reached then retraced still holds."""
+    hit: Set[int] = set()
+    for idx, lvl in tp_levels.items():
+        lvl = Decimal(str(lvl))
+        if direction == "BUY" and price >= lvl:
+            hit.add(idx)
+        elif direction == "SELL" and price <= lvl:
+            hit.add(idx)
+    return hit

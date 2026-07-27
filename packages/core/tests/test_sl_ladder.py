@@ -96,3 +96,61 @@ def test_be_lock_at_r_only_tightens():
     # R-relative rule adapts — tight one has already made >0.6R, wide one hasn't.
     assert evaluate(_rctx("BUY", "100", "96", "105"), _BE_R) == D("100")      # R=4, +5 = 1.25R
     assert evaluate(_rctx("BUY", "100", "88", "105"), _BE_R) is None          # R=12, +5 = 0.42R
+
+
+# ---- levels_reached: full-ladder hit detection for the SL ratchet (#148) ------
+from beacon_core.strategy.rules import levels_reached
+
+# signal 778 ladder: BUY, TPs [4074, 4079, 4084, 4104]. The staging partition put
+# TP1 on the toe-in (closes tp_hit), TP2 & TP3 on reclaim STOPs (expire), TP4 on
+# the runner (stays open). The exit rule is tp_hit(2) -> move_sl_to entry.
+_LADDER = {1: D("4074"), 2: D("4079"), 3: D("4084"), 4: D("4104")}
+
+
+def test_levels_reached_counts_expired_reclaim_tp():
+    # Price traded through TP2 (4079). TP2's leg was a reclaim STOP that expired —
+    # it never closed `tp_hit`, so detecting hits off open legs alone dropped it.
+    # Over the full ladder, TP2 (and TP1) must register.
+    assert levels_reached("BUY", D("4080"), _LADDER) == {1, 2}
+
+
+def test_levels_reached_staged_group2_ratchets_runner_to_be():
+    # The whole point of #148: the open runner leg (TP4) must ratchet to entry
+    # once price reaches TP2, exactly like the single-shot arms did.
+    tps_hit = levels_reached("BUY", D("4080"), _LADDER)
+    rules = [{"trigger": {"type": "tp_hit", "index": 2},
+              "action": {"type": "move_sl_to", "target": "entry"}}]
+    runner = PositionCtx(side="BUY", entry=D("4069"), current_sl=D("4052"),
+                         current_price=D("4080"), tps=_LADDER)
+    assert evaluate(runner, rules, tps_hit) == D("4069")     # SL -> entry (BE)
+
+
+def test_levels_reached_below_tp2_no_ratchet():
+    # Before price reaches TP2 the group-2 rule must not fire (no premature BE).
+    tps_hit = levels_reached("BUY", D("4075"), _LADDER)      # past TP1 only
+    assert tps_hit == {1}
+    rules = [{"trigger": {"type": "tp_hit", "index": 2},
+              "action": {"type": "move_sl_to", "target": "entry"}}]
+    runner = PositionCtx(side="BUY", entry=D("4069"), current_sl=D("4052"),
+                         current_price=D("4075"), tps=_LADDER)
+    assert evaluate(runner, rules, tps_hit) is None
+
+
+def test_effective_tps_hit_union_persists_retraced_tp():
+    # `achieved` (TP-hit-closed legs) persists across ticks; union with the live
+    # full-ladder set means a TP reached-then-retraced still holds. Here price has
+    # slipped back below TP2 but TP2's toe-in closed tp_hit on an earlier tick.
+    tps_hit = levels_reached("BUY", D("4075"), _LADDER)      # live: only TP1
+    achieved = {2}                                           # persisted tp_hit close
+    assert (tps_hit | achieved) == {1, 2}
+
+
+def test_levels_reached_group1_toe_in_still_registers():
+    # Regression: group-1 (TP1 -> BE) staged trades — TP1 is the toe-in — must
+    # still ratchet. TP1 registers as soon as price reaches 4074.
+    assert levels_reached("BUY", D("4074"), _LADDER) == {1}
+
+
+def test_levels_reached_sell_side():
+    ladder = {1: D("99"), 2: D("98"), 3: D("97")}
+    assert levels_reached("SELL", D("97.5"), ladder) == {1, 2}
