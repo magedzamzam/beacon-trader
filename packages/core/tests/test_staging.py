@@ -67,8 +67,12 @@ def _dec(role, state, ctx, minutes=0.0):
 # ---- RUNNER tranche ----
 def test_runner_deploys_at_deep_edge():
     assert _dec(S.RUNNER, S.PENDING, _ctx(4178)).action == S.WAIT        # above deep
+    # #140: at/through the deep edge -> MARKET (a LIMIT here is a limit-at-market
+    # the broker rejects). Holds when price is already past the deep edge too.
     d = _dec(S.RUNNER, S.PENDING, _ctx(4176))                            # at deep
-    assert d.action == S.DEPLOY and d.mode == S.MODE_LIMIT and d.level == DEEP
+    assert d.action == S.DEPLOY and d.mode == S.MODE_MARKET and d.level == DEEP
+    d2 = _dec(S.RUNNER, S.PENDING, _ctx(4174))                           # already below deep
+    assert d2.action == S.DEPLOY and d2.mode == S.MODE_MARKET
 
 
 def test_runner_expires_if_deep_never_touched():   # V-bounce: never tags deep
@@ -102,7 +106,8 @@ def test_toe_in_is_not_decided_here():
 def test_sell_geometry_mirrors():
     near, deep, sl = 4176.0, 4180.0, 4188.0
     ctx = C(direction="SELL", near_edge=near, deep_edge=deep, sl=sl, price=4180.0, atr=ATR)
-    assert S.decide_tranche(role=S.RUNNER, state=S.PENDING, ctx=ctx, cfg=D).action == S.DEPLOY
+    rd = S.decide_tranche(role=S.RUNNER, state=S.PENDING, ctx=ctx, cfg=D)
+    assert rd.action == S.DEPLOY and rd.mode == S.MODE_MARKET   # #140: MARKET at deep, not LIMIT
     armed = C(direction="SELL", near_edge=near, deep_edge=deep, sl=sl, price=4185.0,
               atr=ATR, max_adverse_beyond_deep=5.0)
     d = S.decide_tranche(role=S.RECLAIM, state=S.PENDING, ctx=armed, cfg=D)
@@ -153,6 +158,30 @@ def test_build_staged_legs_sell_mirror():
                                deep_edge=4180, sl=4188, atr=14, current_price=4174, cfg=D)
     rec = next(l for l in legs if l.tranche == "reclaim")
     assert rec.order_type == "STOP" and float(rec.entry) == 4180 - 0.10 * 14   # offset below deep for SELL
+
+
+def test_build_staged_legs_point_entry_folds_runner_into_toe_in():
+    # #140: point entry (near == deep == 4095) has no distinct deep edge to rest a
+    # runner LIMIT against, so the runner leg must fold into the toe-in (no separate
+    # LIMIT runner). Mirrors live sig752: BUY 4095, TPs [4100,4105,4110,4130].
+    legs = S.build_staged_legs(direction="BUY", tps=[4100, 4105, 4110, 4130],
+                               near_edge=4095, deep_edge=4095, sl=4078, atr=15.19,
+                               current_price=4094.75, cfg=D)
+    assert not any(l.tranche == "runner" for l in legs)          # no rejected limit-at-market
+    toe = [l for l in legs if l.tranche == "toe_in"]
+    assert {l.tp_index for l in toe} == {1, 4}                    # nearest + folded-in farthest
+    # price already crossed the point -> toe-in (incl. the folded runner) is MARKET
+    assert all(l.order_type == "MARKET" for l in toe)
+    assert any(l.tranche == "reclaim" for l in legs)             # the deferred tail still exists
+    assert all(l.valid for l in legs)
+
+
+def test_build_staged_legs_zone_entry_still_has_runner():
+    # Guard the fold is point-entry-only: a real zone (near != deep) keeps its runner.
+    legs = S.build_staged_legs(direction="BUY", tps=[4100, 4105, 4110, 4130],
+                               near_edge=4098, deep_edge=4095, sl=4078, atr=15.19,
+                               current_price=4099, cfg=D)
+    assert any(l.tranche == "runner" for l in legs)
 
 
 # ---- config validation (#129 Phase 1) ----

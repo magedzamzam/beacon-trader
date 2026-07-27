@@ -300,23 +300,41 @@ async def _drive_staged(session, trade, adapter, smap, mid, ttl_min) -> None:
         good_till = utcnow() + timedelta(
             minutes=effective_entry_ttl_min({"entry_ttl_minutes": ttl_min}))
         side_buy = direction == "BUY"
+        # #140: the runner deploys MARKET once price has reached the deep edge (a
+        # LIMIT resting there would be a limit-at-market and get rejected). STOP is
+        # the reclaim re-entry; everything else is a resting LIMIT.
+        is_market = decision.mode == "MARKET"
+        order_type = (OrderType.STOP if decision.mode == "STOP"
+                      else OrderType.MARKET if is_market else OrderType.LIMIT)
         placed = 0
         for leg in legs:
             try:
                 res = await adapter.place_order(PlaceOrderRequest(
                     broker_symbol=smap.broker_epic,
                     side=OrderSide.BUY if side_buy else OrderSide.SELL,
-                    order_type=OrderType.STOP if decision.mode == "STOP" else OrderType.LIMIT,
-                    quantity=leg.lot, limit_price=leg.entry,   # LIMIT level or STOP trigger
-                    stop_loss=leg.sl, take_profit=leg.tp, good_till=good_till))
+                    order_type=order_type,
+                    quantity=leg.lot,
+                    # MARKET ignores the level; LIMIT/STOP need it (deep edge / reclaim trigger).
+                    limit_price=None if is_market else leg.entry,
+                    stop_loss=leg.sl, take_profit=leg.tp,
+                    good_till=None if is_market else good_till))
                 if res.status == OrderStatus.REJECTED:
                     leg.status, leg.outcome = "rejected", "rejected"
                     session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="reject",
                                       payload={"ref": res.broker_order_ref,
                                                "reason": res.rejection_reason}))
                 else:
-                    leg.broker_order_ref = res.broker_order_ref
-                    leg.status = "working"
+                    if is_market:
+                        # A MARKET runner opens a position immediately — link it by
+                        # broker_position_ref (like the executor's market toe-in) so
+                        # reconciliation matches the position, not a working order
+                        # that never exists.
+                        leg.broker_position_ref = res.broker_order_ref
+                        leg.status = "open" if res.status == OrderStatus.FILLED else "pending"
+                        leg.fill_price = res.fill_price
+                    else:
+                        leg.broker_order_ref = res.broker_order_ref
+                        leg.status = "working"
                     leg.created_at = utcnow()      # reset the TTL clock: deployed/armed late
                     tr.broker_order_ref = res.broker_order_ref
                     placed += 1

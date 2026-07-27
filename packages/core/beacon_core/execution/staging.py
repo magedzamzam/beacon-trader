@@ -299,8 +299,16 @@ def build_staged_legs(*, direction: str, tps: list, near_edge, deep_edge, sl, at
     SL on the wrong side) is marked invalid with a reason, mirroring build_plan."""
     from .planner import PlannedLeg
     part = partition_tps(tps, cfg)
-    role_by_tp = {i: role for role, idxs in part.items() for i in idxs}
     near, deep, slD = _D(near_edge), _D(deep_edge), _D(sl)
+    # Point entry (near == deep): there is no distinct deep edge to rest a runner
+    # LIMIT against — deploying it at the same level the toe-in already took is a
+    # limit-at-market that the broker rejects (#140). Fold the runner legs into the
+    # toe-in so they deploy immediately alongside it. The reclaim tail is untouched
+    # (it still arms on a break beyond the point and reclaims).
+    if near == deep and part[RUNNER]:
+        part = {TOE_IN: sorted(part[TOE_IN] + part[RUNNER]),
+                RUNNER: [], RECLAIM: part[RECLAIM]}
+    role_by_tp = {i: role for role, idxs in part.items() for i in idxs}
     atrD = _D(atr) if atr is not None else None
     priceD = _D(current_price) if current_price is not None else None
     off = (_D(cfg.get("stop_offset_atr") or 0) * atrD) if atrD else _D(0)
@@ -378,8 +386,14 @@ def _mechanical_decision(role, state, ctx: StagingContext, cfg: dict,
         if state != PENDING:
             return StagingDecision(WAIT, role, reason=f"runner already {state}")
         if _reached(ctx.direction, ctx.price, ctx.deep_edge):
-            return StagingDecision(DEPLOY, role, mode=MODE_LIMIT, level=ctx.deep_edge,
-                                   reason="price reached deep edge")
+            # Price is already AT/through the deep edge, so a LIMIT resting at the
+            # deep edge would sit on the wrong side of the market and the broker
+            # rejects it (error.validation.limit.price, #140). Deploy MARKET — the
+            # same crossed->MARKET intent the toe-in uses. A BUY fills <= deep (a
+            # SELL >= deep), i.e. at or better than the planned deep-edge entry, so
+            # this never increases the tranche's risk versus the resting LIMIT.
+            return StagingDecision(DEPLOY, role, mode=MODE_MARKET, level=ctx.deep_edge,
+                                   reason="price reached deep edge -> deploy MARKET")
         if minutes_in_state >= float(cfg.get("runner_ttl_minutes", 60)):
             return StagingDecision(EXPIRE, role, reason="runner TTL: deep edge untouched")
         return StagingDecision(WAIT, role, reason="waiting for deep edge")
