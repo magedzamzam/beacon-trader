@@ -397,6 +397,9 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             _sl_dist = abs(float(_deep) - float(parsed.sl))
             if _satr is None or STG.stop_too_tight(_sl_dist, _satr, staged_cfg):
                 is_staged = False
+                # The Trade row doesn't exist yet, so this event can't carry a
+                # trade_id — Trade.entry_style is the durable marker (#156); this
+                # event explains WHY the fallback happened.
                 session.add(Event(kind="staged_fallback",
                                   payload={"signal_id": sig.id, "account_id": acct.id,
                                            "reason": "no_atr" if _satr is None else "stop_too_tight",
@@ -417,21 +420,36 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                         cfg=staged_cfg, min_stop_distance=smap.min_stop_distance,
                         market_hint=_market_hint,
                         chase_tolerance_r=Decimal(str(planner_cfg.get("chase_tolerance_r", "0.25"))),
-                        chase_tolerance_atr=Decimal(str(planner_cfg.get("chase_tolerance_atr", "0")))))
+                        chase_tolerance_atr=Decimal(str(planner_cfg.get("chase_tolerance_atr", "0"))),
+                        # Entry-guard parity with build_plan — the staged arm must
+                        # take the same signals and drop the same legs (#152/#153/#155).
+                        beyond_tolerance=str(planner_cfg.get("beyond_tolerance", "limit")),
+                        max_tp_distance_pct=max_tp_pct if max_tp_pct > 0 else None,
+                        candle_high=candle_high, candle_low=candle_low))
                 staged_geo = {"near": _near, "deep": _deep, "atr": _satr, "cfg": staged_cfg}
-                # Audit the toe-in decision, mirroring the single-shot chase guard:
-                # a hint that still rested a LIMIT means the tolerance held it back.
-                if _market_hint:
-                    _toe = [l for l in plan.legs if l.tranche == STG.TOE_IN]
+                # Audit the entry decision the way the single-shot path does, and
+                # record every leg the guards dropped — otherwise a staged trade
+                # that placed 3 legs instead of 5 leaves no trace of the other two
+                # (#157). Mirrors the entry_chase_guard event below.
+                _toe = [l for l in plan.legs if l.tranche == STG.TOE_IN]
+                _dropped = [{"tp_index": l.tp_index, "tranche": l.tranche,
+                             "entry": str(l.entry), "reason": l.skip_reason}
+                            for l in plan.legs if not l.valid]
+                if _market_hint or _dropped or not plan.legs:
                     _reached_near = (current <= Decimal(str(_near))
                                      if parsed.direction == "BUY"
                                      else current >= Decimal(str(_near)))
                     session.add(Event(
-                        kind="staged_toe_in_hint",
+                        kind="staged_entry_decision",
                         payload={"signal_id": sig.id, "account_id": acct.id,
                                  "current_price": str(current), "near_edge": str(_near),
+                                 "market_hint": _market_hint,
                                  "mode": (_toe[0].order_type if _toe else None),
-                                 "reached_near": bool(_reached_near)}))
+                                 "reached_near": bool(_reached_near),
+                                 # no legs at all = beyond_tolerance="skip" declined
+                                 # the whole signal, exactly as build_plan would
+                                 "skipped_signal": not plan.legs,
+                                 "dropped_legs": _dropped}))
         if not is_staged:
             plan = build_plan(
                 parsed, current_price=current,
@@ -760,7 +778,11 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                       direction=parsed.direction, status="open",
                       planned_risk=planned_risk,
                       sl_rules=_sl_rules, strategy_id=_strategy_id,
-                      cluster_id=cluster_id, cluster_alloc=cluster_alloc_rec)
+                      cluster_id=cluster_id, cluster_alloc=cluster_alloc_rec,
+                      # As RUN, not as configured (#156): a staged strategy that
+                      # fell back to the single-shot planner is a CONTROL trade and
+                      # must not be counted in the staged arm.
+                      entry_style="staged" if is_staged else "single_shot")
         session.add(trade)
         await session.flush()
         if _strategy_id:

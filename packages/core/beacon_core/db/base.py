@@ -40,6 +40,8 @@ ADDITIVE_MIGRATIONS: tuple[str, ...] = (
     "ADD COLUMN IF NOT EXISTS cluster_alloc JSON",         # cluster budgeter record (#106)
     "ALTER TABLE trades "
     "ADD COLUMN IF NOT EXISTS max_favorable_price numeric(18,6)",  # MFE ratchet latch (#149)
+    "ALTER TABLE trades "
+    "ADD COLUMN IF NOT EXISTS entry_style VARCHAR(16)",    # staged|single_shot, as RUN (#156)
     # cluster_id is index=True in the model, so create_all builds this index on a
     # FRESH table; add it explicitly for the existing-table path (IF NOT EXISTS
     # keeps it a no-op elsewhere — no double CREATE).

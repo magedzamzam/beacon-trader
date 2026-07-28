@@ -127,6 +127,14 @@ class Trade(Base):
     # CLAUDE.md §6); NULL falls back to live price, so pre-feature trades behave
     # exactly as before on their first tick, then start tracking.
     max_favorable_price: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)
+    # Which entry style this trade ACTUALLY ran (#156): 'staged' | 'single_shot'.
+    # The strategy's CONFIGURED entry_style is not enough — a staged account falls
+    # back to the single-shot planner whenever 1h ATR is missing or the stop is too
+    # tight to stage a break around, so an A-vs-C comparison grouped by account or
+    # strategy silently blends control trades into the staged arm. Stamped at entry
+    # from the branch that actually ran. NULL on pre-#156 trades (needs the ALTER —
+    # new columns don't auto-appear, CLAUDE.md §6).
+    entry_style: Mapped[str | None] = mapped_column(String(16), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
     signal: Mapped["Signal"] = relationship(back_populates="trades")
     legs: Mapped[list["Leg"]] = relationship(back_populates="trade")

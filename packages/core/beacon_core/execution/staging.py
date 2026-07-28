@@ -2,8 +2,14 @@
 
 Instead of resting a signal's whole fanout at once, deploy it in TRANCHES so a
 straight-to-SL move is caught on PARTIAL size while a genuine pullback-and-continue
-still gets full size. Same signal, same SL, same INTENDED total risk as a control
-account — only *when/if* each leg deploys changes.
+still gets full size. Same signal, same SL — only *when/if* each leg deploys changes.
+
+INTENDED TOTAL RISK vs a control account (#154): matched under
+`allocation="even"` (the budget is split across whatever legs exist), but NOT
+under `allocation="per_tp"` unless `per_tp_split_across_entries` is on. A zone
+signal makes the single-shot planner emit TWO legs per tp_index (one per zone
+edge) and per_tp charges each the full percent, while this module emits ONE leg
+per tp_index — so the control account stakes ~2x. See `risk/sizing.py`.
 
     EXECUTE(T1)  ->  MONITOR  ->  DECIDE(T2 / reclaim)  ->  EXECUTE
 
@@ -289,30 +295,52 @@ def _D(x):
 def build_staged_legs(*, direction: str, tps: list, near_edge, deep_edge, sl, atr,
                       current_price, cfg: dict, min_stop_distance=None,
                       market_hint: bool = False, chase_tolerance_r=0.25,
-                      chase_tolerance_atr=0.0) -> list:
+                      chase_tolerance_atr=0.0, beyond_tolerance: str = "limit",
+                      max_tp_distance_pct=None, candle_high=None,
+                      candle_low=None) -> list:
     """Partition the TP ladder into tranches and produce ONE PlannedLeg per TP tier,
     each tagged with its tranche + deploy level + order mode:
       toe_in  -> near edge; MARKET if price already crossed it, else LIMIT (deploy now)
       runner  -> deep edge; LIMIT (the monitor deploys it when price reaches deep)
       reclaim -> reclaim STOP trigger (deep edge +/- offset); STOP (monitor arms on break)
 
-    `market_hint` is the signal's "enter now" hint AND the account's
-    `honor_market_hint` (the caller ANDs them, as build_plan does). With it set, a
-    toe-in whose near edge price has NOT reached still deploys MARKET at the live
-    price — bounded by the SAME chase tolerance the baseline planner uses (#67), so
-    a staged account enters on the same signals, at the same time, as the control
-    account it is compared against (#151). Beyond the tolerance the toe-in rests a
-    LIMIT at the near edge as before (the staged path never applies
-    `beyond_tolerance="skip"` — resting is the conservative side and is what it
-    already did). Runner + reclaim staging are unaffected: they stay relative to
-    the zone.
+    ENTRY-GUARD PARITY WITH `build_plan`
+    ------------------------------------
+    A staged account is only comparable to a single-shot control account if both
+    take the SAME signals, drop the SAME legs, and treat "the market already got
+    there" the same way. Every guard below therefore mirrors `build_plan` exactly
+    and reuses its helpers rather than restating the geometry:
+
+      `market_hint`         the signal's "enter now" hint AND the account's
+                            `honor_market_hint` (the caller ANDs them, as
+                            build_plan does). Set -> a toe-in whose near edge price
+                            has NOT reached deploys MARKET at the live price,
+                            bounded by the chase tolerance (#67/#151).
+      `beyond_tolerance`    what a MARKET-hint entry beyond that tolerance does:
+                            "limit" (default) rests at the near edge; "skip" trades
+                            NOTHING — and because a staged trade with no toe-in is
+                            not the strategy under test, the runner and reclaim
+                            tranches are skipped with it (#155).
+      `candle_high/low`     the current candle's range. An entry the candle has
+                            already touched counts as reached even if price has
+                            since retraced, exactly as build_plan's crossed test
+                            (candle range UNION live price) (#153).
+      `max_tp_distance_pct` drops a TP an implausible distance from its deploy
+                            level — the parse-artifact guard (#152).
+
+    Runner + reclaim staging are otherwise unaffected: they stay relative to the
+    zone. NOTE on TTL: a tranche deployed later restarts the entry-TTL clock
+    (`monitor` resets `leg.created_at` on deploy), so a staged working order can
+    rest longer in wall-clock terms than a control one from the same signal. That
+    is deliberate — a runner legitimately deploys late — but it is NOT parity (#157).
 
     Pure; returns a list[PlannedLeg] UNSIZED (the caller runs risk.size_legs off each
     leg's `entry`). A leg whose geometry is broken (TP not beyond its deploy level,
     SL on the wrong side) is marked invalid with a reason, mirroring build_plan."""
-    # Reuse the baseline's exact chase geometry rather than restating it — A and C
-    # must agree on what "close enough to enter now" means or the arms diverge.
-    from .planner import PlannedLeg, _chase_gap, _chase_tolerance
+    # Reuse the baseline's exact chase/cross geometry rather than restating it — A
+    # and C must agree on what "close enough to enter now" means or the arms diverge.
+    from .planner import (PlannedLeg, _chase_gap, _chase_tolerance,
+                          _entry_crossed)
     part = partition_tps(tps, cfg)
     near, deep, slD = _D(near_edge), _D(deep_edge), _D(sl)
     # Point entry (near == deep): there is no distinct deep edge to rest a runner
@@ -329,6 +357,28 @@ def build_staged_legs(*, direction: str, tps: list, near_edge, deep_edge, sl, at
     off = (_D(cfg.get("stop_offset_atr") or 0) * atrD) if atrD else _D(0)
     reclaim_trig = deep + off if direction == "BUY" else deep - off
 
+    # --- toe-in mode, decided ONCE (it is the same for every toe-in leg) --------
+    # Mirrors build_plan: the candle range folded together with the live price
+    # decides "already reached" (#153); failing that, an "enter now" hint fills at
+    # the live price within the chase tolerance (#151).
+    highs = [x for x in (_D(candle_high) if candle_high is not None else None, priceD)
+             if x is not None]
+    lows = [x for x in (_D(candle_low) if candle_low is not None else None, priceD)
+            if x is not None]
+    crossed = _entry_crossed(direction, near,
+                             max(highs) if highs else None,
+                             min(lows) if lows else None)
+    chased = False
+    if priceD is not None and not crossed and market_hint:
+        chased = (_chase_gap(direction, priceD, near)
+                  <= _chase_tolerance(near, slD, atrD,
+                                      _D(chase_tolerance_r), _D(chase_tolerance_atr)))
+        # Beyond the tolerance with beyond_tolerance="skip" the control account
+        # trades nothing at all — so neither may the staged one, or the two arms
+        # stop taking the same signals (#155).
+        if not chased and str(beyond_tolerance) == "skip":
+            return []
+
     legs = []
     for i, tp in enumerate(tps or [], start=1):
         role = role_by_tp.get(i)
@@ -336,17 +386,12 @@ def build_staged_legs(*, direction: str, tps: list, near_edge, deep_edge, sl, at
             continue
         tpD = _D(tp)
         if role == TOE_IN:
-            entry, mode, trigger = near, "LIMIT", None
-            if priceD is not None:
-                crossed = priceD <= near if direction == "BUY" else priceD >= near
-                # "Enter now" signals fill at the live price even when it hasn't
-                # reached the near edge — within the chase tolerance (#151).
-                chased = (not crossed) and market_hint and (
-                    _chase_gap(direction, priceD, near)
-                    <= _chase_tolerance(near, slD, atrD,
-                                        _D(chase_tolerance_r), _D(chase_tolerance_atr)))
-                if crossed or chased:
-                    entry, mode = priceD, "MARKET"
+            # A crossed/chased toe-in fills at the LIVE price, not at the candle
+            # extreme that crossed it — same as build_plan's ("MARKET", current_price).
+            if (crossed or chased) and priceD is not None:
+                entry, mode, trigger = priceD, "MARKET", None
+            else:
+                entry, mode, trigger = near, "LIMIT", None
         elif role == RUNNER:
             entry, mode, trigger = deep, "LIMIT", None
         else:
@@ -361,6 +406,13 @@ def build_staged_legs(*, direction: str, tps: list, near_edge, deep_edge, sl, at
             leg.valid, leg.skip_reason = False, "tp already passed at deploy level"
         elif min_stop_distance is not None and abs(tpD - entry) < _D(min_stop_distance):
             leg.valid, leg.skip_reason = False, "tp within broker min distance"
+        elif (max_tp_distance_pct is not None and entry
+              and abs(tpD - entry) / abs(entry) > _D(max_tp_distance_pct)):
+            # A TP an implausible distance from entry (e.g. tp=1530 for gold near
+            # 4180) is a parse artifact, not a real target. Same guard, same reason
+            # string as build_plan — the two arms must drop the same legs (#152).
+            pct = int(abs(tpD - entry) / abs(entry) * 100)
+            leg.valid, leg.skip_reason = False, f"tp implausibly far ({pct}% from entry)"
         legs.append(leg)
     return legs
 

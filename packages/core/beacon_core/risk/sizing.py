@@ -9,6 +9,16 @@
               - "per_tp":  each leg risks equity * per_tp_percent[tp_index]/100
                            (mirrors tpN_capital_risk_percent from the old bot)
 
+`per_tp` and ZONE signals (#154): the single-shot planner fans a zone entry onto
+BOTH edges, so TWO legs carry the same tp_index and each takes the full per-TP
+percent — the signal's intended total is doubled. The confirmation-staged planner
+emits one leg per tp_index, so it is NOT doubled, and an A-vs-C comparison of the
+two entry styles is then comparing different stakes. `per_tp_split_across_entries`
+divides a tp_index's percent across the legs sharing it, making "risk X% on TP1"
+mean X% total. It defaults to FALSE — today's behaviour — because turning it on
+HALVES live risk on any account using `per_tp` with zone signals.
+
+
 lot = risk_cash / (|entry - sl| * value_per_point)
 
 value_per_point is money per 1.0 price move per 1.0 broker size, and MUST be
@@ -30,6 +40,10 @@ class RiskConfig:
     value: Decimal = Decimal("1.0")          # percent, or cash
     allocation: str = "even"                 # even | per_tp
     per_tp_percent: Dict[int, Decimal] = None  # {1: 4.0, 2: 2.0, ...}
+    # per_tp only (#154): divide a tp_index's percent across the legs sharing it
+    # (a zone signal fans onto both edges) so the per-TP percent is the TOTAL for
+    # that TP, not per-leg. False = today's behaviour; see the module docstring.
+    per_tp_split_across_entries: bool = False
 
     @classmethod
     def from_dict(cls, d: dict) -> "RiskConfig":
@@ -41,6 +55,7 @@ class RiskConfig:
             value=Decimal(str(d.get("value", "1.0"))),
             allocation=d.get("allocation", "even"),
             per_tp_percent=per_tp or None,
+            per_tp_split_across_entries=bool(d.get("per_tp_split_across_entries", False)),
         )
 
 
@@ -84,12 +99,22 @@ def size_legs(legs: List[PlannedLeg], *, equity: Decimal, risk: RiskConfig,
     else:  # capital_percent
         budget = (equity * risk.value / Decimal(100))
 
+    # How many legs share each tp_index (#154). A zone signal fans onto both edges,
+    # so a per_tp allocation would otherwise charge the TP's percent once per leg.
+    per_index_count: Dict[int, int] = {}
+    if risk.allocation == "per_tp" and risk.per_tp_split_across_entries:
+        for l in active:
+            per_index_count[l.tp_index] = per_index_count.get(l.tp_index, 0) + 1
+
     for leg in active:
         if risk.allocation == "per_tp" and risk.per_tp_percent:
             pct = risk.per_tp_percent.get(leg.tp_index)
             if pct is None:
                 pct = min(risk.per_tp_percent.values())  # unlisted TP: smallest
             risk_cash = equity * pct / Decimal(100)
+            share = per_index_count.get(leg.tp_index, 1)
+            if share > 1:
+                risk_cash = risk_cash / Decimal(share)
         else:
             risk_cash = budget / Decimal(n)
 
