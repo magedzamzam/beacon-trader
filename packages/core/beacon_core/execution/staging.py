@@ -287,17 +287,32 @@ def _D(x):
 
 
 def build_staged_legs(*, direction: str, tps: list, near_edge, deep_edge, sl, atr,
-                      current_price, cfg: dict, min_stop_distance=None) -> list:
+                      current_price, cfg: dict, min_stop_distance=None,
+                      market_hint: bool = False, chase_tolerance_r=0.25,
+                      chase_tolerance_atr=0.0) -> list:
     """Partition the TP ladder into tranches and produce ONE PlannedLeg per TP tier,
     each tagged with its tranche + deploy level + order mode:
       toe_in  -> near edge; MARKET if price already crossed it, else LIMIT (deploy now)
       runner  -> deep edge; LIMIT (the monitor deploys it when price reaches deep)
       reclaim -> reclaim STOP trigger (deep edge +/- offset); STOP (monitor arms on break)
 
+    `market_hint` is the signal's "enter now" hint AND the account's
+    `honor_market_hint` (the caller ANDs them, as build_plan does). With it set, a
+    toe-in whose near edge price has NOT reached still deploys MARKET at the live
+    price — bounded by the SAME chase tolerance the baseline planner uses (#67), so
+    a staged account enters on the same signals, at the same time, as the control
+    account it is compared against (#151). Beyond the tolerance the toe-in rests a
+    LIMIT at the near edge as before (the staged path never applies
+    `beyond_tolerance="skip"` — resting is the conservative side and is what it
+    already did). Runner + reclaim staging are unaffected: they stay relative to
+    the zone.
+
     Pure; returns a list[PlannedLeg] UNSIZED (the caller runs risk.size_legs off each
     leg's `entry`). A leg whose geometry is broken (TP not beyond its deploy level,
     SL on the wrong side) is marked invalid with a reason, mirroring build_plan."""
-    from .planner import PlannedLeg
+    # Reuse the baseline's exact chase geometry rather than restating it — A and C
+    # must agree on what "close enough to enter now" means or the arms diverge.
+    from .planner import PlannedLeg, _chase_gap, _chase_tolerance
     part = partition_tps(tps, cfg)
     near, deep, slD = _D(near_edge), _D(deep_edge), _D(sl)
     # Point entry (near == deep): there is no distinct deep edge to rest a runner
@@ -321,8 +336,17 @@ def build_staged_legs(*, direction: str, tps: list, near_edge, deep_edge, sl, at
             continue
         tpD = _D(tp)
         if role == TOE_IN:
-            crossed = priceD is not None and (priceD <= near if direction == "BUY" else priceD >= near)
-            entry, mode, trigger = (priceD if crossed else near), ("MARKET" if crossed else "LIMIT"), None
+            entry, mode, trigger = near, "LIMIT", None
+            if priceD is not None:
+                crossed = priceD <= near if direction == "BUY" else priceD >= near
+                # "Enter now" signals fill at the live price even when it hasn't
+                # reached the near edge — within the chase tolerance (#151).
+                chased = (not crossed) and market_hint and (
+                    _chase_gap(direction, priceD, near)
+                    <= _chase_tolerance(near, slD, atrD,
+                                        _D(chase_tolerance_r), _D(chase_tolerance_atr)))
+                if crossed or chased:
+                    entry, mode = priceD, "MARKET"
         elif role == RUNNER:
             entry, mode, trigger = deep, "LIMIT", None
         else:

@@ -404,13 +404,34 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                 log.info("signal %s acct %s: staged -> single-shot fallback (atr=%s stop=%s)",
                          sig.id, acct.id, _satr, _sl_dist)
             else:
+                # The MARKET/"enter now" hint applies to the toe-in too (#151):
+                # without it a staged account rests a LIMIT at the zone edge and
+                # misses a fill the control accounts take, biasing the comparison.
+                _market_hint = (bool(planner_cfg.get("honor_market_hint", True))
+                                and (parsed.order_type_hint or "").upper() == "MARKET")
                 plan = FanoutPlan(
                     symbol=parsed.symbol, direction=parsed.direction, order_type="LIMIT",
                     legs=STG.build_staged_legs(
                         direction=parsed.direction, tps=parsed.tps, near_edge=_near,
                         deep_edge=_deep, sl=parsed.sl, atr=_satr, current_price=current,
-                        cfg=staged_cfg, min_stop_distance=smap.min_stop_distance))
+                        cfg=staged_cfg, min_stop_distance=smap.min_stop_distance,
+                        market_hint=_market_hint,
+                        chase_tolerance_r=Decimal(str(planner_cfg.get("chase_tolerance_r", "0.25"))),
+                        chase_tolerance_atr=Decimal(str(planner_cfg.get("chase_tolerance_atr", "0")))))
                 staged_geo = {"near": _near, "deep": _deep, "atr": _satr, "cfg": staged_cfg}
+                # Audit the toe-in decision, mirroring the single-shot chase guard:
+                # a hint that still rested a LIMIT means the tolerance held it back.
+                if _market_hint:
+                    _toe = [l for l in plan.legs if l.tranche == STG.TOE_IN]
+                    _reached_near = (current <= Decimal(str(_near))
+                                     if parsed.direction == "BUY"
+                                     else current >= Decimal(str(_near)))
+                    session.add(Event(
+                        kind="staged_toe_in_hint",
+                        payload={"signal_id": sig.id, "account_id": acct.id,
+                                 "current_price": str(current), "near_edge": str(_near),
+                                 "mode": (_toe[0].order_type if _toe else None),
+                                 "reached_near": bool(_reached_near)}))
         if not is_staged:
             plan = build_plan(
                 parsed, current_price=current,

@@ -184,6 +184,78 @@ def test_build_staged_legs_zone_entry_still_has_runner():
     assert any(l.tranche == "runner" for l in legs)
 
 
+# ---- toe-in honours the MARKET / "enter now" hint (#151) ----
+def _sig784(**kw):
+    """Live sig784: SELL, hint=MARKET, zone 4045-4050, SL 4060, price BELOW the
+    zone (4043.4) — DemoA/B filled at market, DemoC rested a LIMIT@4045 and never
+    filled. near edge for a SELL is the LOW side (4045)."""
+    args = dict(direction="SELL", tps=[4035, 4030, 4025], near_edge=4045,
+                deep_edge=4050, sl=4060, atr=14, current_price=4043.4, cfg=D)
+    args.update(kw)
+    return S.build_staged_legs(**args)
+
+
+def test_toe_in_rests_a_limit_without_the_hint():
+    # Unchanged behaviour: no hint -> the toe-in still waits at the near edge.
+    toe = next(l for l in _sig784() if l.tranche == "toe_in")
+    assert toe.order_type == "LIMIT" and float(toe.entry) == 4045
+
+
+def test_toe_in_market_on_hint_when_price_is_outside_the_zone():
+    # #151: with the hint, DemoC enters at the live price like DemoA/B instead of
+    # resting a sell-limit above a falling market.
+    toe = next(l for l in _sig784(market_hint=True) if l.tranche == "toe_in")
+    assert toe.order_type == "MARKET" and float(toe.entry) == 4043.4
+    assert toe.valid
+
+
+def test_hint_does_not_disturb_runner_and_reclaim():
+    # Only the toe-in changes; the rest stays staged relative to the zone.
+    legs = _sig784(market_hint=True)
+    runner = next(l for l in legs if l.tranche == "runner")
+    rec = next(l for l in legs if l.tranche == "reclaim")
+    assert runner.order_type == "LIMIT" and float(runner.entry) == 4050
+    assert rec.order_type == "STOP" and float(rec.entry) == 4050 - 0.10 * 14
+
+
+def test_hint_is_bounded_by_the_chase_tolerance():
+    # 20 below a 4045 sell edge, tolerance = 0.25 x |4045-4060| = 3.75 -> too far
+    # to chase; rest at the edge exactly as the baseline planner would (#67).
+    toe = next(l for l in _sig784(current_price=4025, market_hint=True)
+               if l.tranche == "toe_in")
+    assert toe.order_type == "LIMIT" and float(toe.entry) == 4045
+
+
+def test_hint_market_is_not_a_chase_when_price_is_already_better():
+    # Price ABOVE a sell edge = at/better than the level: a market fill is not a
+    # chase, and this already went MARKET before the hint existed.
+    toe = next(l for l in _sig784(current_price=4047, market_hint=True)
+               if l.tranche == "toe_in")
+    assert toe.order_type == "MARKET" and float(toe.entry) == 4047
+
+
+def test_hint_buy_mirror():
+    legs = S.build_staged_legs(direction="BUY", tps=[4185, 4190, 4195], near_edge=4180,
+                               deep_edge=4176, sl=4168, atr=14, current_price=4182,
+                               cfg=D, market_hint=True)
+    toe = next(l for l in legs if l.tranche == "toe_in")
+    # 2 above a 4180 buy edge, tolerance 0.25 x 12 = 3 -> chase allowed
+    assert toe.order_type == "MARKET" and float(toe.entry) == 4182
+    far = S.build_staged_legs(direction="BUY", tps=[4185, 4190, 4195], near_edge=4180,
+                              deep_edge=4176, sl=4168, atr=14, current_price=4190,
+                              cfg=D, market_hint=True)
+    toe_far = next(l for l in far if l.tranche == "toe_in")
+    assert toe_far.order_type == "LIMIT" and float(toe_far.entry) == 4180
+
+
+def test_hint_atr_tolerance_widens_the_chase():
+    # chase_tolerance_atr is the other term (larger of the two wins): 0.5 x 14 = 7
+    # allows a chase the R-term (3.75) alone would have rested.
+    toe = next(l for l in _sig784(current_price=4040, market_hint=True,
+                                  chase_tolerance_atr=0.5) if l.tranche == "toe_in")
+    assert toe.order_type == "MARKET" and float(toe.entry) == 4040
+
+
 # ---- config validation (#129 Phase 1) ----
 def test_clean_entry_style():
     assert S.clean_entry_style("STAGED") == "staged"
