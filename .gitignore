@@ -15,3 +15,9 @@ build/
 
 # Local analysis scratchpad (never commit)
 scratchpad/
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+!.env.example
