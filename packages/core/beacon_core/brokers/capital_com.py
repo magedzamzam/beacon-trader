@@ -21,7 +21,7 @@ from .types import (
     OrderStatus, OrderType, PlaceOrderRequest, RateLimitError, to_dec,
 )
 from ..logging import get_logger
-from ..timeutil import parse_iso_utc
+from ..timeutil import parse_iso_utc, utcnow
 
 log = get_logger("capital")
 
@@ -42,6 +42,15 @@ def _map_status(capital_status: str) -> OrderStatus:
     if s in ("OPEN", "WORKING", "PENDING_OPEN"):
         return OrderStatus.WORKING
     return OrderStatus.PENDING
+
+
+def _order_created_at(order: BrokerOrder) -> Optional[dt.datetime]:
+    """Creation time of a working order, from its raw payload. Capital.com names
+    the field differently across endpoints — try the known spellings, same as
+    list_positions does. Returns None when nothing parses."""
+    wo = (order.raw or {}).get("workingOrderData") or {}
+    raw = wo.get("createdDateUTC") or wo.get("createdDate") or wo.get("createdDateTime")
+    return parse_iso_utc(raw)
 
 
 class CapitalComAdapter(BrokerAdapter):
@@ -208,6 +217,108 @@ class CapitalComAdapter(BrokerAdapter):
         except ValueError:
             return resp.text
 
+    # Capital.com sometimes hasn't materialised /confirms/{dealReference} by the
+    # time we poll it right after placing an order: the GET 404s for a moment and
+    # then starts answering. Treating that as a terminal reject cost individual
+    # legs across every account (#150), so poll a short bounded window first.
+    _CONFIRM_MAX_ATTEMPTS = 4
+    _CONFIRM_BACKOFF_BASE = 0.25   # seconds: 0.25, 0.5, 1 -> ~1.75s total
+
+    async def _get_confirm(self, deal_ref: str) -> dict:
+        """GET /confirms/{ref}, retrying a *transient* 404.
+
+        A 404 here is a timing artifact, not a rejection (unlike a 400
+        `error.validation.*`, which is a real refusal and still raises at once).
+        Raises NotFoundError only if the confirm never materialises."""
+        last: Optional[NotFoundError] = None
+        for attempt in range(self._CONFIRM_MAX_ATTEMPTS):
+            try:
+                return await self._request("GET", f"/api/v1/confirms/{deal_ref}")
+            except NotFoundError as exc:
+                last = exc
+                if attempt < self._CONFIRM_MAX_ATTEMPTS - 1:
+                    log.info("confirm_retry ref=%s attempt=%s/%s",
+                             deal_ref, attempt + 1, self._CONFIRM_MAX_ATTEMPTS)
+                    await asyncio.sleep(self._CONFIRM_BACKOFF_BASE * (2 ** attempt))
+        log.warning("confirm_unavailable ref=%s after %s attempts",
+                    deal_ref, self._CONFIRM_MAX_ATTEMPTS)
+        raise last  # type: ignore[misc]
+
+    async def _reconcile_placed(
+        self, req: PlaceOrderRequest, deal_ref: str, placed_after: dt.datetime,
+    ) -> Optional[BrokerOrder]:
+        """Last resort when a confirm never materialises: the deal may exist at
+        the broker anyway, and calling it 'rejected' would leave an unmonitored
+        position/order behind.
+
+        Capital.com does not echo `dealReference` on /positions or
+        /workingorders, so we can only match on epic + direction + size within
+        the window that starts when we sent the request. A fanout places several
+        same-epic, same-size legs seconds apart, so we adopt a candidate **only
+        when it is unambiguous** — 0 or >1 matches means we give up and let the
+        caller fail the leg, exactly as before."""
+        want_dir = req.side.value.upper()
+        cutoff = placed_after - dt.timedelta(seconds=1)   # small clock skew
+        try:
+            if req.order_type == OrderType.MARKET:
+                candidates = [
+                    p for p in await self.list_positions()
+                    if p.broker_symbol == req.broker_symbol
+                    and (p.direction == Direction.LONG) == (want_dir == "BUY")
+                    and p.quantity == req.quantity
+                    and p.opened_at is not None
+                    and p.opened_at.replace(tzinfo=dt.timezone.utc) >= cutoff
+                ]
+                if len(candidates) != 1:
+                    return None
+                p = candidates[0]
+                log.warning("confirm_reconciled ref=%s -> position %s (%s @ %s)",
+                            deal_ref, p.broker_position_ref, p.quantity,
+                            p.avg_open_price)
+                return BrokerOrder(
+                    broker_order_ref=p.broker_position_ref,
+                    broker_symbol=p.broker_symbol,
+                    side=req.side, order_type=req.order_type,
+                    quantity=p.quantity, limit_price=req.limit_price,
+                    stop_loss=p.stop_loss if p.stop_loss is not None else req.stop_loss,
+                    take_profit=p.take_profit if p.take_profit is not None else req.take_profit,
+                    status=OrderStatus.FILLED,
+                    fill_price=p.avg_open_price,
+                    fill_quantity=p.quantity,
+                    currency=p.currency,
+                    raw={"reconciled_from": deal_ref, "position": p.raw},
+                )
+
+            candidates = [
+                o for o in await self.list_orders()
+                if o.broker_symbol == req.broker_symbol
+                and o.side == req.side
+                and o.quantity == req.quantity
+                and (req.limit_price is None or o.limit_price == req.limit_price)
+                and (_order_created_at(o) or dt.datetime.min.replace(
+                    tzinfo=dt.timezone.utc)) >= cutoff
+            ]
+            if len(candidates) != 1:
+                return None
+            o = candidates[0]
+            log.warning("confirm_reconciled ref=%s -> working order %s",
+                        deal_ref, o.broker_order_ref)
+            return BrokerOrder(
+                broker_order_ref=o.broker_order_ref,
+                broker_symbol=o.broker_symbol,
+                side=req.side, order_type=req.order_type,
+                quantity=o.quantity, limit_price=o.limit_price,
+                stop_loss=o.stop_loss if o.stop_loss is not None else req.stop_loss,
+                take_profit=o.take_profit if o.take_profit is not None else req.take_profit,
+                status=OrderStatus.WORKING,
+                currency=o.currency,
+                raw={"reconciled_from": deal_ref, "order": o.raw},
+            )
+        except BrokerError as exc:
+            # Reconciliation is best-effort; never mask the original 404.
+            log.warning("confirm_reconcile failed ref=%s: %s", deal_ref, exc)
+            return None
+
     async def healthcheck(self) -> dict:
         _t0 = time.monotonic()
         try:
@@ -322,6 +433,7 @@ class CapitalComAdapter(BrokerAdapter):
         return out
 
     async def place_order(self, req: PlaceOrderRequest) -> BrokerOrder:
+        placed_at = utcnow()
         if req.order_type == OrderType.MARKET:
             payload = {"epic": req.broker_symbol, "direction": req.side.value, "size": float(req.quantity)}
             if req.stop_loss is not None: payload["stopLevel"] = float(req.stop_loss)
@@ -354,7 +466,16 @@ class CapitalComAdapter(BrokerAdapter):
         if not deal_ref:
             raise BrokerError(f"Capital.com place_order missing dealReference: {data}")
 
-        confirm = await self._request("GET", f"/api/v1/confirms/{deal_ref}")
+        try:
+            confirm = await self._get_confirm(deal_ref)
+        except NotFoundError:
+            # The confirm never showed up. The deal may still exist at the broker,
+            # and failing the leg here would strand it unmonitored — try to adopt
+            # it, and only re-raise if we can't identify it unambiguously (#150).
+            recovered = await self._reconcile_placed(req, deal_ref, placed_at)
+            if recovered is not None:
+                return recovered
+            raise
 
         # dealStatus is the authority on accept/reject (ACCEPTED | REJECTED).
         # `status` is the resulting deal state (OPEN/…) and must NOT be used to
@@ -416,7 +537,7 @@ class CapitalComAdapter(BrokerAdapter):
             ref = data.get("dealReference")
             if not ref:
                 return False
-            confirm = await self._request("GET", f"/api/v1/confirms/{ref}")
+            confirm = await self._get_confirm(ref)
             return _map_status(confirm.get("status")) == OrderStatus.CANCELLED
         except NotFoundError:
             return False
@@ -506,7 +627,7 @@ class CapitalComAdapter(BrokerAdapter):
                 raw=data,
             )
         try:
-            confirm = await self._request("GET", f"/api/v1/confirms/{deal_ref}")
+            confirm = await self._get_confirm(deal_ref)
         except NotFoundError:
             confirm = {}
         ok = _map_status(confirm.get("status") or confirm.get("dealStatus")) in (
@@ -556,7 +677,7 @@ class CapitalComAdapter(BrokerAdapter):
         if not deal_ref:
             raise BrokerError(f"Capital.com modify_order missing dealReference: {result}")
         try:
-            confirm = await self._request("GET", f"/api/v1/confirms/{deal_ref}")
+            confirm = await self._get_confirm(deal_ref)
         except NotFoundError:
             confirm = {}
         side_str = (target.get("direction") or "BUY").upper()
