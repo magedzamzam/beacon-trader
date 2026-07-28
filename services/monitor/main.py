@@ -287,8 +287,13 @@ async def _drive_staged(session, trade, adapter, smap, mid, ttl_min) -> None:
         if decision.action != STG.DEPLOY:
             continue
         # DEPLOY: place the frozen legs as LIMIT (runner) or STOP (reclaim).
+        # The resting window is deliberate, not inherited (#158): deployed_ttl_minutes
+        # when configured, else the resolved entry TTL — i.e. today's behaviour.
+        # Still clamped to the global [MIN, MAX] entry-TTL bounds like any other TTL
+        # (ttl_min is already clamped by _rules_for, so this only bounds the override).
         good_till = utcnow() + timedelta(
-            minutes=effective_entry_ttl_min({"entry_ttl_minutes": ttl_min}))
+            minutes=effective_entry_ttl_min(
+                {"entry_ttl_minutes": STG.deployed_ttl_minutes(cfg, ttl_min)}))
         side_buy = direction == "BUY"
         # #140: the runner deploys MARKET once price has reached the deep edge (a
         # LIMIT resting there would be a limit-at-market and get rejected). STOP is
@@ -381,6 +386,25 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
         # placed it (Capital.com's position.workingOrderId == our order dealId).
         pos_by_wo = {p.working_order_ref: p for p in positions.values() if p.working_order_ref}
         rules, strat, ttl_min, initial_sl = await _rules_for(session, trade)
+        # Staged TTL context (#158). A tranche deployed by the monitor restarts its
+        # legs' TTL clock, so those legs answer to `deployed_ttl_minutes` rather
+        # than the signal-time entry TTL, and the whole entry answers to the
+        # absolute `max_entry_age_minutes` ceiling. Loaded once per tick, only for
+        # staged trades. Pre-#156 trades have entry_style NULL: they fall back to
+        # the old behaviour once their tranches settle, which is what they did
+        # before — and both knobs default to it anyway.
+        staged_ttl_cfg, late_leg_ids = None, set()
+        if trade.entry_style == "staged" or staged_pending:
+            _se = (await session.execute(select(StagedEntry).where(
+                StagedEntry.trade_id == trade.id))).scalar_one_or_none()
+            if _se is not None:
+                staged_ttl_cfg = STG.staged_config(_se.cfg)
+                # toe-in is placed by the executor at signal time and keeps the
+                # ordinary TTL; only the monitor-deployed tranches reset the clock.
+                for _tr in (await session.execute(select(StagedTranche).where(
+                        StagedTranche.trade_id == trade.id,
+                        StagedTranche.role != STG.TOE_IN))).scalars().all():
+                    late_leg_ids.update(_tr.leg_ids or [])
         # TP price map across ALL legs of the trade, so (a) a ratchet rule that
         # references a TP whose legs already closed still resolves its level, and
         # (b) hit-DETECTION runs off the FULL ladder — a TP consumed as a staged
@@ -651,20 +675,34 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
             if leg.status == "working":
                 # Still resting on the book -> only TTL can act on it.
                 if leg.broker_order_ref in orders:
-                    if ttl_min and ttl_min > 0:
-                        age = (utcnow() - leg.created_at).total_seconds() / 60.0
-                        if age > ttl_min:
-                            # Never expire something that actually filled+closed.
-                            if not await _close_leg(leg, await _transactions(), require_txn=True):
-                                try:
-                                    await adapter.cancel_order(leg.broker_order_ref)
-                                except Exception:
-                                    pass
-                                leg.status = "expired"
-                                leg.outcome = "expired"
-                                leg.closed_at = utcnow()
-                                session.add(Event(trade_id=trade.id, leg_id=leg.id,
-                                                  kind="expired", payload={"age_min": age}))
+                    # A monitor-deployed tranche rests for `deployed_ttl_minutes`
+                    # measured from ITS deploy; everything else uses the signal-time
+                    # entry TTL. The absolute ceiling is measured from the signal
+                    # and overrides both (#158).
+                    age = (utcnow() - leg.created_at).total_seconds() / 60.0
+                    if staged_ttl_cfg is not None:
+                        _why = STG.entry_expiry_reason(
+                            staged_ttl_cfg, leg_age_minutes=age,
+                            entry_age_minutes=(utcnow() - trade.created_at
+                                               ).total_seconds() / 60.0,
+                            entry_ttl_minutes=ttl_min,
+                            deployed=leg.id in late_leg_ids)
+                    else:
+                        _why = ("leg_ttl" if (ttl_min and ttl_min > 0 and age > ttl_min)
+                                else None)
+                    if _why:
+                        # Never expire something that actually filled+closed.
+                        if not await _close_leg(leg, await _transactions(), require_txn=True):
+                            try:
+                                await adapter.cancel_order(leg.broker_order_ref)
+                            except Exception:
+                                pass
+                            leg.status = "expired"
+                            leg.outcome = "expired"
+                            leg.closed_at = utcnow()
+                            session.add(Event(trade_id=trade.id, leg_id=leg.id,
+                                              kind="expired",
+                                              payload={"age_min": age, "reason": _why}))
                     continue
 
                 # Left the order book: it became a position (fill), filled+closed

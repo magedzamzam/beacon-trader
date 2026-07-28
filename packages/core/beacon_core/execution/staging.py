@@ -95,6 +95,14 @@ DEFAULT_STAGED = {
     "runner_ttl_minutes": 45,       # give up waiting for the deep-edge touch (< the 60 entry TTL)
     "reclaim_pending_ttl_minutes": 60,   # give up waiting for a break beyond deep
     "reclaim_armed_ttl_minutes": 60,     # give up waiting for the reclaim fill
+    # --- how long a tranche's order may REST once deployed, and the absolute age
+    #     of the whole staged entry (#158). A tranche deploys late by design, and
+    #     its legs get a fresh TTL clock from that moment — so an unfilled staged
+    #     order can outlive a control account's by the pending wait. These two make
+    #     that window deliberate instead of inherited:
+    "deployed_ttl_minutes": 0,      # 0 = inherit the resolved entry TTL (today's behaviour)
+    "max_entry_age_minutes": 0,     # 0 = off; hard ceiling measured from the SIGNAL,
+                                    # expires any still-working staged leg past it
     # --- guardrail: below this the stop is too tight to stage a break around;
     #     the caller falls back to a single-shot entry. ---
     "min_stop_atr": 0.5,
@@ -112,6 +120,7 @@ _STAGED_SPEC = {
     "stop_offset_atr": "float+",
     "runner_ttl_minutes": "int+", "reclaim_pending_ttl_minutes": "int+",
     "reclaim_armed_ttl_minutes": "int+", "min_stop_atr": "float+",
+    "deployed_ttl_minutes": "int+", "max_entry_age_minutes": "int+",
 }
 
 
@@ -233,6 +242,57 @@ def break_distance(cfg: dict, atr: Optional[float],
     return base
 
 
+def deployed_ttl_minutes(cfg: dict, entry_ttl_minutes) -> int:
+    """How long a tranche's order may REST at the broker once deployed (#158).
+
+    A tranche deploys late by design, and its legs start a FRESH TTL clock at that
+    moment — so with the default 60-minute entry TTL an unfilled runner (up to 45
+    pending) can rest until ~T+105 and an armed reclaim until ~T+120, where the
+    control account's LIMIT from the same signal is gone at T+60. Configuring this
+    makes that window a choice; 0 keeps inheriting the entry TTL, i.e. exactly the
+    behaviour that shipped with #129."""
+    try:
+        v = int(cfg.get("deployed_ttl_minutes") or 0)
+    except (TypeError, ValueError):
+        v = 0
+    return v if v > 0 else int(entry_ttl_minutes)
+
+
+def entry_age_exceeded(cfg: dict, minutes_since_signal: float) -> bool:
+    """True when a staged entry has outlived `max_entry_age_minutes`, measured from
+    the SIGNAL rather than from each leg's placement (#158). This is the absolute
+    ceiling: it bounds the total age of a staged entry no matter how late a tranche
+    deployed or how its own TTL was reset. 0/unset = off (the default), so it never
+    cancels anything until the operator asks for it."""
+    try:
+        v = int(cfg.get("max_entry_age_minutes") or 0)
+    except (TypeError, ValueError):
+        v = 0
+    return v > 0 and minutes_since_signal > v
+
+
+def entry_expiry_reason(cfg: dict, *, leg_age_minutes: float,
+                        entry_age_minutes: float, entry_ttl_minutes,
+                        deployed: bool) -> Optional[str]:
+    """Why a still-working staged leg must be cancelled NOW, or None to let it rest.
+
+      "max_entry_age"  the whole entry has outlived the absolute ceiling
+      "leg_ttl"        this leg has outlived its own TTL
+
+    The ceiling is checked FIRST and wins: it exists precisely to bound an entry
+    whose leg-level clock was reset by a late deploy, so a leg-TTL that has not
+    elapsed must not keep it alive. `deployed` marks a leg placed by a tranche
+    deploy (fresh clock -> `deployed_ttl_minutes`); everything else answers to the
+    signal-time entry TTL. Pure so the precedence is unit-testable (#158)."""
+    if entry_age_exceeded(cfg, entry_age_minutes):
+        return "max_entry_age"
+    ttl = (deployed_ttl_minutes(cfg, entry_ttl_minutes) if deployed
+           else int(entry_ttl_minutes or 0))
+    if ttl > 0 and leg_age_minutes > ttl:
+        return "leg_ttl"
+    return None
+
+
 def stop_too_tight(sl_dist: float, atr: Optional[float], cfg: dict) -> bool:
     """True when |entry-SL| is below `min_stop_atr` ATRs — too tight to bother
     staging a break-then-reclaim around (the caller falls back to a plain entry)."""
@@ -329,10 +389,15 @@ def build_staged_legs(*, direction: str, tps: list, near_edge, deep_edge, sl, at
                             level — the parse-artifact guard (#152).
 
     Runner + reclaim staging are otherwise unaffected: they stay relative to the
-    zone. NOTE on TTL: a tranche deployed later restarts the entry-TTL clock
-    (`monitor` resets `leg.created_at` on deploy), so a staged working order can
-    rest longer in wall-clock terms than a control one from the same signal. That
-    is deliberate — a runner legitimately deploys late — but it is NOT parity (#157).
+    zone.
+
+    TTL semantics across the two arms (#157/#158): a single-shot LIMIT expires
+    `entry_ttl_minutes` after PLACEMENT. A staged tranche deploys late by design
+    and its legs start a fresh clock then, so a staged order rests longer in
+    wall-clock terms. That window is now explicit — `deployed_ttl_minutes` sets
+    it (0 = inherit the entry TTL, the shipped behaviour) and
+    `max_entry_age_minutes` caps the total age of the entry measured from the
+    SIGNAL (0 = off). See `deployed_ttl_minutes()` / `entry_age_exceeded()`.
 
     Pure; returns a list[PlannedLeg] UNSIZED (the caller runs risk.size_legs off each
     leg's `entry`). A leg whose geometry is broken (TP not beyond its deploy level,

@@ -256,6 +256,83 @@ def test_hint_atr_tolerance_widens_the_chase():
     assert toe.order_type == "MARKET" and float(toe.entry) == 4040
 
 
+# ---- entry-TTL window: deployed TTL + absolute ceiling (#158) ----
+def test_deployed_ttl_defaults_to_the_entry_ttl():
+    # 0/unset = inherit, i.e. the behaviour that shipped with #129.
+    assert S.deployed_ttl_minutes(D, 60) == 60
+    assert S.deployed_ttl_minutes({"deployed_ttl_minutes": 0}, 45) == 45
+    assert S.deployed_ttl_minutes({}, 90) == 90
+
+
+def test_deployed_ttl_overrides_when_set():
+    assert S.deployed_ttl_minutes({"deployed_ttl_minutes": 15}, 60) == 15
+    assert S.deployed_ttl_minutes({"deployed_ttl_minutes": "20"}, 60) == 20
+    assert S.deployed_ttl_minutes({"deployed_ttl_minutes": "junk"}, 60) == 60   # fail-safe
+
+
+def test_entry_age_ceiling_is_off_by_default():
+    assert S.entry_age_exceeded(D, 10_000) is False
+    assert S.entry_age_exceeded({"max_entry_age_minutes": 0}, 10_000) is False
+
+
+def test_entry_age_ceiling_fires_past_the_limit():
+    cfg = {"max_entry_age_minutes": 90}
+    assert S.entry_age_exceeded(cfg, 89) is False
+    assert S.entry_age_exceeded(cfg, 90) is False        # strictly past it
+    assert S.entry_age_exceeded(cfg, 91) is True
+
+
+def _expiry(cfg, leg_age, entry_age, deployed, entry_ttl=60):
+    return S.entry_expiry_reason(cfg, leg_age_minutes=leg_age,
+                                 entry_age_minutes=entry_age,
+                                 entry_ttl_minutes=entry_ttl, deployed=deployed)
+
+
+def test_expiry_default_config_reproduces_todays_behaviour():
+    # A runner deployed at T+45 rests a fresh 60 -> alive at T+104, gone past its own TTL.
+    assert _expiry(D, leg_age=59, entry_age=104, deployed=True) is None
+    assert _expiry(D, leg_age=61, entry_age=106, deployed=True) == "leg_ttl"
+    # A toe-in placed at signal time answers to the entry TTL, not the deployed one.
+    assert _expiry(D, leg_age=61, entry_age=61, deployed=False) == "leg_ttl"
+
+
+def test_expiry_deployed_ttl_shortens_the_resting_window():
+    cfg = dict(D, deployed_ttl_minutes=15)
+    assert _expiry(cfg, leg_age=16, entry_age=61, deployed=True) == "leg_ttl"
+    # ...and leaves a signal-time leg alone: it is not a deployed one.
+    assert _expiry(cfg, leg_age=16, entry_age=16, deployed=False) is None
+
+
+def test_expiry_ceiling_wins_over_a_leg_ttl_that_has_not_elapsed():
+    # The whole point: a late deploy reset the leg clock, so only the absolute
+    # ceiling can bound the entry.
+    cfg = dict(D, max_entry_age_minutes=90)
+    assert _expiry(cfg, leg_age=5, entry_age=120, deployed=True) == "max_entry_age"
+    assert _expiry(cfg, leg_age=5, entry_age=60, deployed=True) is None
+
+
+def test_expiry_ceiling_applies_to_the_toe_in_too():
+    cfg = dict(D, max_entry_age_minutes=30)
+    assert _expiry(cfg, leg_age=10, entry_age=31, deployed=False) == "max_entry_age"
+
+
+def test_expiry_reports_the_ceiling_when_both_would_fire():
+    cfg = dict(D, max_entry_age_minutes=90, deployed_ttl_minutes=15)
+    assert _expiry(cfg, leg_age=999, entry_age=999, deployed=True) == "max_entry_age"
+
+
+def test_clean_staged_config_accepts_the_new_ttl_keys():
+    out = S.clean_staged_config({"deployed_ttl_minutes": "15",
+                                 "max_entry_age_minutes": 90})
+    assert out == {"deployed_ttl_minutes": 15, "max_entry_age_minutes": 90}
+    for bad in ({"deployed_ttl_minutes": -1}, {"max_entry_age_minutes": "abc"}):
+        try:
+            S.clean_staged_config(bad)
+            assert False, f"expected reject for {bad}"
+        except ValueError:
+            pass
+
+
 # ---- config validation (#129 Phase 1) ----
 def test_clean_entry_style():
     assert S.clean_entry_style("STAGED") == "staged"
