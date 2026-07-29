@@ -166,6 +166,46 @@ def test_persistent_404_adopts_an_unambiguous_working_order():
     assert order.broker_order_ref == "wo1"
 
 
+def test_accepted_confirm_without_a_level_reports_an_unknown_fill():
+    # ACCEPTED but no `level`: the fill happened, we just don't know where. It
+    # must surface as None so the leg persists NULL and the entry/R basis falls
+    # back to the planned entry (#159).
+    a, _ = _adapter([{"dealStatus": "ACCEPTED", "dealId": "d1", "size": "0.5",
+                      "affectedDeals": [{"dealId": "pos1", "status": "OPENED"}]}])
+    order = _run(lambda: a.place_order(_market_req()))
+    assert order.status == OrderStatus.FILLED
+    assert order.fill_price is None
+
+
+def test_accepted_confirm_with_a_zero_level_is_not_a_fill_at_zero():
+    # THE #159 root cause: `to_dec("0")` handed back Decimal("0"), which got
+    # written to Leg.fill_price and then poisoned PositionCtx.entry.
+    for level in ("0", "0.000000", 0, 0.0):
+        a, _ = _adapter([{**_ACCEPTED, "level": level}])
+        order = _run(lambda: a.place_order(_market_req()))
+        assert order.status == OrderStatus.FILLED
+        assert order.fill_price is None, f"level={level!r} leaked a 0 fill"
+
+
+def test_a_zero_position_level_reports_no_open_price():
+    # Same guard on the reconciliation path — the monitor backfills
+    # Leg.fill_price from avg_open_price, so a 0 there is equally poisonous.
+    from beacon_core.brokers.capital_com import CapitalComAdapter as _A
+
+    a = _A(credentials={"api_key": "k", "account_username": "u",
+                        "account_password": "p"})
+
+    async def fake_request(method, path, json=None, params=None, _retry_on_401=True):
+        return {"positions": [{
+            "position": {"dealId": "pos1", "size": "0.5", "level": "0",
+                         "direction": "BUY"},
+            "market": {"epic": "GOLD", "bid": "4043", "offer": "4043.5"}}]}
+
+    a._request = fake_request
+    positions = _run(lambda: a.list_positions())
+    assert positions[0].avg_open_price is None
+
+
 def test_persistent_404_ignores_a_working_order_with_no_timestamp():
     # Without a creation time we cannot place it in our window — an older,
     # already-tracked order would otherwise be adopted twice.

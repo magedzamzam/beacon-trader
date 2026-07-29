@@ -32,8 +32,8 @@ from beacon_core.execution import staging as STG
 from beacon_core.brokers import build_adapter, symbol_map
 from beacon_core.brokers.types import (AuthError, ModifyPositionRequest, OrderSide,
                                        OrderStatus, OrderType, PlaceOrderRequest)
-from beacon_core.strategy.rules import (PositionCtx, evaluate, levels_reached,
-                                        next_mfe, DEFAULT_SL_RULES)
+from beacon_core.strategy.rules import (PositionCtx, entry_basis, evaluate,
+                                        levels_reached, next_mfe, DEFAULT_SL_RULES)
 from beacon_core.settings_store import get_setting, set_setting
 from beacon_core.analysis import structure as S
 from beacon_core.analysis import structure_map as struct_map
@@ -326,7 +326,15 @@ async def _drive_staged(session, trade, adapter, smap, mid, ttl_min) -> None:
                         # that never exists.
                         leg.broker_position_ref = res.broker_order_ref
                         leg.status = "open" if res.status == OrderStatus.FILLED else "pending"
-                        leg.fill_price = res.fill_price
+                        # Never persist a 0 fill — leave it NULL so the entry/R
+                        # basis falls back to leg.entry and the ratchet still
+                        # works; the next tick backfills it from the position (#159).
+                        leg.fill_price = res.fill_price or None
+                        if leg.fill_price is None and res.status == OrderStatus.FILLED:
+                            session.add(Event(trade_id=trade.id, leg_id=leg.id,
+                                              kind="fill_price_unknown",
+                                              payload={"ref": res.broker_order_ref,
+                                                       "tranche": tr.role}))
                     else:
                         leg.broker_order_ref = res.broker_order_ref
                         leg.status = "working"
@@ -545,7 +553,7 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
             such a transaction exists — used to tell a genuine fill+close apart
             from a cancelled/expired working order."""
             tp = Decimal(str(leg.tp)); sl = Decimal(str(leg.sl))
-            entry_px = Decimal(str(leg.fill_price if leg.fill_price is not None else leg.entry))
+            entry_px = entry_basis(leg.fill_price, leg.entry)   # 0 == unknown (#159)
             tol = Decimal(str(smap.min_stop_distance or "0")) or (abs(tp) * Decimal("0.001"))
             lot = Decimal(str(leg.lot))
 
@@ -712,8 +720,8 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                 if pos is not None:
                     leg.broker_position_ref = pos.broker_position_ref
                     leg.status = "open"
-                    if pos.avg_open_price is not None and leg.fill_price is None:
-                        leg.fill_price = pos.avg_open_price
+                    if pos.avg_open_price is not None and not leg.fill_price:
+                        leg.fill_price = pos.avg_open_price     # also repairs a stored 0 (#159)
                     linked_refs.add(pos.broker_position_ref)
                     via = "workingOrderId" if pos.working_order_ref == leg.broker_order_ref else "heuristic"
                     session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="filled",
@@ -746,9 +754,19 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                 continue
             if leg.broker_position_ref not in positions:
                 continue
+            # Self-heal an unknown fill: the broker's open level is authoritative
+            # and we re-read it every tick anyway. Covers a MARKET leg whose
+            # confirm came back without a level, and legs written before #159.
+            _pos = positions[leg.broker_position_ref]
+            if not leg.fill_price and _pos.avg_open_price is not None:
+                leg.fill_price = _pos.avg_open_price
+                session.add(Event(trade_id=trade.id, leg_id=leg.id,
+                                  kind="fill_price_backfilled",
+                                  payload={"fill_price": str(_pos.avg_open_price),
+                                           "position": leg.broker_position_ref}))
             ctx = PositionCtx(
                 side=trade.direction,
-                entry=Decimal(str(leg.fill_price if leg.fill_price is not None else leg.entry)),
+                entry=entry_basis(leg.fill_price, leg.entry),   # 0 == unknown (#159)
                 current_sl=Decimal(str(leg.sl)), current_price=price, tps=tp_levels,
                 initial_sl=initial_sl)          # immutable original stop -> R for be_lock_at_r (#109)
             new_sl = evaluate(ctx, rules, effective_tps_hit)

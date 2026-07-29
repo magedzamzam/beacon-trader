@@ -193,3 +193,49 @@ def test_mfe_latches_retraced_tp_for_staged_runner():
     runner = PositionCtx(side="BUY", entry=D("4069"), current_sl=D("4052"),
                          current_price=D("4076"), tps=_LADDER)
     assert evaluate(runner, rules, levels_reached("BUY", mfe, _LADDER)) == D("4069")
+
+
+# ---- entry_basis: a 0 fill_price is UNKNOWN, not a fill at zero (#159) --------
+from beacon_core.strategy.rules import entry_basis
+
+
+def test_entry_basis_prefers_a_real_fill():
+    assert entry_basis(D("4031.64"), D("4030")) == D("4031.64")
+
+
+def test_entry_basis_falls_back_when_fill_is_unknown():
+    # NULL (never reconciled) and 0 (broker sent no level) mean the same thing.
+    assert entry_basis(None, D("4030")) == D("4030")
+    assert entry_basis(D("0"), D("4030")) == D("4030")
+    assert entry_basis(D("0.000000"), D("4030")) == D("4030")
+    assert entry_basis(D("-1"), D("4030")) == D("4030")
+
+
+def test_entry_basis_accepts_non_decimal_inputs():
+    # Both come off SQLAlchemy NUMERIC columns; tolerate str/float like the
+    # Decimal(str(...)) calls it replaced.
+    assert entry_basis(0.0, "4030") == D("4030")
+    assert entry_basis("4031.5", "4030") == D("4031.5")
+
+
+def test_zero_fill_price_still_ratchets_to_breakeven():
+    # THE #159 regression: sig811 acct8's tp3 leg was persisted with
+    # fill_price=0, so entry resolved to 0, `move_sl_to: entry` targeted 0 —
+    # not an improving stop for a BUY — and the leg rode its original 4018 stop
+    # while its sibling accounts ratcheted to ~4031. Off leg.entry it moves.
+    ctx = PositionCtx(side="BUY", entry=entry_basis(D("0"), D("4030")),
+                      current_sl=D("4018"), current_price=D("4036"),
+                      tps={1: D("4035"), 2: D("4040"), 3: D("4050")})
+    assert ctx.entry == D("4030")
+    assert evaluate(ctx, DEFAULT_SL_RULES, {1}) == D("4030")
+
+
+def test_zero_fill_price_does_not_break_be_lock_at_r():
+    # R = |entry - initial_sl| would be a nonsense 4018 off a 0 entry, so the
+    # trigger could never fire; off the planned entry R is the real 12 points.
+    rules = [{"trigger": {"type": "be_lock_at_r", "r": 0.6},
+              "action": {"type": "move_sl_to", "target": "entry"}}]
+    ctx = PositionCtx(side="BUY", entry=entry_basis(D("0"), D("4030")),
+                      current_sl=D("4018"), current_price=D("4038"),
+                      tps={1: D("4035")}, initial_sl=D("4018"))
+    assert evaluate(ctx, rules) == D("4030")

@@ -52,6 +52,23 @@ class PositionCtx:
     initial_sl: Optional[Decimal] = None   # #109
 
 
+def entry_basis(fill_price, planned_entry) -> Decimal:
+    """The entry price to build `PositionCtx.entry` (and any R / P&L basis) from.
+
+    The actual fill wins when we know it; otherwise we fall back to the planned
+    entry. "Otherwise" has to include a **non-positive** fill_price, not just
+    NULL: a leg persisted with `fill_price = 0` used to pass the `is not None`
+    check and set `entry = 0`, so `move_sl_to: entry` targeted 0 — never an
+    improving stop — and the ratchet silently no-opped, leaving the leg on its
+    original stop with no breakeven protection (#159). A price of 0 means
+    unknown; treat it exactly like NULL."""
+    if fill_price is not None:
+        fp = Decimal(str(fill_price))
+        if fp > 0:
+            return fp
+    return Decimal(str(planned_entry))
+
+
 def _triggered(trigger: dict, ctx: PositionCtx, tps_hit: Set[int]) -> bool:
     t = trigger.get("type")
     if t == "tp_hit":

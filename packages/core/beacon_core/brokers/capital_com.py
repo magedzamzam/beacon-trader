@@ -18,7 +18,7 @@ from .types import (
     AccountInfo, AuthError, BrokerError, BrokerInstrument, BrokerOrder,
     BrokerPosition, BrokerQuote, ClosePositionResult, Direction, ModifyOrderRequest,
     ModifyPositionRequest, NetworkError, NotFoundError, OrderSide,
-    OrderStatus, OrderType, PlaceOrderRequest, RateLimitError, to_dec,
+    OrderStatus, OrderType, PlaceOrderRequest, RateLimitError, to_dec, to_price,
 )
 from ..logging import get_logger
 from ..timeutil import parse_iso_utc, utcnow
@@ -393,7 +393,9 @@ class CapitalComAdapter(BrokerAdapter):
                 broker_symbol=str(mkt.get("epic") or pos.get("epic") or ""),
                 broker_position_ref=str(pos.get("dealId") or ""),
                 quantity=to_dec(pos.get("size")) or Decimal("0"),
-                avg_open_price=to_dec(pos.get("level")),
+                # `to_price`, not `to_dec`: a 0 open level means the broker did
+                # not tell us where it filled — surface that as None (#159).
+                avg_open_price=to_price(pos.get("level")),
                 current_price=to_dec(mkt.get("bid") if direction == "BUY" else mkt.get("offer")),
                 unrealized_pl=to_dec(pos.get("upl") or pos.get("profit")),
                 unrealized_pl_pct=None,
@@ -507,7 +509,10 @@ class CapitalComAdapter(BrokerAdapter):
             )
             ref = str(opened or confirm.get("dealId") or deal_ref)
             status = OrderStatus.FILLED
-            fill_price = to_dec(confirm.get("level"))
+            # A confirm can come back ACCEPTED with a missing or 0 `level`. That
+            # is an unknown fill, NOT a fill at zero — persisting the 0 poisons
+            # the entry/R basis and kills the SL ratchet (#159).
+            fill_price = to_price(confirm.get("level"))
             fill_qty = to_dec(confirm.get("size")) or req.quantity
         else:
             # A resting working order: its dealId is what GET /workingorders lists.

@@ -65,6 +65,20 @@ def to_dec(v: Any) -> Optional[Decimal]:
         return None
 
 
+def to_price(v: Any) -> Optional[Decimal]:
+    """Coerce a broker *price* level, treating a non-positive one as UNKNOWN.
+
+    A fill/open level of `0` is never a real price — the broker omitted it or
+    sent a placeholder. Letting that 0 through gets persisted as `Leg.fill_price`
+    and then poisons every entry/R computation downstream: `move_sl_to: entry`
+    resolves to 0, which is not an improving stop, so the ratchet silently
+    no-ops and the leg rides its original stop with no breakeven protection
+    (#159). `None` means "fill level unknown" and every consumer already falls
+    back to the planned entry, so map 0/negative onto that."""
+    d = to_dec(v)
+    return d if d is not None and d > 0 else None
+
+
 # ---- value objects --------------------------------------------------------
 @dataclass
 class AccountInfo:

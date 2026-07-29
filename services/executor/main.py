@@ -845,7 +845,15 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                     if pleg.order_type == "MARKET":
                         leg.broker_position_ref = res.broker_order_ref
                         leg.status = "open" if res.status == OrderStatus.FILLED else "pending"
-                        leg.fill_price = res.fill_price
+                        # A 0 fill level is an UNKNOWN fill, not a fill at zero.
+                        # Persist NULL so the entry/R basis falls back to
+                        # leg.entry (the monitor backfills from the live position
+                        # next tick); a stored 0 killed the SL ratchet (#159).
+                        leg.fill_price = res.fill_price or None
+                        if leg.fill_price is None and res.status == OrderStatus.FILLED:
+                            session.add(Event(trade_id=trade.id, leg_id=leg.id,
+                                              kind="fill_price_unknown",
+                                              payload={"ref": res.broker_order_ref}))
                     else:
                         leg.broker_order_ref = res.broker_order_ref
                         leg.status = "working"
