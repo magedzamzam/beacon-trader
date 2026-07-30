@@ -116,11 +116,19 @@ Pure-Python core; no DB/Redis/broker needed.
 
 ```bash
 pip install -e packages/core          # or: PYTHONPATH=packages/core
-pytest packages/core/tests services/executor/tests -q
+pip install -r services/api/requirements.txt      # fastapi+pydantic, for services/api/tests
+pytest packages/core/tests services/executor/tests services/api/tests -q
 ```
 
+Three targets: `packages/core/tests` (the engine), `services/executor/tests` (the real
+execution guard), and `services/api/tests` (#165 — write-side validation for the
+Entry/Filtration/Exit pillars: what config is allowed to reach the DB, and therefore the
+executor and monitor). The API tests are pure — no DB, no TestClient — and import the real
+routers via `services/api/tests/conftest.py`.
+
 CI (`.github/workflows/tests.yml`) runs this on every push/PR. **Add a test with any change to
-sizing, guards, SL rules, the planner, or the analysis layer.**
+sizing, guards, SL rules, the planner, or the analysis layer** — and to the strategy config
+validators, where a gap shipped two defects in a day (#163, #164).
 
 ## 5. Repo map (where things live)
 

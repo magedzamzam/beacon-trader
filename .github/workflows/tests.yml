@@ -31,9 +31,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e packages/core
           pip install pytest
+          # fastapi + pydantic, so services/api/tests can import the real routers
+          # rather than a shim (#165). No DB/Redis needed — those tests are pure.
+          pip install -r services/api/requirements.txt
 
       - name: Run test suite
         # packages/core/tests  -> sizing, guards, SL ladder, bayes, TA, structure,
         #                        estimators, reconcile, bus, ingest, notifications
         # services/executor/tests -> exercises the real beacon_core execution guard
-        run: pytest packages/core/tests services/executor/tests -q
+        # services/api/tests   -> write-side validation for the Entry/Filtration/Exit
+        #                        pillars: what config is allowed to reach the DB and
+        #                        therefore the executor and monitor (#165)
+        run: pytest packages/core/tests services/executor/tests services/api/tests -q
