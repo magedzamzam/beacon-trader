@@ -1,9 +1,11 @@
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from beacon_core.db.base import init_models
 from beacon_core.logging import get_logger
+from beacon_core.tasks import spawn_bg
 from .routers import (accounts, ai, analysis, analytics, auth, brokers, dashboard,
                       events, health, legs, market, messages,
                       notifications, performance, reconciliation, risk, signals,
@@ -77,6 +79,38 @@ async def _migrate_global_entry_config():
         await s.commit()
 
 
+# How often to link channel outcome messages -> signal_claims (#173).
+CLAIM_LINK_INTERVAL_SEC = 300
+
+
+async def _claim_linker_loop() -> None:
+    """Keep signal_claims current on a timer.
+
+    `link_claims` used to run ONLY when someone opened the Reconciler, which is
+    not a schedule — it is a coincidence. Nobody opened the page between
+    2026-07-27 and 07-30, so three days of channel outcomes went unlinked, the
+    Reconciler showed no SL claims, and every signal from those days read as
+    "channel silent" when the channels had in fact reported. Claim freshness
+    must not depend on a human happening to look.
+
+    Analysis-only and fully isolated: a failure here logs and retries on the next
+    tick, and can never touch the trading path."""
+    from beacon_core.analysis.claims import link_claims
+    from beacon_core.db.base import Session
+
+    while True:
+        try:
+            async with Session()() as s:
+                res = await link_claims(s)
+                if res.get("added") or res.get("skipped"):
+                    log.info("claim linker: added %s, skipped %s (hwm %s)",
+                             res.get("added"), res.get("skipped"), res.get("hwm"))
+        except Exception as exc:
+            log.warning("claim linker tick failed (retrying in %ss): %s",
+                        CLAIM_LINK_INTERVAL_SEC, exc)
+        await asyncio.sleep(CLAIM_LINK_INTERVAL_SEC)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_models()
@@ -88,7 +122,8 @@ async def lifespan(app: FastAPI):
         await _migrate_global_entry_config()
     except Exception as exc:            # never block API startup on migration
         log.warning("entry-config migration skipped: %s", exc)
-    log.info("api ready")
+    spawn_bg(_claim_linker_loop())      # #173: claims no longer wait for a page view
+    log.info("api ready (claim linker every %ss)", CLAIM_LINK_INTERVAL_SEC)
     yield
 
 
