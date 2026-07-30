@@ -121,6 +121,91 @@ def _order_block(ctx, p):
             "dist_pct": _r(r["dist_pct"]), "mitigated": r["mitigated"]}
 
 
+# ---- broadened shadow set (#166) --------------------------------------------
+def _pivot_out(levels, price):
+    """Round a pivot ladder and add where price sits in it (nearest level + the
+    distance to it), which is the part a rule or a fold would actually use."""
+    if not levels:
+        return None
+    out = _rd(levels, 5)
+    if price:
+        name, lvl = min(levels.items(), key=lambda kv: abs(price - kv[1]))
+        out["nearest"] = name
+        out["dist_pct"] = _r(abs(price - lvl) / price * 100)
+        out["above_p"] = price > levels["p"]
+    return out
+
+
+def _prev_bar(ctx):
+    """(high, low, close) of the last COMPLETED bar — pivots are defined on the
+    previous period, and the newest bar is still forming."""
+    if min(len(ctx.highs), len(ctx.lows), len(ctx.closes)) < 2:
+        return None
+    return ctx.highs[-2], ctx.lows[-2], ctx.closes[-2]
+
+
+def _pivots(ctx, p):
+    prev = _prev_bar(ctx)
+    return _pivot_out(I.pivots(*prev), ctx.price) if prev else None
+
+
+def _pivot_fib(ctx, p):
+    prev = _prev_bar(ctx)
+    return _pivot_out(I.pivot_fib(*prev), ctx.price) if prev else None
+
+
+def _psar(ctx, p):
+    d = I.parabolic_sar(ctx.highs, ctx.lows, p["af_step"], p["af_max"])
+    if d is None:
+        return None
+    return {"value": _r(d["value"], 5), "trend": d["trend"],
+            "above": (ctx.price > d["value"]) if ctx.price else None}
+
+
+def _chandelier(ctx, p):
+    d = I.chandelier_exit(ctx.highs, ctx.lows, ctx.closes, p["period"], p["mult"])
+    return _rd(d, 5)
+
+
+def _apz(ctx, p):
+    d = I.apz(ctx.highs, ctx.lows, ctx.closes, p["period"], p["dev_factor"])
+    if d is None:
+        return None
+    out = _rd(d, 5)
+    out["above_upper"] = (ctx.price > d["upper"]) if ctx.price else None
+    out["below_lower"] = (ctx.price < d["lower"]) if ctx.price else None
+    return out
+
+
+def _atr_pct_scalar(fn, nd=5):
+    """Absolute value + its size relative to price — the comparable form for a
+    range measure (an ATR of 3.0 means nothing without the price it's 3.0 of)."""
+    def c(ctx, p):
+        v = fn(ctx, p)
+        if v is None:
+            return None
+        return {"value": _r(v, nd),
+                "pct": _r(v / ctx.price * 100, 4) if ctx.price else None}
+    return c
+
+
+def _kama(ctx, p):
+    v = I.kama(ctx.closes, p["period"], p["fast"], p["slow"])
+    if v is None:
+        return None
+    return {"value": _r(v), "above": (ctx.price > v) if ctx.price else None}
+
+
+def _ichimoku(ctx, p):
+    d = I.ichimoku(ctx.highs, ctx.lows, ctx.closes, p["tenkan"], p["kijun"], p["senkou"])
+    if d is None:
+        return None
+    out = _rd(d, 5)
+    out["tenkan_above_kijun"] = (d["tenkan"] > d["kijun"]) \
+        if (d["tenkan"] is not None and d["kijun"] is not None) else None
+    return out
+
+
 REGISTRY = [
     {"id": "sma", "label": "SMA", "category": "trend",
      "params": [_P("period", 50, 2, 500)], "compute": _ma(I.sma)},
@@ -186,6 +271,72 @@ REGISTRY = [
     {"id": "order_block", "label": "Order Block", "category": "structure",
      "params": [_P("disp_atr", 1.0, 0, 10, "float"), _P("lookback", 50, 3, 300)],
      "compute": _order_block},
+
+    # ---- broadened shadow set (#166) — SHADOW ONLY until each clears the bar ----
+    {"id": "pivots", "label": "Pivot Points (classic)", "category": "structure",
+     "params": [], "compute": _pivots},
+    {"id": "pivot_fib", "label": "Pivot Points (Fibonacci)", "category": "structure",
+     "params": [], "compute": _pivot_fib},
+    {"id": "psar", "label": "Parabolic SAR", "category": "trend",
+     "params": [_P("af_step", 0.02, 0.001, 0.2, "float"),
+                _P("af_max", 0.2, 0.01, 1, "float")],
+     "compute": _psar},
+    {"id": "vortex", "label": "Vortex (VI+/VI-)", "category": "trend",
+     "params": [_P("period", 14, 2, 200)],
+     "compute": lambda ctx, p: _rd(I.vortex(ctx.highs, ctx.lows, ctx.closes, p["period"]))},
+    {"id": "ichimoku", "label": "Ichimoku", "category": "trend",
+     "params": [_P("tenkan", 9, 2, 100), _P("kijun", 26, 2, 200),
+                _P("senkou", 52, 2, 400)],
+     "compute": _ichimoku},
+    {"id": "dema", "label": "DEMA", "category": "trend",
+     "params": [_P("period", 50, 2, 500)], "compute": _ma(I.dema)},
+    {"id": "tema", "label": "TEMA", "category": "trend",
+     "params": [_P("period", 50, 2, 500)], "compute": _ma(I.tema)},
+    {"id": "hma", "label": "Hull MA", "category": "trend",
+     "params": [_P("period", 50, 2, 500)], "compute": _ma(I.hma)},
+    {"id": "zlema", "label": "Zero-Lag EMA", "category": "trend",
+     "params": [_P("period", 50, 2, 500)], "compute": _ma(I.zlema)},
+    {"id": "kama", "label": "KAMA", "category": "trend",
+     "params": [_P("period", 10, 2, 500), _P("fast", 2, 1, 100), _P("slow", 30, 2, 500)],
+     "compute": _kama},
+    {"id": "tsi", "label": "True Strength Index", "category": "momentum",
+     "params": [_P("long", 25, 2, 200), _P("short", 13, 2, 100)],
+     "compute": _scalar(lambda ctx, p: I.tsi(ctx.closes, p["long"], p["short"]), 2)},
+    {"id": "cmo", "label": "Chande Momentum", "category": "momentum",
+     "params": [_P("period", 14, 2, 200)],
+     "compute": _scalar(lambda ctx, p: I.cmo(ctx.closes, p["period"]), 2)},
+    {"id": "uo", "label": "Ultimate Oscillator", "category": "momentum",
+     "params": [_P("short", 7, 2, 100), _P("medium", 14, 2, 200), _P("long", 28, 2, 400)],
+     "compute": _scalar(lambda ctx, p: I.ultimate_osc(ctx.highs, ctx.lows, ctx.closes,
+                                                      p["short"], p["medium"], p["long"]), 2)},
+    {"id": "ao", "label": "Awesome Oscillator", "category": "momentum",
+     "params": [_P("fast", 5, 2, 100), _P("slow", 34, 3, 400)],
+     "compute": _scalar(lambda ctx, p: I.awesome_osc(ctx.highs, ctx.lows,
+                                                     p["fast"], p["slow"]), 4)},
+    {"id": "fisher", "label": "Fisher Transform", "category": "momentum",
+     "params": [_P("period", 9, 2, 200)],
+     "compute": lambda ctx, p: _rd(I.fisher_transform(ctx.highs, ctx.lows, p["period"]))},
+    {"id": "elder_ray", "label": "Elder Bull/Bear Power", "category": "momentum",
+     "params": [_P("period", 13, 2, 200)],
+     "compute": lambda ctx, p: _rd(I.elder_ray(ctx.highs, ctx.lows, ctx.closes,
+                                               p["period"]), 5)},
+    {"id": "tr", "label": "True Range (raw)", "category": "volatility",
+     "params": [],
+     "compute": _atr_pct_scalar(lambda ctx, p: I.true_range(ctx.highs, ctx.lows, ctx.closes))},
+    {"id": "msd", "label": "Moving Std Dev", "category": "volatility",
+     "params": [_P("period", 20, 2, 200)],
+     "compute": _atr_pct_scalar(lambda ctx, p: I.stddev(ctx.closes, p["period"]))},
+    {"id": "chandelier", "label": "Chandelier Exit", "category": "volatility",
+     "params": [_P("period", 22, 2, 200), _P("mult", 3, 1, 10, "float")],
+     "compute": _chandelier},
+    {"id": "squeeze", "label": "Squeeze (BB in KC)", "category": "volatility",
+     "params": [_P("period", 20, 2, 200), _P("bb_mult", 2, 1, 5, "float"),
+                _P("kc_mult", 1.5, 1, 5, "float")],
+     "compute": lambda ctx, p: _rd(I.squeeze(ctx.highs, ctx.lows, ctx.closes,
+                                             p["period"], p["bb_mult"], p["kc_mult"]))},
+    {"id": "apz", "label": "Adaptive Price Zone", "category": "volatility",
+     "params": [_P("period", 21, 2, 200), _P("dev_factor", 2, 0.5, 10, "float")],
+     "compute": _apz},
 ]
 
 _BY_ID = {s["id"]: s for s in REGISTRY}

@@ -5,6 +5,7 @@ sizing path. Each returns None when there isn't enough data rather than raising.
 """
 from __future__ import annotations
 
+import math
 from typing import List, Optional
 
 
@@ -324,6 +325,17 @@ def pivots(prev_high: float, prev_low: float, prev_close: float) -> dict:
             "r2": p + (prev_high - prev_low), "s2": p - (prev_high - prev_low)}
 
 
+def pivot_fib(prev_high: float, prev_low: float, prev_close: float) -> dict:
+    """Fibonacci pivots: same central pivot, levels at 0.382/0.618/1.0 of the
+    previous period's range instead of the classic reflections."""
+    p = (prev_high + prev_low + prev_close) / 3
+    rng = prev_high - prev_low
+    return {"p": p,
+            "r1": p + 0.382 * rng, "s1": p - 0.382 * rng,
+            "r2": p + 0.618 * rng, "s2": p - 0.618 * rng,
+            "r3": p + rng, "s3": p - rng}
+
+
 def hist_vol(closes: List[float], period: int = 20) -> Optional[float]:
     if len(closes) < period + 1:
         return None
@@ -333,6 +345,310 @@ def hist_vol(closes: List[float], period: int = 20) -> Optional[float]:
         return None
     m = sum(rets) / len(rets)
     return (sum((r - m) ** 2 for r in rets) / len(rets)) ** 0.5 * (252 ** 0.5)
+
+
+# ---- broadened shadow set (#166) --------------------------------------------
+# Formulas taken from the public literature (Wilder, Blau, Chande, Ehlers) with
+# FinTA used only as a cross-check on parameter conventions. NOTHING is copied
+# from it: FinTA is LGPL-3.0 and pandas-based, and `beacon_core` is pip-installed
+# into every python image, so it stays pure-Python over List[float] with zero new
+# dependencies. These are SHADOW features — capture and mine them; none gates a
+# trade until it clears the promotion bar (CLAUDE.md §2.2).
+def _double_ema(values: List[float], period: int) -> Optional[float]:
+    """EMA of the EMA — the smoothing primitive TSI and APZ share."""
+    first = [x for x in ema_full(values, period) if x is not None]
+    if len(first) < period:
+        return None
+    return ema(first, period)
+
+
+def parabolic_sar(highs, lows, af_step: float = 0.02,
+                  af_max: float = 0.2) -> Optional[dict]:
+    """Wilder's Parabolic SAR: a trailing stop that accelerates toward the extreme
+    point. `trend` is the side it is currently protecting; `value` is where it sits."""
+    n = len(highs)
+    if n < 3 or len(lows) < n:
+        return None
+    up = highs[1] >= highs[0]
+    sar = lows[0] if up else highs[0]
+    ep = highs[1] if up else lows[1]
+    af = af_step
+    for i in range(2, n):
+        sar = sar + af * (ep - sar)
+        if up:
+            sar = min(sar, lows[i - 1], lows[i - 2])
+            if lows[i] < sar:                       # flip long -> short
+                up, sar, ep, af = False, ep, lows[i], af_step
+            elif highs[i] > ep:
+                ep, af = highs[i], min(af + af_step, af_max)
+        else:
+            sar = max(sar, highs[i - 1], highs[i - 2])
+            if highs[i] > sar:                      # flip short -> long
+                up, sar, ep, af = True, ep, highs[i], af_step
+            elif lows[i] < ep:
+                ep, af = lows[i], min(af + af_step, af_max)
+    return {"value": sar, "trend": "up" if up else "down"}
+
+
+def vortex(highs, lows, closes, period: int = 14) -> Optional[dict]:
+    """Vortex Indicator: VI+ / VI- are the up- and down-movement of the range
+    normalised by true range. VI+ > VI- is the bullish reading."""
+    n = len(closes)
+    if n < period + 1 or len(highs) < n or len(lows) < n:
+        return None
+    vm_p = [abs(highs[i] - lows[i - 1]) for i in range(1, n)]
+    vm_m = [abs(lows[i] - highs[i - 1]) for i in range(1, n)]
+    trs = [max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]),
+               abs(lows[i] - closes[i - 1])) for i in range(1, n)]
+    tr_sum = sum(trs[-period:])
+    if not tr_sum:
+        return None
+    plus, minus = sum(vm_p[-period:]) / tr_sum, sum(vm_m[-period:]) / tr_sum
+    return {"plus": plus, "minus": minus, "diff": plus - minus,
+            "bullish": plus > minus}
+
+
+def tsi(closes: List[float], long: int = 25, short: int = 13) -> Optional[float]:
+    """True Strength Index: double-smoothed momentum over double-smoothed |momentum|,
+    in percent. Bounded ±100."""
+    if len(closes) < long + short + 1:
+        return None
+    mom = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+    num = _double_ema(mom, long)
+    den = _double_ema([abs(m) for m in mom], long)
+    if num is None or not den:
+        return None
+    return 100.0 * num / den
+
+
+def cmo(closes: List[float], period: int = 14) -> Optional[float]:
+    """Chande Momentum Oscillator: (up - down) / (up + down) over the window, ±100.
+    Unsmoothed, so it swings harder than RSI on the same period."""
+    if len(closes) < period + 1:
+        return None
+    ups = dns = 0.0
+    for i in range(len(closes) - period, len(closes)):
+        d = closes[i] - closes[i - 1]
+        ups += max(d, 0.0)
+        dns += max(-d, 0.0)
+    tot = ups + dns
+    return 100.0 * (ups - dns) / tot if tot else 0.0
+
+
+def ultimate_osc(highs, lows, closes, short: int = 7, medium: int = 14,
+                 long: int = 28) -> Optional[float]:
+    """Williams' Ultimate Oscillator: buying pressure over true range, blended
+    across three windows (weights 4/2/1) so one timeframe can't dominate."""
+    n = len(closes)
+    if n < long + 1 or len(highs) < n or len(lows) < n:
+        return None
+    bp, tr = [], []
+    for i in range(1, n):
+        lo, hi = min(lows[i], closes[i - 1]), max(highs[i], closes[i - 1])
+        bp.append(closes[i] - lo)
+        tr.append(hi - lo)
+
+    def _avg(p):
+        s = sum(tr[-p:])
+        return (sum(bp[-p:]) / s) if s else None
+
+    a1, a2, a3 = _avg(short), _avg(medium), _avg(long)
+    if a1 is None or a2 is None or a3 is None:
+        return None
+    return 100.0 * (4 * a1 + 2 * a2 + a3) / 7.0
+
+
+def awesome_osc(highs, lows, fast: int = 5, slow: int = 34) -> Optional[float]:
+    """Awesome Oscillator: SMA(median price, 5) − SMA(median price, 34)."""
+    n = len(highs)
+    if n < slow or len(lows) < n:
+        return None
+    mp = [(highs[i] + lows[i]) / 2 for i in range(n)]
+    f, s = sma(mp, fast), sma(mp, slow)
+    return None if (f is None or s is None) else f - s
+
+
+def fisher_transform(highs, lows, period: int = 9) -> Optional[dict]:
+    """Ehlers' Fisher Transform of the median price: map the window position into
+    (-1, 1), then arctanh it so the tails are sharp. `signal` is the prior bar's
+    value (the conventional crossover line)."""
+    n = len(highs)
+    if n < period + 1 or len(lows) < n:
+        return None
+    mp = [(highs[i] + lows[i]) / 2 for i in range(n)]
+    x = fish = prev = 0.0
+    for i in range(period - 1, n):
+        seg = mp[i - period + 1:i + 1]
+        hi, lo = max(seg), min(seg)
+        rng = hi - lo
+        raw = 0.0 if rng == 0 else 2.0 * (mp[i] - lo) / rng - 1.0
+        x = max(-0.999, min(0.999, 0.33 * raw + 0.67 * x))
+        prev, fish = fish, 0.5 * math.log((1 + x) / (1 - x)) + 0.5 * fish
+    return {"value": fish, "signal": prev}
+
+
+def true_range(highs, lows, closes) -> Optional[float]:
+    """Raw (unsmoothed) true range of the latest bar — ATR's input, useful on its
+    own as a one-bar shock measure."""
+    n = len(closes)
+    if n < 2 or len(highs) < n or len(lows) < n:
+        return None
+    return max(highs[-1] - lows[-1], abs(highs[-1] - closes[-2]),
+               abs(lows[-1] - closes[-2]))
+
+
+def chandelier_exit(highs, lows, closes, period: int = 22,
+                    mult: float = 3.0) -> Optional[dict]:
+    """Chandelier Exit: an ATR trail hung off the window's extreme. `long` is the
+    stop for a long position, `short` for a short."""
+    if len(highs) < period or len(lows) < period:
+        return None
+    a = atr(highs, lows, closes, period)
+    if a is None:
+        return None
+    return {"long": max(highs[-period:]) - mult * a,
+            "short": min(lows[-period:]) + mult * a}
+
+
+def squeeze(highs, lows, closes, period: int = 20, bb_mult: float = 2.0,
+            kc_mult: float = 1.5) -> Optional[dict]:
+    """Squeeze (SQZMI): Bollinger Bands wholly inside the Keltner Channel — a
+    volatility contraction. `on` is the squeeze state; `width_ratio` is BB width
+    over KC width (< 1 while squeezed)."""
+    bb = bollinger(closes, period, bb_mult)
+    kc = keltner(highs, lows, closes, period, kc_mult)
+    if not bb or not kc:
+        return None
+    kc_w = kc["upper"] - kc["lower"]
+    return {"on": bb["upper"] < kc["upper"] and bb["lower"] > kc["lower"],
+            "width_ratio": (bb["upper"] - bb["lower"]) / kc_w if kc_w else None}
+
+
+def apz(highs, lows, closes, period: int = 21,
+        dev_factor: float = 2.0) -> Optional[dict]:
+    """Adaptive Price Zone: a double-smoothed EMA band whose half-width is the
+    double-smoothed bar range — it widens on volatility instead of on deviation."""
+    n = len(closes)
+    if n < period or len(highs) < n or len(lows) < n:
+        return None
+    p = max(1, int(math.ceil(math.sqrt(period))))
+    mid = _double_ema(closes, p)
+    dev = _double_ema([highs[i] - lows[i] for i in range(n)], p)
+    if mid is None or dev is None:
+        return None
+    band = dev_factor * dev
+    return {"middle": mid, "upper": mid + band, "lower": mid - band}
+
+
+def typical_price(highs, lows, closes) -> Optional[float]:
+    """(H + L + C) / 3 of the latest bar — CCI's and VWAP's price input."""
+    if not highs or not lows or not closes:
+        return None
+    return (highs[-1] + lows[-1] + closes[-1]) / 3
+
+
+def elder_ray(highs, lows, closes, period: int = 13) -> Optional[dict]:
+    """Elder's Bull/Bear Power: how far the bar's extremes reach beyond the EMA.
+    Bull > 0 with Bear < 0 is the ordinary two-sided bar."""
+    e = ema(closes, period)
+    if e is None or not highs or not lows:
+        return None
+    return {"bull": highs[-1] - e, "bear": lows[-1] - e}
+
+
+# --- MA variants: cheap, but near-collinear with EMA/SMA/WMA by construction.
+# Captured so #168's collinearity screen can measure that rather than assume it.
+def dema(values: List[float], period: int) -> Optional[float]:
+    """Double EMA — 2·EMA − EMA(EMA), less lag than EMA at the same period."""
+    first = [x for x in ema_full(values, period) if x is not None]
+    if len(first) < period:
+        return None
+    second = ema(first, period)
+    return None if second is None else 2 * first[-1] - second
+
+
+def tema(values: List[float], period: int) -> Optional[float]:
+    """Triple EMA — 3·EMA − 3·EMA² + EMA³."""
+    e1 = [x for x in ema_full(values, period) if x is not None]
+    if len(e1) < period:
+        return None
+    e2 = [x for x in ema_full(e1, period) if x is not None]
+    if len(e2) < period:
+        return None
+    e3 = ema(e2, period)
+    return None if e3 is None else 3 * e1[-1] - 3 * e2[-1] + e3
+
+
+def hma(values: List[float], period: int) -> Optional[float]:
+    """Hull MA — WMA(2·WMA(n/2) − WMA(n), sqrt(n)). Fast and smooth, at the cost
+    of overshoot at turns."""
+    half, root = max(1, period // 2), max(1, int(period ** 0.5))
+    if len(values) < period + root:
+        return None
+    raw = []
+    for i in range(len(values) - root + 1, len(values) + 1):
+        w_half, w_full = wma(values[:i], half), wma(values[:i], period)
+        if w_half is None or w_full is None:
+            return None
+        raw.append(2 * w_half - w_full)
+    return wma(raw, root)
+
+
+def zlema(values: List[float], period: int) -> Optional[float]:
+    """Zero-Lag EMA — EMA over the de-lagged series 2·v[i] − v[i−lag]."""
+    lag = (period - 1) // 2
+    if len(values) < period + lag:
+        return None
+    de = [2 * values[i] - values[i - lag] for i in range(lag, len(values))]
+    return ema(de, period)
+
+
+def kama(values: List[float], period: int = 10, fast: int = 2,
+         slow: int = 30) -> Optional[float]:
+    """Kaufman's Adaptive MA: smoothing scaled by the efficiency ratio (net move
+    over summed moves), so it tracks in trend and flattens in chop."""
+    n = len(values)
+    if n < period + 1:
+        return None
+    fsc, ssc = 2.0 / (fast + 1), 2.0 / (slow + 1)
+    k = sum(values[:period]) / period
+    for i in range(period, n):
+        change = abs(values[i] - values[i - period])
+        vol = sum(abs(values[j] - values[j - 1]) for j in range(i - period + 1, i + 1))
+        er = change / vol if vol else 0.0
+        sc = (er * (fsc - ssc) + ssc) ** 2
+        k = k + sc * (values[i] - k)
+    return k
+
+
+def ichimoku(highs, lows, closes, tenkan: int = 9, kijun: int = 26,
+             senkou: int = 52) -> Optional[dict]:
+    """Ichimoku Kinko Hyo. tenkan/kijun are the current conversion/base lines;
+    `cloud_a`/`cloud_b` are the span pair that ACTUALLY applies to the current bar
+    (i.e. computed `kijun` bars back, matching the forward plot shift) rather than
+    the un-shifted values, so `in_cloud`/`above_cloud` mean what they say. Cloud
+    fields are None until there is enough history for the shift."""
+    n = len(closes)
+    if n < senkou or len(highs) < n or len(lows) < n:
+        return None
+
+    def _mid(end, p):
+        seg_h, seg_l = highs[end - p + 1:end + 1], lows[end - p + 1:end + 1]
+        return (max(seg_h) + min(seg_l)) / 2 if seg_h and seg_l else None
+
+    t, k = _mid(n - 1, tenkan), _mid(n - 1, kijun)
+    out = {"tenkan": t, "kijun": k, "cloud_a": None, "cloud_b": None,
+           "above_cloud": None, "in_cloud": None, "chikou_above": None}
+    j = n - 1 - kijun
+    if j >= senkou - 1:
+        t0, k0 = _mid(j, tenkan), _mid(j, kijun)
+        a, b = (t0 + k0) / 2, _mid(j, senkou)
+        price = closes[-1]
+        out["cloud_a"], out["cloud_b"] = a, b
+        out["above_cloud"] = price > max(a, b)
+        out["in_cloud"] = min(a, b) <= price <= max(a, b)
+        out["chikou_above"] = closes[-1] > closes[j]
+    return out
 
 
 # ---- market structure: Fair Value Gaps & Order Blocks (#59) ------------------
