@@ -25,6 +25,10 @@ _RE_SL = re.compile(r"\b(SL|STOP\s*LOSS|STOPLOSS)\b", re.I)
 _RE_NUM = re.compile(r"\d+\.?\d*")
 _RE_LIMIT = re.compile(r"\b(LIMIT|SELL\s*LIMIT|BUY\s*LIMIT)\b", re.I)
 _RE_MARKET = re.compile(r"\b(NOW|MARKET|BUY\s*NOW|SELL\s*NOW)\b", re.I)
+# A pip count is never a price, at any band — but channels write it right next
+# to one ("SL: 4068.4 (1500 pips)"), and gold's band starts at 1500, so it was
+# being collected as a candidate and sorted into the SL slot. Strip it first.
+_RE_PIPS = re.compile(r"\(?\s*[+-]?\d+(?:[.,]\d+)?\s*PIPS?\b\)?", re.I)
 
 _SUPERSCRIPT = str.maketrans({
     "\u2070": "0", "\u00b9": "1", "\u00b2": "2", "\u00b3": "3", "\u2074": "4",
@@ -33,7 +37,7 @@ _SUPERSCRIPT = str.maketrans({
 
 
 def _fix(text: str) -> str:
-    return text.upper().translate(_SUPERSCRIPT)
+    return _RE_PIPS.sub(" ", text.upper().translate(_SUPERSCRIPT))
 
 
 def _order_hint(text: str) -> Optional[str]:
