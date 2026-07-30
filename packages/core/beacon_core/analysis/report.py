@@ -734,3 +734,175 @@ async def structure_magnet_outcome_report(session, frm=None, to=None) -> dict:
                  "filtering waits on this: enable structure.filter once a bucket's "
                  "credible interval separates from the base rate at N>=30."),
     }
+
+
+# --- Shadow strategies: Monte Carlo geometry null + Turtle breakout -----------
+# The bucket edges for the Monte Carlo calibration curve. A null that is well
+# calibrated should land close to the diagonal; systematic deviation means the
+# vol estimate or the horizon is wrong, not that the channels have edge.
+_MC_BUCKETS = [(0.0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.01)]
+
+
+def shadow_strategy_rollup(rows, significance_n: int = SIGNIFICANCE_N) -> dict:
+    """Pure reduction behind /analytics/shadow-strategies. DB-free so it is
+    unit-testable on a bare box (repo convention).
+
+    `rows`: iterable of {channel, realized_pl, planned_risk, montecarlo, turtle}.
+
+    THE NUMBER THIS EXISTS FOR is `montecarlo.edge` — realized win-rate MINUS the
+    win-rate the signal's own SL/TP geometry implies with no skill assumed. A
+    channel posting a far stop and a near target wins most of its trades by
+    arithmetic; only the excess over its own null is evidence of anything. The
+    same applies in R: `actual_mean_r` vs `null_mean_r`.
+
+    Turtle splits the same trades by whether the mechanical Donchian system
+    agreed with the channel's direction — a channel that only wins when the
+    breakout system already agreed is not adding much over a free rule.
+    """
+    mc_n = mc_wins = mc_truncated = 0
+    mc_pred_sum = mc_null_r_sum = 0.0
+    mc_r_n = 0
+    mc_r_sum = 0.0
+    mc_by_channel = defaultdict(lambda: {"n": 0, "wins": 0, "pred": 0.0})
+    buckets = [{"lo": lo, "hi": hi, "n": 0, "wins": 0, "pred": 0.0}
+               for lo, hi in _MC_BUCKETS]
+
+    def _cell():
+        return {"n": 0, "wins": 0, "pl": 0.0}
+
+    tu_overall = defaultdict(_cell)                    # "agrees" | "disagrees"
+    tu_by_channel = defaultdict(lambda: defaultdict(_cell))
+    tu_unknown = 0
+    tu_diverges = 0
+
+    for row in rows:
+        pl = row.get("realized_pl")
+        if pl is None:
+            continue
+        pl = float(pl)
+        win = pl > 0
+        channel = row.get("channel") or "Unattributed"
+
+        mc = row.get("montecarlo") or {}
+        p = mc.get("p_win_geometry")
+        if isinstance(p, (int, float)):
+            p = float(p)
+            mc_n += 1
+            mc_wins += 1 if win else 0
+            mc_pred_sum += p
+            if mc.get("horizon_truncated"):
+                mc_truncated += 1
+            c = mc_by_channel[channel]
+            c["n"] += 1
+            c["wins"] += 1 if win else 0
+            c["pred"] += p
+            for b in buckets:
+                if b["lo"] <= p < b["hi"]:
+                    b["n"] += 1
+                    b["wins"] += 1 if win else 0
+                    b["pred"] += p
+                    break
+            er = mc.get("expected_r")
+            risk = row.get("planned_risk")
+            try:
+                risk = float(risk) if risk is not None else None
+            except (TypeError, ValueError):
+                risk = None
+            if isinstance(er, (int, float)) and risk and risk > 0:
+                mc_r_n += 1
+                mc_r_sum += pl / risk
+                mc_null_r_sum += float(er)
+
+        tu = row.get("turtle") or {}
+        agrees = tu.get("agrees")
+        if tu.get("diverges"):
+            tu_diverges += 1
+        if agrees is None:
+            tu_unknown += 1
+        else:
+            key = "agrees" if agrees else "disagrees"
+            for b in (tu_overall[key], tu_by_channel[channel][key]):
+                b["n"] += 1
+                b["wins"] += 1 if win else 0
+                b["pl"] += pl
+
+    base = (mc_wins / mc_n) if mc_n else 0.5
+
+    def _fmt(b):
+        post = posterior(b["wins"], b["n"], base)
+        return {"n": b["n"], "win_rate": round(b["wins"] / b["n"], 4),
+                "net": round(b["pl"], 2), "expectancy": round(b["pl"] / b["n"], 4),
+                "ci_low": round(post["ci_low"], 4), "ci_high": round(post["ci_high"], 4)}
+
+    def _mc_fmt(b):
+        actual = b["wins"] / b["n"]
+        pred = b["pred"] / b["n"]
+        post = posterior(b["wins"], b["n"], pred)
+        return {"n": b["n"], "actual_win_rate": round(actual, 4),
+                "geometry_win_rate": round(pred, 4), "edge": round(actual - pred, 4),
+                "ci_low": round(post["ci_low"], 4), "ci_high": round(post["ci_high"], 4),
+                "beats_null": post["ci_low"] > pred, "significant": b["n"] >= significance_n}
+
+    montecarlo = {
+        "n": mc_n,
+        # Signals whose horizon was too short for the race to resolve. Their
+        # geometry win-rate is UNDERSTATED, which inflates `edge` — so a large
+        # count here has to be fixed (raise analytics.montecarlo.horizon_bars)
+        # before any edge below is read as skill.
+        "n_horizon_truncated": mc_truncated,
+        "actual_win_rate": round(mc_wins / mc_n, 4) if mc_n else None,
+        "geometry_win_rate": round(mc_pred_sum / mc_n, 4) if mc_n else None,
+        "edge": round(mc_wins / mc_n - mc_pred_sum / mc_n, 4) if mc_n else None,
+        "n_with_r": mc_r_n,
+        "actual_mean_r": round(mc_r_sum / mc_r_n, 4) if mc_r_n else None,
+        "null_mean_r": round(mc_null_r_sum / mc_r_n, 4) if mc_r_n else None,
+        "r_edge": round((mc_r_sum - mc_null_r_sum) / mc_r_n, 4) if mc_r_n else None,
+        "by_channel": {ch: _mc_fmt(c) for ch, c in mc_by_channel.items() if c["n"]},
+        "calibration": [{"bucket": "%.1f–%.1f" % (b["lo"], min(b["hi"], 1.0)),
+                         **_mc_fmt(b)} for b in buckets if b["n"]],
+    }
+    turtle = {
+        "n_unknown": tu_unknown, "n_diverges": tu_diverges,
+        "overall": {k: _fmt(v) for k, v in tu_overall.items() if v["n"]},
+        "by_channel": {ch: {k: _fmt(v) for k, v in m.items() if v["n"]}
+                       for ch, m in tu_by_channel.items()},
+    }
+    return {
+        "n_labelled": mc_n, "base_rate": round(base, 4),
+        "significance_n": significance_n,
+        "montecarlo": montecarlo, "turtle": turtle,
+        "note": ("SHADOW — neither gates. Monte Carlo `edge` = realized win-rate "
+                 "MINUS the win-rate the signal's own SL/TP geometry implies with "
+                 "no skill assumed; a raw win-rate on a far stop and a near target "
+                 "is arithmetic, not edge. `beats_null` requires the 90 percent "
+                 "credible lower bound to clear that per-bucket null. `null_mean_r` "
+                 "is ~0 by construction (a driftless null breaks even on EVERY "
+                 "geometry), so it is a calibration check, not a ranking — and "
+                 "because costs are not modelled, a channel merely MATCHING its "
+                 "null is losing the spread. Turtle splits the same trades by "
+                 "whether the 55-bar Donchian system agreed with the channel. "
+                 "Don't act below N>=" + str(significance_n) + "."),
+    }
+
+
+async def shadow_strategy_report(session, frm=None, to=None) -> dict:
+    """The labelled join behind /analytics/shadow-strategies: persisted per-signal
+    `montecarlo` / `turtle` estimator blocks vs realized trade outcome. Read-only."""
+    from sqlalchemy import select
+    from ..db.models import SignalAnalytics, Signal, Source, Trade
+
+    q = (select(Source.name, SignalAnalytics.analytics,
+                Trade.realized_pl, Trade.planned_risk)
+         .join(Signal, Signal.id == SignalAnalytics.signal_id)
+         .join(Trade, Trade.signal_id == SignalAnalytics.signal_id)
+         .outerjoin(Source, Source.id == Signal.source_id))
+    if frm is not None:
+        q = q.where(Signal.created_at >= frm)
+    if to is not None:
+        q = q.where(Signal.created_at < to)
+    rows = (await session.execute(q)).all()
+    return shadow_strategy_rollup([
+        {"channel": name, "realized_pl": pl, "planned_risk": risk,
+         "montecarlo": (an or {}).get("montecarlo"),
+         "turtle": (an or {}).get("turtle")}
+        for name, an, pl, risk in rows])

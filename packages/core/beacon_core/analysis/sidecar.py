@@ -18,6 +18,8 @@ from decimal import Decimal
 from typing import Callable, Dict, List, Optional
 
 from ..logging import get_logger
+from .montecarlo import DEFAULT_MONTECARLO as _MONTECARLO_DEFAULTS
+from .turtle import DEFAULT_TURTLE as _TURTLE_DEFAULTS
 
 # NOTE: sqlalchemy / db-model / settings imports are deferred into the functions
 # that need them (capture_analytics, load_config) so the estimator harness
@@ -31,6 +33,11 @@ DEFAULT_ANALYTICS = {
     "enabled": True,        # pure observability + off the hot path -> on by default
     "timeframe": "1h",      # primary price-window timeframe for series estimators
     "window_bars": 200,     # max closes retained for reproducibility
+    # Per-estimator blocks. Each is overlaid wholesale by overlay_config, then
+    # re-defaulted key-by-key inside the estimator, so a partial stored block is
+    # safe. Turning one off here stops it computing without touching the suite.
+    "montecarlo": dict(_MONTECARLO_DEFAULTS),
+    "turtle": dict(_TURTLE_DEFAULTS),
 }
 
 # Estimator registry: name -> callable(ctx) -> JSON-able output (or None to skip).
@@ -82,6 +89,9 @@ class AnalyticsCtx:
     entry_from: Optional[float] = None
     entry_to: Optional[float] = None
     tps: List[float] = field(default_factory=list)
+    # The resolved analytics config, so an estimator can read its own tuning
+    # block (e.g. cfg["montecarlo"]["paths"]) without a second settings read.
+    config: dict = field(default_factory=dict)
 
 
 async def load_config(session) -> dict:
@@ -162,6 +172,7 @@ async def capture_analytics(*, signal_id: int, symbol: str, direction,
             source_id=source_id,
             sl=_fnum(sl), entry_from=_fnum(entry_from), entry_to=_fnum(entry_to),
             tps=[f for f in (_fnum(t) for t in (tps or [])) if f is not None],
+            config=cfg,
         )
         analytics, degraded = await run_estimators(ctx)
         regime = None

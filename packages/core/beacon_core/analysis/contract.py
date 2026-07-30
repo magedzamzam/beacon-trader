@@ -78,6 +78,21 @@ def estimator_contributions(name: str, detail) -> List[FeatureContribution]:
     if name == "adx_regime_shadow":
         tr = detail.get("trending")
         return [fc("adx_trending", tr, "trending" if tr else "range", 1.0, 1.0)] if tr is not None else []
+    if name == "montecarlo":
+        out = []
+        p = detail.get("p_win_geometry")
+        if p is not None:
+            # No direction: the null is deliberately side-agnostic — it says what
+            # the GEOMETRY is worth, not which way price goes.
+            out.append(fc("mc_p_win_geometry", p, None, 1.0, 1.0))
+        if detail.get("expected_r") is not None:
+            out.append(fc("mc_expected_r", detail.get("expected_r"), None, 1.0, 1.0))
+        return out
+    if name == "turtle":
+        sig = detail.get("signal")
+        if sig is None:
+            return []
+        return [fc("turtle_signal", sig, _sign(sig, "long", "short"), 1.0, 1.0)]
     if name == "structure_magnet":
         out = [fc("htf_alignment", detail.get("htf_alignment"), None, 1.0, 1.0)]
         nz = detail.get("nearest_zone") or {}

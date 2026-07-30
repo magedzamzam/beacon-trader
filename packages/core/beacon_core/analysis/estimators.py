@@ -13,6 +13,8 @@ from statistics import pstdev, mean
 from typing import List, Optional
 
 from ._util import dig_num as _num, zone_side, nearest_sides   # shared analytics helpers (#69)
+from .montecarlo import montecarlo_estimator                   # geometry null model
+from .turtle import turtle_estimator                           # Donchian second opinion
 
 # --- Regime thresholds (labels only — nothing gates on them) ------------------
 ADX_TRENDING = 25.0          # classic ADX trend threshold
@@ -453,4 +455,6 @@ ESTIMATORS = {
     "structure_magnet": structure_magnet,
     "adx_regime_shadow": adx_regime_shadow,
     "sl_geometry": sl_geometry_estimator,
+    "montecarlo": montecarlo_estimator,
+    "turtle": turtle_estimator,
 }

@@ -14,6 +14,7 @@ Namespaces:
   ta.<tf>.<indicator>.<field>   analytics.<estimator>.<field>
   struct.<tf>.<field>           magnet.nearest.<field> / magnet.htf_alignment
   ai.signal.* / ai.exec.*       ctx.session / ctx.utc_hour
+  mc.<field>                    turtle.<field>
 
 Missing-data policy: a degraded/absent layer is represented with an explicit
 `unknown` / `none` marker (categorical) rather than silently dropping the signal.
@@ -76,6 +77,20 @@ def assemble(*, ta_features: dict = None, session_tag=None, utc_hour=None,
     _put(fv, "analytics.geo.sl_inside_1_atr", geo.get("sl_inside_1_atr"))
     if not regime.get("label"):
         fv["analytics.regime.label"] = "unknown"        # explicit missing marker
+
+    # --- shadow strategies: Monte Carlo geometry null + Turtle breakout ---
+    # mc.p_win_geometry is the null a channel has to BEAT, so the model can learn
+    # on the residual (did this signal do better than its own geometry implied?)
+    # rather than on a raw win-rate that wide stops inflate.
+    mc = a.get("montecarlo") or {}
+    _put(fv, "mc.p_win_geometry", mc.get("p_win_geometry"))
+    _put(fv, "mc.p_sl_first", mc.get("p_sl_first"))
+    _put(fv, "mc.expected_r", mc.get("expected_r"))
+    _put(fv, "mc.rr_to_tp1", mc.get("rr_to_tp1"))
+    tu = a.get("turtle") or {}
+    _put(fv, "turtle.signal", tu.get("signal"))
+    _put(fv, "turtle.agrees", tu.get("agrees"))
+    fv["turtle.position"] = tu.get("position") or "unknown"
 
     # --- structure / magnets (#61) ---
     sm = a.get("structure_magnet") or {}

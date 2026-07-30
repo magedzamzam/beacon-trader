@@ -162,6 +162,22 @@ export const GLOSSARY = [
     guard: G_SHADOW,
   },
   {
+    id: "mc_geometry_null", term: "Monte Carlo geometry null · P(win) geometry · Edge", section: "analytics",
+    what: "Simulates the signal's own entry/SL/TP layout under a driftless random walk at the volatility measured at signal time, and reports how often TP1 would be reached before SL with NO channel skill at all.",
+    read: "'Geometry win%' is what the levels alone are worth. 'Edge' is the realized win-rate minus that — the only figure here that can be read as channel skill.",
+    not: "A HIGH geometry win% is NOT good news — it means the stop is far and the target near. Such a setup wins ~90% of the time and still loses money; read Mean R vs null alongside it.",
+    act: "Rank channels by Edge, never by raw win-rate. Check the calibration table first — if Actual drifts from Geometry across every bucket the null is mis-tuned, and no Edge measured against it is readable.",
+    guard: G_SHADOW,
+  },
+  {
+    id: "turtle_signal", term: "Turtle signal (55-bar Donchian)", section: "analytics",
+    what: "A mechanical breakout system run beside every signal: long above the 55-bar high, short below the 55-bar low. 'agrees' means it held the same side as the channel's call.",
+    read: "A free second opinion. A channel that wins only when the Turtle already agreed is echoing a rule we could run ourselves.",
+    not: "NOT a trading system here and NOT an entry source — Beacon does not generate its own entries. Note also that the ported reference never goes flat (it stop-and-reverses); the 'exits to flat' variant is recorded beside it.",
+    act: "Compare agrees vs disagrees per channel. The value is in channels that win when the Turtle disagrees.",
+    guard: G_SHADOW,
+  },
+  {
     id: "atr_pct", term: "ATR %", section: "analytics",
     what: "Average True Range as a percentage of price — how much the instrument is moving.",
     read: "Higher = wider swings, so a fixed-distance stop is more likely to be tagged by noise.",

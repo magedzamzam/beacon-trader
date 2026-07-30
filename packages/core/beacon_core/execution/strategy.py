@@ -206,6 +206,94 @@ def _match_adx_regime(when, ctx) -> bool:
     return True
 
 
+def _match_mc_probability(when, ctx) -> bool:
+    """`mc_probability` condition: match on the Monte Carlo GEOMETRY NULL for this
+    signal (analysis/montecarlo.py) — what the entry/SL/TP layout is worth before
+    any channel skill is assumed.
+
+    Keys: min_p_win / max_p_win (bounds on `p_win_geometry`), min_expected_r /
+    max_expected_r (bounds on `expected_r`), min_rr / max_rr (bounds on
+    `rr_to_tp1`). Every supplied sub-condition must hold.
+
+    The useful rule is `max_expected_r: 0` -> skip: a geometry whose expected R is
+    negative under a no-skill null needs the channel to be genuinely good just to
+    break even. A HIGH `p_win_geometry` is the opposite of a green light — it
+    means the stop is far and the target near.
+
+    FAIL-OPEN: absent ctx['montecarlo'] (or an absent field) does NOT match, so
+    the rule is inert until the executor plumbs the block in. A rule with no
+    sub-condition stays a no-op rather than matching everything."""
+    mc = ctx.get("montecarlo")
+    if not isinstance(mc, dict) or not mc:
+        return False
+    bounds = (("min_p_win", "p_win_geometry", True), ("max_p_win", "p_win_geometry", False),
+              ("min_expected_r", "expected_r", True), ("max_expected_r", "expected_r", False),
+              ("min_rr", "rr_to_tp1", True), ("max_rr", "rr_to_tp1", False))
+    # "" is what the UI stores for a cleared numeric field — treat it as absent.
+    supplied = [b for b in bounds if when.get(b[0]) not in (None, "")]
+    if not supplied:
+        return False                                  # no condition -> no-op
+    for key, field, is_min in supplied:
+        val = mc.get(field)
+        if val is None:
+            return False                              # fail-open on a missing input
+        try:
+            bound = float(when[key])
+        except (TypeError, ValueError):
+            return False
+        if is_min and float(val) < bound:
+            return False
+        if not is_min and float(val) > bound:
+            return False
+    return True
+
+
+def _match_turtle_signal(when, ctx) -> bool:
+    """`turtle_signal` condition: match on the Donchian breakout state at signal
+    time (analysis/turtle.py) — a mechanical second opinion on the channel's call.
+
+    Keys: agrees (bool — match when the Turtle side equals the signal direction),
+    position (`long` / `short` / `flat`), variant (`signal` (reference,
+    stop-and-reverse) or `signal_flat` (exits to flat); default `signal`).
+
+    FAIL-OPEN: absent ctx['turtle'] or an absent field does NOT match, so the rule
+    is inert until the executor plumbs the block in."""
+    tu = ctx.get("turtle")
+    if not isinstance(tu, dict) or not tu:
+        return False
+    want_agrees, want_pos = when.get("agrees"), when.get("position")
+    if want_agrees is None and not want_pos:
+        return False                                  # no condition -> no-op
+    if want_agrees is not None:
+        got = tu.get("agrees")
+        if got is None or bool(got) != bool(want_agrees):
+            return False
+    if want_pos:
+        key = "position_flat" if when.get("variant") == "signal_flat" else "position"
+        got = tu.get(key)
+        if not got or got == "unknown" or got != want_pos:
+            return False
+    return True
+
+
+# The shadow-analytics blocks a rule set needs in `ctx` before it can ever fire.
+# Empty when no such rule is configured — so nothing is computed on the hot path
+# by default. Both stay INERT until an A/B graduates them (the #127 -> #132 path).
+_SHADOW_RULE_INPUTS = {"mc_probability": "montecarlo", "turtle_signal": "turtle"}
+
+
+def shadow_rule_inputs(rules) -> set:
+    """Which shadow blocks (`montecarlo` / `turtle`) this rule set references."""
+    need = set()
+    for r in rules or []:
+        if not isinstance(r, dict):
+            continue
+        key = _SHADOW_RULE_INPUTS.get((r.get("when") or {}).get("type"))
+        if key:
+            need.add(key)
+    return need
+
+
 def adx_rule_timeframes(rules, default: str = "4h") -> set:
     """The timeframes an `adx_regime` rule set needs live ADX computed for (#132).
     A rule without an explicit `timeframe` falls back to `default`. Empty when no
@@ -230,6 +318,11 @@ def apply_filter_rules(rules, ctx) -> tuple:
       always                               unconditional (baseline scaling)
       adx_regime {timeframe, trending,     ctx['adx'][tf] ADX trend state (#127);
                   min_adx, max_adx}          fail-open when ADX absent from ctx
+      mc_probability {min_p_win, max_p_win, ctx['montecarlo'] geometry null —
+                      min/max_expected_r,     what the SL/TP layout is worth with
+                      min_rr, max_rr}         NO channel skill. Inert until wired.
+      turtle_signal {agrees, position,      ctx['turtle'] Donchian breakout state
+                     variant}                 at signal time. Inert until wired.
     Structure/bayesian conditions are declared here as they're added."""
     factor, skip, reasons = 1.0, False, []
     for r in rules or []:
@@ -248,6 +341,10 @@ def apply_filter_rules(rules, ctx) -> tuple:
             matched = bool(have) and any(s in want for s in have)
         elif wtype == "adx_regime":
             matched = _match_adx_regime(when, ctx)
+        elif wtype == "mc_probability":
+            matched = _match_mc_probability(when, ctx)
+        elif wtype == "turtle_signal":
+            matched = _match_turtle_signal(when, ctx)
         # (structure/bayesian conditions plug in here — no-op until wired)
         if not matched:
             continue

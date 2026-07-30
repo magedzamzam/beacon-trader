@@ -38,6 +38,7 @@ export default function Analytics() {
   const range = useRange("all");
 
   const [trend, setTrend] = useState(null);
+  const [shadow, setShadow] = useState(null);
   const [map, setMap] = useState(null);
   const [price, setPrice] = useState(null);
   const [mapBusy, setMapBusy] = useState(false);
@@ -71,10 +72,11 @@ export default function Analytics() {
     catch (e) { setErr(e.message); } finally { setMapBusy(false); }
   };
   useEffect(() => {
-    setRep(null); setTrend(null); setSynth(null);
+    setRep(null); setTrend(null); setSynth(null); setShadow(null);
     api.analyticsSynthesis(range.range).then(setSynth).catch(e => setErr(e.message));
     api.analyticsCorrelation(range.range).then(setRep).catch(e => setErr(e.message));
     api.analyticsTrendAlignment(range.range).then(setTrend).catch(e => setErr(e.message));
+    api.analyticsShadowStrategies(range.range).then(setShadow).catch(e => setErr(e.message));
   }, [range.fromIso, range.toIso]);
 
   const toggle = async (v) => {
@@ -116,7 +118,7 @@ export default function Analytics() {
 
       {/* ── Details (collapsed) — one analysis panel at a time (#123) ─── */}
       <Collapse title="Details — raw analytics"
-        subtitle="structure · placement · trend · channel×regime · regime mix · FVG/OB">
+        subtitle="structure · placement · trend · MC/Turtle · channel×regime · regime mix · FVG/OB">
         <DetailsTabs tabs={[
           { key: "structure", label: "Structure",
             node: <StructureMapCard map={map} price={price} busy={mapBusy} onRecompute={recompute} /> },
@@ -124,6 +126,8 @@ export default function Analytics() {
             node: <StructureMapChart map={map} price={price} /> },
           { key: "trend", label: "Trend",
             node: <TrendAlignmentCard trend={trend} /> },
+          { key: "shadow_strategies", label: "MC / Turtle",
+            node: <ShadowStrategiesCard shadow={shadow} /> },
           { key: "channel_regime", label: "Channel×Regime",
             node: <ChannelRegimeCard rep={rep} sigN={synth?.significance_n ?? 30} /> },
           ...(rep?.regime_mix_by_channel && Object.keys(rep.regime_mix_by_channel).length > 0
@@ -455,6 +459,161 @@ function TrendAlignmentCard({ trend }) {
         Shadow metric — the filter itself acts at placement. Small samples shrink toward the base rate.
       </div>
     </Card>
+  );
+}
+
+// Monte Carlo geometry null + Turtle breakout vs outcome. The point of this panel
+// is that a raw win-rate is not evidence: a signal with a far stop and a near
+// target wins most of the time by arithmetic. `edge` is the realized win-rate
+// MINUS what each signal's own SL/TP layout implies with no skill assumed, so it
+// is the first number here that can actually be read as channel skill.
+const pp = (v) => (v == null ? "—" : `${v >= 0 ? "+" : ""}${(v * 100).toFixed(1)}pp`);
+const sgn = (v, d = 2) => (v == null ? "—" : `${v >= 0 ? "+" : ""}${Number(v).toFixed(d)}`);
+const edgeCls = (v) => (v == null ? "" : v > 0 ? "text-long" : v < 0 ? "text-short" : "text-muted");
+
+function ShadowStrategiesCard({ shadow }) {
+  if (!shadow) return <Card><Empty>Loading…</Empty></Card>;
+  const mc = shadow.montecarlo || {};
+  const tu = shadow.turtle || {};
+  const sigN = shadow.significance_n ?? 30;
+  const mcChannels = Object.entries(mc.by_channel || {});
+  const tuRows = ["agrees", "disagrees"].filter(k => tu.overall?.[k]);
+
+  return (
+    <div className="space-y-5">
+      <Card>
+        <div className="px-4 py-3 border-b border-edge text-sm font-medium flex items-center gap-2 flex-wrap">
+          Monte Carlo — geometry null<HelpHint term="mc_geometry_null" />
+          <span className="text-muted font-normal text-[11px]">
+            · {mc.n ?? 0} labelled · significant at N≥{sigN}
+          </span>
+        </div>
+        {!mc.n ? (
+          <Empty>No labelled signals with a Monte Carlo block yet — accrues as signals capture and trades close.</Empty>
+        ) : (
+          <>
+            {mc.n_horizon_truncated > 0 && (
+              <div className="mx-4 mt-3 rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-warn">
+                <b>{mc.n_horizon_truncated} of {mc.n} signals didn't resolve inside the horizon.</b>{" "}
+                Their geometry win-rate is understated, which inflates Edge in the same direction.
+                Raise <span className="num">analytics.montecarlo.horizon_bars</span> and let it
+                re-accrue before reading these as skill.
+              </div>
+            )}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 p-4">
+              {[
+                { label: "Actual win%", value: pct0(mc.actual_win_rate) },
+                { label: "Geometry win%", value: pct0(mc.geometry_win_rate), sub: "no skill assumed" },
+                { label: "Edge", value: pp(mc.edge), cls: edgeCls(mc.edge), sub: "actual − geometry" },
+                { label: "Mean R vs null", value: sgn(mc.r_edge), cls: edgeCls(mc.r_edge),
+                  sub: `${sgn(mc.actual_mean_r)} vs ${sgn(mc.null_mean_r)}` },
+              ].map(t => (
+                <div key={t.label} className="rounded-lg border border-edge bg-panel2/40 p-3">
+                  <div className="text-[10px] uppercase tracking-wider text-muted truncate">{t.label}</div>
+                  <div className={`mt-1 num text-xl font-semibold ${t.cls || ""}`}>{t.value}</div>
+                  {t.sub && <div className="text-[11px] text-muted mt-0.5 num">{t.sub}</div>}
+                </div>
+              ))}
+            </div>
+
+            <Table minW={860}>
+              <thead><tr className="border-b border-edge">
+                <Th>Channel</Th><Th right>n / {sigN}</Th><Th right>Actual</Th>
+                <Th right>Geometry</Th><Th right>Edge</Th>
+                <Th right>90% CI<HelpHint term="credible_interval" /></Th><Th>Verdict</Th>
+              </tr></thead>
+              <tbody>
+                {mcChannels.map(([ch, c]) => (
+                  <tr key={ch} className={`border-b border-edge/60 ${c.significant ? "" : "opacity-55"}`}>
+                    <Td>{ch}</Td>
+                    <Td right mono>{c.n}<span className="text-muted">/{sigN}</span></Td>
+                    <Td right mono>{pct0(c.actual_win_rate)}</Td>
+                    <Td right mono><span className="text-muted">{pct0(c.geometry_win_rate)}</span></Td>
+                    <Td right mono><span className={edgeCls(c.edge)}>{pp(c.edge)}</span></Td>
+                    <Td right mono>{pct0(c.ci_low)}–{pct0(c.ci_high)}</Td>
+                    <Td>{!c.significant
+                      ? <span className="text-[10px] text-muted">gathering</span>
+                      : <Badge tone={c.beats_null ? "long" : "muted"}>
+                          {c.beats_null ? "beats null" : "no edge"}</Badge>}</Td>
+                  </tr>
+                ))}
+              </tbody>
+            </Table>
+
+            {!!mc.calibration?.length && (
+              <>
+                <div className="px-4 pt-3 text-[11px] text-muted">
+                  <b>Calibration</b> — is the null itself trustworthy? Actual should track Geometry
+                  down the diagonal. A whole column drifting one way means the volatility estimate or
+                  the horizon is off, not that the channels found an edge.
+                </div>
+                <Table minW={620}>
+                  <thead><tr className="border-b border-edge">
+                    <Th>P(win) bucket</Th><Th right>n</Th><Th right>Geometry</Th>
+                    <Th right>Actual</Th><Th right>Edge</Th>
+                  </tr></thead>
+                  <tbody>
+                    {mc.calibration.map(b => (
+                      <tr key={b.bucket} className="border-b border-edge/60">
+                        <Td mono>{b.bucket}</Td>
+                        <Td right mono>{b.n}</Td>
+                        <Td right mono><span className="text-muted">{pct0(b.geometry_win_rate)}</span></Td>
+                        <Td right mono>{pct0(b.actual_win_rate)}</Td>
+                        <Td right mono><span className={edgeCls(b.edge)}>{pp(b.edge)}</span></Td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </Table>
+              </>
+            )}
+          </>
+        )}
+        <div className="px-4 py-2 text-[11px] text-muted">
+          A <b>high</b> geometry win% is not good news — it means the stop is far and the target near.
+          Read <b>Edge</b> and <b>Mean R vs null</b>, never the raw win-rate. Shadow — nothing gates.
+        </div>
+      </Card>
+
+      <Card>
+        <div className="px-4 py-3 border-b border-edge text-sm font-medium flex items-center gap-2 flex-wrap">
+          Turtle — 55-bar Donchian breakout<HelpHint term="turtle_signal" />
+          <span className="text-muted font-normal text-[11px]">
+            · {tu.n_unknown ?? 0} without a reading
+            {tu.n_diverges ? ` · ${tu.n_diverges} where the reference variant diverges` : ""}
+          </span>
+        </div>
+        {!tuRows.length ? (
+          <Empty>No labelled signals with a Turtle reading yet — needs more than 55 bars of history at signal time.</Empty>
+        ) : (
+          <Table minW={720}>
+            <thead><tr className="border-b border-edge">
+              <Th>Breakout system</Th><Th right>n</Th><Th right>Win%</Th>
+              <Th right>90% CI</Th><Th right>Net</Th><Th right>Expectancy</Th>
+            </tr></thead>
+            <tbody>
+              {tuRows.map(k => {
+                const r = tu.overall[k];
+                return (
+                  <tr key={k} className="border-b border-edge/60">
+                    <Td><Badge tone={k === "agrees" ? "long" : "short"}>{k}</Badge></Td>
+                    <Td right mono>{r.n}</Td>
+                    <Td right mono>{pct0(r.win_rate)}</Td>
+                    <Td right mono>{pct0(r.ci_low)}–{pct0(r.ci_high)}</Td>
+                    <Td right mono><span className={r.net >= 0 ? "text-long" : "text-short"}>{fmt(r.net)}</span></Td>
+                    <Td right mono><span className={r.expectancy >= 0 ? "text-long" : "text-short"}>{fmt(r.expectancy)}</span></Td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </Table>
+        )}
+        <div className="px-4 py-2 text-[11px] text-muted">
+          "agrees" = the mechanical breakout system held the same side as the channel's call. A channel
+          that only wins when it agrees is echoing a free rule; one that wins independently is adding
+          something the rule cannot see. Shadow — nothing gates.
+        </div>
+      </Card>
+    </div>
   );
 }
 

@@ -33,6 +33,16 @@ export const RULE_TYPES = {
     hint: "act only during the named trading sessions",
     blank: { type: "session_in", sessions: [] },
   },
+  mc_probability: {
+    label: "Monte Carlo (geometry)",
+    hint: "act on what the SL/TP layout is worth with NO channel skill — a HIGH P(win) means a far stop and a near target, not an edge. SHADOW: inert until graduated.",
+    blank: { type: "mc_probability", max_expected_r: 0, min_p_win: "", max_p_win: "", min_rr: "" },
+  },
+  turtle_signal: {
+    label: "Turtle (Donchian)",
+    hint: "act on whether the 55-bar breakout system agrees with the channel's direction. SHADOW: inert until graduated.",
+    blank: { type: "turtle_signal", agrees: false, position: "", variant: "signal" },
+  },
 };
 
 const newRule = (type) => ({ enabled: true, name: "", when: { ...RULE_TYPES[type].blank }, action: "scale", factor: 0.5 });
@@ -69,6 +79,46 @@ function RuleFields({ when, set }) {
             <option value="trending">trending (ADX &gt; 25)</option><option value="ranging">ranging</option>
           </Select></Field>
         <Field label="Min ADX (optional)" hint="also require ADX ≥ this"><Input type="number" step="1" value={when.min_adx ?? ""} onChange={(e) => set("min_adx", e.target.value)} /></Field>
+      </div>
+    );
+  }
+  if (t === "mc_probability") {
+    return (
+      <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
+        <Field label="Max expected R" hint="match when the null's E[R] is ≤ this. 0 = 'loses money without channel skill'">
+          <Input type="number" step="0.05" value={when.max_expected_r ?? ""} onChange={(e) => set("max_expected_r", e.target.value)} /></Field>
+        <Field label="Min expected R" hint="match when E[R] ≥ this">
+          <Input type="number" step="0.05" value={when.min_expected_r ?? ""} onChange={(e) => set("min_expected_r", e.target.value)} /></Field>
+        <Field label="Min P(win) geometry" hint="0–1 · P(TP1 before SL) with no skill assumed">
+          <Input type="number" step="0.05" value={when.min_p_win ?? ""} onChange={(e) => set("min_p_win", e.target.value)} /></Field>
+        <Field label="Max P(win) geometry" hint="0–1">
+          <Input type="number" step="0.05" value={when.max_p_win ?? ""} onChange={(e) => set("max_p_win", e.target.value)} /></Field>
+        <Field label="Min RR to TP1" hint="reward:risk of the posted levels">
+          <Input type="number" step="0.1" value={when.min_rr ?? ""} onChange={(e) => set("min_rr", e.target.value)} /></Field>
+        <Field label="Max RR to TP1" hint="reward:risk of the posted levels">
+          <Input type="number" step="0.1" value={when.max_rr ?? ""} onChange={(e) => set("max_rr", e.target.value)} /></Field>
+      </div>
+    );
+  }
+  if (t === "turtle_signal") {
+    return (
+      <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
+        <Field label="Agreement" hint="match when the breakout system does / does not back this direction">
+          <Select value={when.agrees === true ? "yes" : when.agrees === false ? "no" : "any"}
+            onChange={(e) => set("agrees", e.target.value === "any" ? null : e.target.value === "yes")}>
+            <option value="any">any</option><option value="yes">agrees with signal</option>
+            <option value="no">disagrees with signal</option>
+          </Select></Field>
+        <Field label="Position" hint="match only when the Turtle holds this side">
+          <Select value={when.position ?? ""} onChange={(e) => set("position", e.target.value)}>
+            <option value="">any</option><option value="long">long</option>
+            <option value="short">short</option><option value="flat">flat</option>
+          </Select></Field>
+        <Field label="Variant" hint="reference = the source script (never goes flat); flat = its documented intent">
+          <Select value={when.variant ?? "signal"} onChange={(e) => set("variant", e.target.value)}>
+            <option value="signal">reference (stop-and-reverse)</option>
+            <option value="signal_flat">exits to flat</option>
+          </Select></Field>
       </div>
     );
   }

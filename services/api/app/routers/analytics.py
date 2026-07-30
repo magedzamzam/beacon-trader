@@ -10,7 +10,8 @@ from beacon_core.analysis.report import (channel_regime_report,
                                          structure_outcome_report,
                                          structure_magnet_outcome_report,
                                          trend_alignment_outcome_report,
-                                         execution_geometry_ab_report)
+                                         execution_geometry_ab_report,
+                                         shadow_strategy_report)
 from beacon_core.analysis.sidecar import load_config
 from beacon_core.analysis import structure_map as struct_map
 from beacon_core.analysis._util import nearest_sides
@@ -107,6 +108,20 @@ async def execution_geometry(date_from: str = None, date_to: str = None,
     scope. Shadow / read-only — judge only at N≥30 closed per arm."""
     return await execution_geometry_ab_report(
         db, parse_iso_utc(date_from), parse_iso_utc(date_to), source_id=source_id)
+
+
+@router.get("/shadow-strategies")
+async def shadow_strategies(date_from: str = None, date_to: str = None,
+                            db: AsyncSession = Depends(get_db)):
+    """Monte Carlo geometry null + Turtle breakout vs realized outcome.
+
+    The headline is `montecarlo.edge`: realized win-rate MINUS the win-rate each
+    signal's own SL/TP geometry implies with no channel skill assumed. A channel
+    posting a far stop and a near target wins most of its trades by arithmetic —
+    only the excess over its own null is evidence. `turtle` splits the same
+    trades by whether the 55-bar Donchian system agreed with the channel.
+    Shadow / read-only — neither gates."""
+    return await shadow_strategy_report(db, parse_iso_utc(date_from), parse_iso_utc(date_to))
 
 
 @router.get("/structure/outcome")

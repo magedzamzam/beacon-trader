@@ -130,6 +130,7 @@ export const api = {
   analyticsCorrelation: (range = {}) => req(`/analytics/correlation${_perfQs("", range)}`),
   analyticsStructure: (range = {}) => req(`/analytics/structure${_perfQs("", range)}`),
   analyticsTrendAlignment: (range = {}) => req(`/analytics/trend-alignment${_perfQs("", range)}`),
+  analyticsShadowStrategies: (range = {}) => req(`/analytics/shadow-strategies${_perfQs("", range)}`),
   signalAnalytics: (id) => req(`/analytics/signal/${id}`),
   structureMap: (symbol = "XAUUSD") => req(`/analytics/structure/map?symbol=${encodeURIComponent(symbol)}`),
   structureRecompute: () => req("/analytics/structure/recompute", { method: "POST" }),
