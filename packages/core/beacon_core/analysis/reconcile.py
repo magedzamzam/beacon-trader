@@ -37,6 +37,38 @@ def _bot_max_tp(legs) -> int:
     return max(hit) if hit else 0
 
 
+def bot_exit(legs) -> str:
+    """How the trade actually ENDED, for a signal that filled but reached no TP.
+
+    "Filled" is an interim state — a position ends at a TP, at the stop, or at
+    breakeven. The Reconciler used to print `filled` for anything with a fill and
+    no `tp_hit`, so 84 of 101 such signals were fully closed (78 of them stopped
+    out) and still displayed as though they were mid-flight. The legs already
+    carry the answer (`outcome` is set on every closed leg — there is not one
+    `status='closed'` row with a null outcome), it was simply never read.
+
+    Precedence: a live leg means the trade is not over; otherwise the worst
+    terminal state wins, because that is the informative one.
+      open      — at least one leg is still running
+      sl        — closed, and something stopped out
+      breakeven — closed at BE, nothing stopped out
+      closed    — closed with no terminal label (cancelled / expired only)
+      none      — nothing ever filled
+    """
+    filled = [l for l in legs
+              if l.get("status") in _FILLED or l.get("fill_price") is not None]
+    if not filled:
+        return "none"
+    if any(l.get("status") == "open" for l in filled):
+        return "open"
+    outcomes = {l.get("outcome") for l in filled}
+    if "sl_hit" in outcomes:
+        return "sl"
+    if "breakeven" in outcomes:
+        return "breakeven"
+    return "closed"
+
+
 def reconcile_signal(*, signal_status: str, n_signal_tps: int, is_history: bool,
                      claims: List[dict], legs: List[dict], blocked: bool = False) -> dict:
     """claims: [{max_tp_claimed, sl_claimed, all_tp}]; legs: [{tp_index, status,
@@ -92,6 +124,8 @@ def reconcile_signal(*, signal_status: str, n_signal_tps: int, is_history: bool,
     return {
         "claimed_max_tp": claimed_max_tp, "claimed_sl": claimed_sl,
         "bot_max_tp": bot_max_tp, "bot_any_fill": bot_any_fill,
+        # How it ENDED, not just that it started (#174). "filled" is interim.
+        "bot_exit": bot_exit(legs),
         "bot_status": signal_status,
         "category": cat, "detail": detail, "is_history": is_history,
     }

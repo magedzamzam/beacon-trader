@@ -170,6 +170,7 @@ async def _build_rows(db, frm, to, source_id, include_history):
             "trade_ids": [t.id for t in sorted(trades_by_sig.get(sig.id, []), key=lambda x: x.id)],
             "claimed_max_tp": rec["claimed_max_tp"], "claimed_sl": rec["claimed_sl"],
             "bot_max_tp": rec["bot_max_tp"], "bot_any_fill": rec["bot_any_fill"],
+            "bot_exit": rec["bot_exit"],
             "category": rec["category"], "detail": rec["detail"], "is_history": is_history,
             "protected": protected, "protected_reason": protected_reason,
             "uncomparable": is_uncomparable(rec["category"]), "net_pl": net_pl,

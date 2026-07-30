@@ -29,6 +29,25 @@ const OVERRIDE_OPTS = [
   ["breakeven", "Breakeven"],
 ];
 
+// How the bot's trade ENDED (#174). This column used to print "filled" for
+// anything that reached no TP, so 78 stop-outs and a pile of breakevens read as
+// an ambiguous mid-flight state — on trades that had been closed for days.
+// `bot_exit` comes from the leg outcomes, which were always there.
+const EXIT = {
+  sl: ["SL", "text-short"],
+  breakeven: ["BE", "text-muted"],
+  open: ["open", "text-warn"],
+  closed: ["closed", "text-muted"],
+};
+
+function BotResult({ row }) {
+  if (row.bot_max_tp) return <span className="text-long">TP{row.bot_max_tp}</span>;
+  const [label, cls] = EXIT[row.bot_exit] || [];
+  if (label) return <span className={cls}>{label}</span>;
+  // bot_exit === "none", or an older payload without the field
+  return <span className="text-muted">{row.bot_any_fill ? "filled" : "—"}</span>;
+}
+
 // Claim-linker staleness (#173). Silence here is indistinguishable from "the
 // channels said nothing", which is exactly how three days of dead linking went
 // unnoticed — so it gets its own banner rather than a number in a corner.
@@ -185,7 +204,7 @@ export default function Reconciliation() {
                       <Td>{r.source_name || "—"}{r.is_history && <span className="text-[10px] text-muted ml-1">hist</span>}</Td>
                       <Td><Badge dot tone={r.direction === "BUY" ? "long" : "short"}>{r.direction}</Badge></Td>
                       <Td right mono>{r.claimed_max_tp ? `TP${r.claimed_max_tp}` : (r.claimed_sl ? "SL" : "—")}</Td>
-                      <Td right mono>{r.bot_max_tp ? `TP${r.bot_max_tp}` : (r.bot_any_fill ? "filled" : "—")}</Td>
+                      <Td right mono><BotResult row={r} /></Td>
                       <Td><Badge tone={catTone(r.category)}>{catLabel(r.category)}</Badge></Td>
                       <Td><span className="text-xs text-muted">{r.detail}</span></Td>
                     </tr>

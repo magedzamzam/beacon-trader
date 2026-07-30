@@ -44,6 +44,41 @@ def test_match():
     assert r["category"] == "match" and r["bot_max_tp"] == 3
 
 
+def test_bot_exit_resolves_filled_into_how_the_trade_actually_ended():
+    """#174: 'filled' is an interim state — a position ends at a TP, the stop, or
+    breakeven. 84 of 101 signals showing 'filled' were fully CLOSED (78 stopped
+    out), because only `tp_hit` was ever read."""
+    assert R.bot_exit([_leg(1, "closed", "sl_hit", 4015)]) == "sl"
+    assert R.bot_exit([_leg(1, "closed", "breakeven", 4015)]) == "breakeven"
+    assert R.bot_exit([_leg(1, "open", None, 4015)]) == "open"
+    assert R.bot_exit([_leg(1, "cancelled", "cancelled")]) == "none"
+    assert R.bot_exit([]) == "none"
+
+
+def test_bot_exit_precedence():
+    """A live leg means the trade is not over; otherwise the WORST terminal state
+    wins, because that is the informative one."""
+    mixed = [_leg(1, "closed", "breakeven", 4015), _leg(2, "closed", "sl_hit", 4015)]
+    assert R.bot_exit(mixed) == "sl"
+    still_running = [_leg(1, "closed", "sl_hit", 4015), _leg(2, "open", None, 4015)]
+    assert R.bot_exit(still_running) == "open"
+    # a cancelled leg alongside a fill must not mask the fill's outcome
+    assert R.bot_exit([_leg(1, "cancelled", "cancelled"),
+                       _leg(2, "closed", "sl_hit", 4015)]) == "sl"
+    # closed, but only non-terminal labels
+    assert R.bot_exit([_leg(1, "closed", None, 4015)]) == "closed"
+
+
+def test_reconcile_signal_carries_bot_exit():
+    """bot_exit is additive — it must not disturb the existing categories."""
+    legs = [_leg(1, "closed", "sl_hit", 4015), _leg(2, "closed", "sl_hit", 4015)]
+    r = reconcile_signal(signal_status="executed", n_signal_tps=3, is_history=False,
+                         claims=[{"max_tp_claimed": 2, "sl_claimed": False,
+                                  "all_tp": False}], legs=legs)
+    assert r["bot_exit"] == "sl" and r["bot_any_fill"] is True and r["bot_max_tp"] == 0
+    assert r["category"] == "shortfall_stopped_before_tp"   # unchanged by #174
+
+
 def test_no_claim_when_the_channel_never_posted_an_outcome():
     """#172: the bot filled, the channel went quiet. Nothing to compare against —
     neither a match nor a gap. These were structurally invisible because the
