@@ -6,14 +6,16 @@ from collections import Counter, defaultdict
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from beacon_core.analysis.claims import link_claims
+from beacon_core.logging import get_logger
 from beacon_core.analysis.reconcile import (reconcile_signal, override_to_claim,
                                             valid_override, is_protected,
                                             is_uncomparable)
-from beacon_core.db.models import Event, Leg, SignalClaim, Signal, Source, Trade
+from beacon_core.db.models import (Event, Leg, SignalClaim, Signal, Source,
+                                   TelegramMessage, Trade)
 from beacon_core.timeutil import parse_iso_utc as _parse_dt
 from ..deps import get_db
 from ..auth import require_token
@@ -21,11 +23,51 @@ from ..auth import require_token
 router = APIRouter(prefix="/reconciliation", tags=["reconciliation"],
                    dependencies=[Depends(require_token)])
 
+log = get_logger("api.reconciliation")
+
 # Event kinds that mean the bot DELIBERATELY did not place a trade (#136 pt2). A
 # zero-leg signal carrying one of these is protection, not a "said executed, placed
 # nothing" bug — so it's excluded from the match-rate denominator.
 _BLOCK_KINDS = ("risk_blocked", "ai_blocked", "breaker_state",
                 "blocked_untrusted", "entry_filtered")
+
+
+async def _link_claims_logged(db) -> None:
+    """Keep claims fresh, and NEVER fail silently again (#173).
+
+    These call sites used to be `except Exception: pass`, which is how a wedged
+    linker cost three days of claims with no log line anywhere. Linking must not
+    break the page — the Reconciler is still readable with stale claims — but the
+    failure has to be audible."""
+    try:
+        await link_claims(db)
+    except Exception as exc:                        # pragma: no cover - defensive
+        log.exception("link_claims failed; Reconciler is showing STALE claims: %s", exc)
+        try:
+            await db.rollback()                     # leave the session usable
+        except Exception:
+            pass
+
+
+async def _linker_health(db) -> dict:
+    """How far behind the claim linker is (#173). This failure mode is otherwise
+    completely invisible — the bot keeps trading and the page keeps rendering,
+    just with no new claims — so the number belongs on the page."""
+    from beacon_core.analysis.claims import _HWM_KEY
+    from beacon_core.settings_store import get_setting
+    try:
+        hwm = int(await get_setting(db, _HWM_KEY, 0) or 0)
+        max_id = (await db.execute(select(func.max(TelegramMessage.id)))).scalar() or 0
+        unscanned = (await db.execute(
+            select(func.count()).select_from(TelegramMessage)
+            .where(TelegramMessage.is_signal.is_(False),
+                   TelegramMessage.id > hwm))).scalar() or 0
+        last_claim = (await db.execute(select(func.max(SignalClaim.claimed_at)))).scalar()
+        return {"hwm": hwm, "max_message_id": max_id, "unscanned": int(unscanned),
+                "last_claim_at": last_claim.isoformat() if last_claim else None}
+    except Exception as exc:                        # never break the summary
+        log.warning("linker health check failed: %s", exc)
+        return {}
 
 
 async def _blocked_by_signal(db, sig_ids) -> dict:
@@ -177,10 +219,7 @@ async def set_claim_override(claim_id: int, body: OverrideIn,
 @router.get("/summary")
 async def summary(date_from: str = None, date_to: str = None, source_id: int = None,
                   include_history: bool = False, db: AsyncSession = Depends(get_db)):
-    try:
-        await link_claims(db)                       # keep claims fresh (incremental)
-    except Exception:
-        pass
+    await _link_claims_logged(db)                   # keep claims fresh (incremental)
     rows = await _build_rows(db, _parse_dt(date_from), _parse_dt(date_to),
                              source_id, include_history)
     cats = Counter(r["category"] for r in rows)
@@ -239,6 +278,7 @@ async def summary(date_from: str = None, date_to: str = None, source_id: int = N
         "claim_coverage": round(comparable / evaluable * 100, 1) if evaluable else None,
         "claimed_outcome": _cohort(lambda r: not r["uncomparable"]),
         "unclaimed_outcome": _cohort(lambda r: r["uncomparable"]),
+        "linker": await _linker_health(db),
         "categories": dict(cats),
         "by_source": sorted(by_source.values(),
                             key=lambda x: -(x["total"] + x["protected"] + x["uncomparable"])),
@@ -249,10 +289,7 @@ async def summary(date_from: str = None, date_to: str = None, source_id: int = N
 async def list_rows(date_from: str = None, date_to: str = None, source_id: int = None,
                     category: str = None, include_history: bool = False,
                     limit: int = 300, db: AsyncSession = Depends(get_db)):
-    try:
-        await link_claims(db)
-    except Exception:
-        pass
+    await _link_claims_logged(db)
     rows = await _build_rows(db, _parse_dt(date_from), _parse_dt(date_to),
                              source_id, include_history)
     if category:

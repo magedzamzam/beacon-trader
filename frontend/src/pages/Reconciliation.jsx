@@ -29,6 +29,35 @@ const OVERRIDE_OPTS = [
   ["breakeven", "Breakeven"],
 ];
 
+// Claim-linker staleness (#173). Silence here is indistinguishable from "the
+// channels said nothing", which is exactly how three days of dead linking went
+// unnoticed — so it gets its own banner rather than a number in a corner.
+const STALE_HOURS = 12;
+
+function LinkerHealth({ linker }) {
+  if (!linker || linker.hwm == null) return null;
+  const unscanned = linker.unscanned || 0;
+  const last = linker.last_claim_at ? new Date(linker.last_claim_at) : null;
+  const hoursAgo = last ? (Date.now() - last.getTime()) / 3.6e6 : null;
+  const stale = hoursAgo != null && hoursAgo > STALE_HOURS;
+  if (!unscanned && !stale) return null;
+  return (
+    <div className="rounded-lg border border-short/40 bg-short/10 px-3 py-2 text-xs text-short">
+      <b>Claim linking is behind.</b>{" "}
+      {unscanned > 0 && <>
+        <span className="num">{unscanned}</span> message{unscanned === 1 ? "" : "s"} unscanned
+        (high-water mark <span className="num">{linker.hwm}</span> of{" "}
+        <span className="num">{linker.max_message_id}</span>).{" "}
+      </>}
+      {stale && <>Last claim linked <span className="num">{Math.floor(hoursAgo)}h</span> ago.{" "}</>}
+      Every number below is stale until this clears — signals will read as
+      "Channel silent" that the channel actually reported on. Run{" "}
+      <span className="num">POST /reconciliation/refresh?full=true</span> and check the api logs
+      for <span className="num">link_claims: message … failed</span>.
+    </div>
+  );
+}
+
 export default function Reconciliation() {
   const [includeHistory, setIncludeHistory] = useState(false);
   const [category, setCategory] = useState("");     // "" = all
@@ -80,6 +109,11 @@ export default function Reconciliation() {
               value={sum.protected ?? ((sum.categories.executed_no_trade || 0) + (sum.categories.not_executed || 0))}
               tone="muted" sub="not traded — excluded from rate" />
           </div>
+
+          {/* #173: the linker wedged for three days and nothing said so — the bot
+              kept trading, the page kept rendering, claims just stopped. Loudest
+              banner on the page, because everything below is stale when it fires. */}
+          <LinkerHealth linker={sum.linker} />
 
           {/* #172: the match rate only covers the signals a channel chose to
               report. Show what the silent ones actually did, right next to it. */}
