@@ -16,6 +16,7 @@ const CAT = {
   executed_no_trade: ["No-trade bug", "short"],
   not_executed: ["Protected / not-traded", "muted"],
   claim_sl: ["Channel SL", "muted"],
+  no_claim: ["Channel silent", "violet"],
 };
 const catLabel = (c) => (CAT[c]?.[0] || c);
 const catTone = (c) => (CAT[c]?.[1] || "muted");
@@ -69,14 +70,31 @@ export default function Reconciliation() {
         <>
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             <KPI label={<>Match rate<HelpHint term="match_rate" /></>} value={sum.match_rate != null ? `${sum.match_rate}%` : "—"}
-              tone="beacon" sub={`${sum.matched}/${sum.evaluable ?? sum.total} executed`} />
+              tone="beacon" sub={`${sum.matched}/${sum.comparable ?? sum.evaluable ?? sum.total} scored by the channel`} />
+            <KPI label={<>Claim coverage<HelpHint term="claim_coverage" /></>}
+              value={sum.claim_coverage != null ? `${sum.claim_coverage}%` : "—"}
+              tone={sum.claim_coverage != null && sum.claim_coverage < 80 ? "warn" : "muted"}
+              sub={`${sum.uncomparable ?? 0} traded, channel silent`} />
             <KPI label={<>No fill<HelpHint term="no_fill" /></>} value={sum.categories.no_fill || 0} tone="short" sub="placed, never filled" />
-            <KPI label={<>Stopped early<HelpHint term="shortfall_stopped_before_tp" /></>} value={sum.categories.shortfall_stopped_before_tp || 0}
-              tone="warn" sub="filled, closed before TP" />
             <KPI label={<>Protected<HelpHint term="not_executed" /></>}
               value={sum.protected ?? ((sum.categories.executed_no_trade || 0) + (sum.categories.not_executed || 0))}
               tone="muted" sub="not traded — excluded from rate" />
           </div>
+
+          {/* #172: the match rate only covers the signals a channel chose to
+              report. Show what the silent ones actually did, right next to it. */}
+          {sum.unclaimed_outcome?.n > 0 && (
+            <div className="rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-warn">
+              <b>The match rate only sees {sum.claim_coverage}% of traded signals.</b>{" "}
+              The {sum.unclaimed_outcome.n} the channels went silent on returned{" "}
+              <span className="num">{sum.unclaimed_outcome.win_rate}%</span> win /{" "}
+              <span className="num">{sum.unclaimed_outcome.net}</span> net, against{" "}
+              <span className="num">{sum.claimed_outcome?.win_rate}%</span> /{" "}
+              <span className="num">{sum.claimed_outcome?.net}</span> for the ones they reported.
+              Channels announce wins and go quiet on losses, so read the rate as
+              "of what they told us", never as overall performance.
+            </div>
+          )}
 
           <div className="flex flex-wrap items-center gap-1.5">
             <button onClick={() => setCategory("")}

@@ -8,6 +8,12 @@ Categories (precedence order):
                                — a genuine "said executed, placed nothing" bug (#136)
   no_fill                      legs were placed but no leg ever filled — a bot fill
                                failure, independent of what the channel claimed (#136 pt4)
+  no_claim                     bot filled but the channel never posted an outcome —
+                               NOTHING TO COMPARE, so it is neither a match nor a gap
+                               (#172). Load-bearing: without this branch an unclaimed
+                               signal falls through to `claim_sl` (claimed_max_tp is 0
+                               for both), which is how 38% of traded signals would end
+                               up silently inflating that bucket.
   claim_sl                     bot filled; channel claimed only a stop-loss (no TP)
   match                        bot reached >= the highest claimed TP
   shortfall_stopped_before_tp  filled, but closed (SL/BE) before the claimed TP
@@ -63,6 +69,13 @@ def reconcile_signal(*, signal_status: str, n_signal_tps: int, is_history: bool,
     elif not bot_any_fill:
         cat = "no_fill"
         detail = f"{n_cancelled}/{len(legs)} legs {'cancelled' if n_cancelled else 'unfilled'}, 0 fills"
+    elif not claims:
+        # #172: the channel went quiet. Distinct from claim_sl, which is a channel
+        # that DID report an outcome and reported a stop. Nothing to reconcile
+        # against, so this stays out of the match-rate denominator — but it is
+        # reported, because the unclaimed cohort is where the losses live.
+        cat = "no_claim"
+        detail = f"channel posted no outcome; bot reached TP{bot_max_tp}"
     elif claimed_max_tp <= 0:
         cat = "claim_sl"
         detail = "channel claimed SL — bot filled"
@@ -92,6 +105,13 @@ GAP_CATEGORIES = ("no_fill", "shortfall_stopped_before_tp", "shortfall_leg_missi
 # the match-rate denominator (#136 pt2). Surfaced as a separate "protected" count.
 PROTECTED_CATEGORIES = ("not_executed",)
 
+# categories with no channel outcome to compare against (#172). Also excluded from
+# the match-rate denominator — but for the opposite reason to `protected`: the bot
+# DID trade, we just have nothing to score it against. Keeping these out silently
+# is what let a 65%-win claimed sample stand in for a 33%-win population, so the
+# summary must report coverage alongside the rate.
+UNCOMPARABLE_CATEGORIES = ("no_claim",)
+
 
 def is_match(category: str) -> bool:
     return category == "match"
@@ -99,6 +119,10 @@ def is_match(category: str) -> bool:
 
 def is_protected(category: str) -> bool:
     return category in PROTECTED_CATEGORIES
+
+
+def is_uncomparable(category: str) -> bool:
+    return category in UNCOMPARABLE_CATEGORIES
 
 
 # valid operator outcome overrides (#136 pt3) — a follow-up message the parser

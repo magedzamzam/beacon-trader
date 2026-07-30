@@ -11,7 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from beacon_core.analysis.claims import link_claims
 from beacon_core.analysis.reconcile import (reconcile_signal, override_to_claim,
-                                            valid_override, is_protected)
+                                            valid_override, is_protected,
+                                            is_uncomparable)
 from beacon_core.db.models import Event, Leg, SignalClaim, Signal, Source, Trade
 from beacon_core.timeutil import parse_iso_utc as _parse_dt
 from ..deps import get_db
@@ -47,10 +48,17 @@ async def _build_rows(db, frm, to, source_id, include_history):
     by_sig = defaultdict(list)
     for c in claims:
         by_sig[c.signal_id].append(c)
-    if not by_sig:
-        return []
 
-    sig_ids = list(by_sig.keys())
+    # #172: the candidate set is every signal with a claim OR at least one trade.
+    # Starting from claims alone made 38% of traded signals structurally invisible
+    # — and they were the losing 38% (claimed 65% win / +20k, unclaimed 33% / -207k),
+    # so the match rate was measuring what channels chose to announce. A signal with
+    # neither a claim nor a trade has nothing to reconcile and stays out.
+    traded_ids = set((await db.execute(
+        select(Trade.signal_id).distinct())).scalars().all())
+    sig_ids = list(set(by_sig.keys()) | traded_ids)
+    if not sig_ids:
+        return []
     sq = (select(Signal, Source.name)
           .outerjoin(Source, Source.id == Signal.source_id)
           .where(Signal.id.in_(sig_ids)))
@@ -105,6 +113,11 @@ async def _build_rows(db, frm, to, source_id, include_history):
                                is_history=is_history, claims=claim_dicts, legs=leg_dicts,
                                blocked=blocked_kind is not None)
         protected = is_protected(rec["category"])
+        # Trade-level realized P&L (CLAUDE.md §2.5 — never leg-level), so the
+        # summary can show what the unclaimed cohort actually did (#172).
+        sig_trades = trades_by_sig.get(sig.id, [])
+        pls = [float(t.realized_pl) for t in sig_trades if t.realized_pl is not None]
+        net_pl = round(sum(pls), 2) if pls else None
         protected_reason = ((sig.reject_reason or blocked_kind or sig.status)
                             if protected else None)
         rows.append({
@@ -117,6 +130,7 @@ async def _build_rows(db, frm, to, source_id, include_history):
             "bot_max_tp": rec["bot_max_tp"], "bot_any_fill": rec["bot_any_fill"],
             "category": rec["category"], "detail": rec["detail"], "is_history": is_history,
             "protected": protected, "protected_reason": protected_reason,
+            "uncomparable": is_uncomparable(rec["category"]), "net_pl": net_pl,
             "claims": [{"id": c.id, "max_tp": c.max_tp_claimed, "sl": c.sl_claimed, "all_tp": c.all_tp,
                         "text": c.raw_text, "at": c.claimed_at.isoformat() if c.claimed_at else None,
                         "override_outcome": c.override_outcome, "override_note": c.override_note}
@@ -177,26 +191,57 @@ async def summary(date_from: str = None, date_to: str = None, source_id: int = N
     for r in rows:
         s = by_source.setdefault(r["source_id"], {"source_id": r["source_id"],
                                                   "name": r["source_name"], "match": 0,
-                                                  "total": 0, "protected": 0})
+                                                  "total": 0, "protected": 0,
+                                                  "uncomparable": 0})
         if r["protected"]:
             s["protected"] += 1
             continue                                # excluded from this channel's rate
-        s["total"] += 1                             # evaluable signals only
+        if r["uncomparable"]:
+            s["uncomparable"] += 1                  # traded, but the channel went quiet
+            continue
+        s["total"] += 1                             # comparable signals only
         if r["category"] == "match":
             s["match"] += 1
     for s in by_source.values():
         s["rate"] = round(s["match"] / s["total"] * 100, 1) if s["total"] else None
+        seen = s["total"] + s["uncomparable"]
+        # What share of this channel's traded signals it actually reported an
+        # outcome for. A high rate on low coverage is the channel's PR, not its
+        # performance (#172).
+        s["claim_coverage"] = round(s["total"] / seen * 100, 1) if seen else None
     total = len(rows)
     protected = sum(1 for r in rows if r["protected"])
+    uncomparable = sum(1 for r in rows if r["uncomparable"])
     evaluable = total - protected                   # signals the bot actually engaged
+    comparable = evaluable - uncomparable           # ...and the channel scored
     matched = cats.get("match", 0)
+
+    def _cohort(pred):
+        """Realized outcome of a cohort, so the selection bias is visible on the
+        page instead of having to be discovered. Trade-level P&L only."""
+        pls = [r["net_pl"] for r in rows
+               if pred(r) and not r["protected"] and r["net_pl"] is not None]
+        if not pls:
+            return {"n": 0, "win_rate": None, "net": None}
+        return {"n": len(pls),
+                "win_rate": round(sum(1 for p in pls if p > 0) / len(pls) * 100, 1),
+                "net": round(sum(pls), 2)}
+
     return {
         "total": total, "matched": matched,
         "protected": protected, "evaluable": evaluable,
+        "uncomparable": uncomparable, "comparable": comparable,
         "protected_reasons": dict(protected_reasons),
-        "match_rate": round(matched / evaluable * 100, 1) if evaluable else None,
+        # Denominator is `comparable`: an unclaimed signal has no outcome to be
+        # scored against, so counting it would understate the rate as surely as
+        # hiding it overstated the sample (#172).
+        "match_rate": round(matched / comparable * 100, 1) if comparable else None,
+        "claim_coverage": round(comparable / evaluable * 100, 1) if evaluable else None,
+        "claimed_outcome": _cohort(lambda r: not r["uncomparable"]),
+        "unclaimed_outcome": _cohort(lambda r: r["uncomparable"]),
         "categories": dict(cats),
-        "by_source": sorted(by_source.values(), key=lambda x: -(x["total"] + x["protected"])),
+        "by_source": sorted(by_source.values(),
+                            key=lambda x: -(x["total"] + x["protected"] + x["uncomparable"])),
     }
 
 

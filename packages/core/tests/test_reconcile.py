@@ -1,5 +1,6 @@
-"""Outcome parsing (#23) + reconciliation categories (#24, #136)."""
+"""Outcome parsing (#23) + reconciliation categories (#24, #136, #172)."""
 from beacon_core.parsing.outcomes import parse_outcome
+from beacon_core.analysis import reconcile as R
 from beacon_core.analysis.reconcile import (reconcile_signal, override_to_claim,
                                             valid_override, is_protected,
                                             GAP_CATEGORIES, PROTECTED_CATEGORIES)
@@ -41,6 +42,59 @@ def test_match():
     r = reconcile_signal(signal_status="executed", n_signal_tps=3, is_history=False,
                          claims=[{"max_tp_claimed": 3, "sl_claimed": False, "all_tp": False}], legs=legs)
     assert r["category"] == "match" and r["bot_max_tp"] == 3
+
+
+def test_no_claim_when_the_channel_never_posted_an_outcome():
+    """#172: the bot filled, the channel went quiet. Nothing to compare against —
+    neither a match nor a gap. These were structurally invisible because the
+    Reconciler listed claims and worked backwards, and they turned out to be
+    where the losses live (claimed 65% win / +20k, unclaimed 33% / -207k)."""
+    legs = [_leg(1, "closed", "tp_hit", 4015), _leg(2, "closed", "sl_hit", 4015)]
+    r = reconcile_signal(signal_status="executed", n_signal_tps=3, is_history=False,
+                         claims=[], legs=legs)
+    assert r["category"] == "no_claim"
+    assert r["claimed_max_tp"] == 0 and r["bot_any_fill"] is True
+
+
+def test_no_claim_is_not_claim_sl():
+    """The regression this branch exists to prevent. An unclaimed signal and an
+    SL-claiming one BOTH have claimed_max_tp == 0, so without the `no_claim`
+    branch, opening the query to traded signals would have dumped 38% of the book
+    into `claim_sl` and quietly corrupted it."""
+    legs = [_leg(1, "closed", "sl_hit", 4015)]
+    silent = reconcile_signal(signal_status="executed", n_signal_tps=3, is_history=False,
+                              claims=[], legs=legs)
+    reported = reconcile_signal(signal_status="executed", n_signal_tps=3, is_history=False,
+                                claims=[{"max_tp_claimed": 0, "sl_claimed": True,
+                                         "all_tp": False}], legs=legs)
+    assert silent["category"] == "no_claim"
+    assert reported["category"] == "claim_sl"
+
+
+def test_no_claim_is_uncomparable_but_not_protected_or_a_gap():
+    """It must stay OUT of the match-rate denominator (nothing to score against)
+    without being mistaken for protection (the bot did trade) or for a shortfall
+    (we do not know that it fell short)."""
+    assert R.is_uncomparable("no_claim") is True
+    assert R.is_protected("no_claim") is False
+    assert R.is_match("no_claim") is False
+    assert "no_claim" not in R.GAP_CATEGORIES
+    assert R.is_uncomparable("match") is False
+
+
+def test_leg_and_fill_checks_still_outrank_no_claim():
+    """#136's precedence stands: 'did the bot place legs / did any fill' is more
+    fundamental than anything about the claim, including its absence."""
+    unfilled = [_leg(i, "cancelled", "cancelled") for i in (1, 2)]
+    r = reconcile_signal(signal_status="executed", n_signal_tps=3, is_history=False,
+                         claims=[], legs=unfilled)
+    assert r["category"] == "no_fill"
+    r = reconcile_signal(signal_status="executed", n_signal_tps=3, is_history=False,
+                         claims=[], legs=[])
+    assert r["category"] == "executed_no_trade"
+    r = reconcile_signal(signal_status="rejected", n_signal_tps=3, is_history=False,
+                         claims=[], legs=[])
+    assert r["category"] == "not_executed"
 
 
 def test_no_fill():

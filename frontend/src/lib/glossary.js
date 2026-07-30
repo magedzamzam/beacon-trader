@@ -239,10 +239,24 @@ export const GLOSSARY = [
   // ---- Reconciler -----------------------------------------------------------
   {
     id: "match_rate", term: "Match rate", section: "reconciler",
-    what: "The share of the channel's claimed outcomes that our execution actually reproduced, over the signals the bot actually engaged.",
+    what: "The share of the channel's claimed outcomes that our execution actually reproduced, over the signals the bot engaged AND the channel scored.",
     read: "A health check on execution, not on the channel. Low match rate = we are not tracking what we subscribed to.",
-    not: "NOT a win-rate and NOT a profit measure. The denominator EXCLUDES protected/not-traded signals (risk-blocked, untrusted, skipped) — deliberate non-trades never drag it down.",
-    act: "Investigate the miss taxonomy below before changing any strategy.",
+    not: "NOT a win-rate and NOT a profit measure. The denominator EXCLUDES protected/not-traded signals (risk-blocked, untrusted, skipped) and signals the channel never reported an outcome for — there is nothing to compare those against. It therefore covers only part of what we traded: always read Claim coverage beside it.",
+    act: "Check Claim coverage first. Then investigate the miss taxonomy below before changing any strategy.",
+  },
+  {
+    id: "claim_coverage", term: "Claim coverage", section: "reconciler",
+    what: "The share of traded signals the channel actually reported an outcome for. The rest are categorised 'Channel silent' — the bot traded them, the channel said nothing.",
+    read: "It qualifies the match rate. At 62% coverage, a 65% match rate describes under two thirds of what we traded.",
+    not: "NOT a data bug on our side — the claim parser does catch losses ('SL HIT', 'Stoploss HIT'). Those messages are mostly not being posted.",
+    act: "Treat a channel's match rate as untrustworthy below ~80% coverage, and compare the silent cohort's realized outcome against the reported one. Channels announce wins and go quiet on losses, so the gap is usually large and always in the same direction.",
+  },
+  {
+    id: "no_claim", term: "Channel silent (no_claim)", section: "reconciler",
+    what: "The bot filled the trade and the channel never posted any outcome for it, so there is no claim to reconcile against.",
+    read: "Neither a match nor a miss — genuinely uncomparable, which is why it sits outside the match-rate denominator.",
+    not: "NOT the same as 'Channel SL', which is a channel that DID report, and reported a stop. And NOT protection: the bot really traded these, with real money.",
+    act: "Read them for P&L, not for match rate. This cohort is where the losses concentrate, and it is invisible in any channel-reported statistic.",
   },
   {
     id: "no_fill", term: "no_fill", section: "reconciler",
