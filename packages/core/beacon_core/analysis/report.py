@@ -906,3 +906,182 @@ async def shadow_strategy_report(session, frm=None, to=None) -> dict:
          "montecarlo": (an or {}).get("montecarlo"),
          "turtle": (an or {}).get("turtle")}
         for name, an, pl, risk in rows])
+
+
+# --- Turtle exit counterfactual (#170) ----------------------------------------
+def _timeframe_delta(timeframe: str):
+    """One bar's wall-clock width, for sizing the channel warm-up window."""
+    import datetime as _dt
+    mins = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
+    return _dt.timedelta(minutes=mins.get(timeframe, 60))
+
+
+def turtle_exit_rollup(rows, significance_n: int = SIGNIFICANCE_N) -> dict:
+    """Pure reduction behind /analytics/turtle-exit. DB-free, unit-testable.
+
+    `rows`: iterable of {channel, direction, actual_r, counterfactual_r, delta_r,
+    flipped}. Every R is PRICE-basis (see turtle.exit_counterfactual) so actual
+    and counterfactual are comparable to each other. They are NOT the money
+    figures on `trades.realized_pl`, which span a multi-leg ladder.
+
+    The decision number is `mean_delta_r` — the R a flip-driven exit would have
+    ADDED. It has to clear zero by more than `stderr_delta_r` at
+    N>=significance_n before wiring a Turtle exit into the live SL engine is
+    justified. `flip_rate` matters as much: a rule that rarely fires cannot help
+    much however good its average looks.
+    """
+    def _cell():
+        return {"n": 0, "flipped": 0, "actual": 0.0, "cf": 0.0,
+                "delta": 0.0, "helped": 0, "hurt": 0}
+
+    overall = _cell()
+    by_channel = defaultdict(_cell)
+    by_direction = defaultdict(_cell)
+    deltas = []
+
+    for row in rows:
+        d, a, c = row.get("delta_r"), row.get("actual_r"), row.get("counterfactual_r")
+        if d is None or a is None or c is None:
+            continue
+        d, a, c = float(d), float(a), float(c)
+        flipped = bool(row.get("flipped"))
+        for b in (overall, by_channel[row.get("channel") or "Unattributed"],
+                  by_direction[(row.get("direction") or "?").upper()]):
+            b["n"] += 1
+            b["flipped"] += 1 if flipped else 0
+            b["actual"] += a
+            b["cf"] += c
+            b["delta"] += d
+            if flipped and d > 0:
+                b["helped"] += 1
+            elif flipped and d < 0:
+                b["hurt"] += 1
+        deltas.append(d)
+
+    def _fmt(b):
+        n = b["n"]
+        if not n:
+            return None
+        return {"n": n, "n_flipped": b["flipped"],
+                "flip_rate": round(b["flipped"] / n, 4),
+                "mean_actual_r": round(b["actual"] / n, 4),
+                "mean_counterfactual_r": round(b["cf"] / n, 4),
+                "mean_delta_r": round(b["delta"] / n, 4),
+                "helped": b["helped"], "hurt": b["hurt"],
+                "significant": n >= significance_n}
+
+    # A crude spread on the mean, so a large average off 4 trades cannot read as
+    # a finding. NOT a credible interval — these deltas are not Bernoulli.
+    stderr = None
+    if len(deltas) >= 2:
+        mu = sum(deltas) / len(deltas)
+        var = sum((x - mu) ** 2 for x in deltas) / (len(deltas) - 1)
+        stderr = (var / len(deltas)) ** 0.5
+
+    return {
+        "significance_n": significance_n,
+        "overall": _fmt(overall),
+        "stderr_delta_r": round(stderr, 4) if stderr is not None else None,
+        "by_channel": {k: _fmt(v) for k, v in by_channel.items() if v["n"]},
+        "by_direction": {k: _fmt(v) for k, v in by_direction.items() if v["n"]},
+        "note": ("SHADOW backtest — replays the 55-bar Donchian across each trade's "
+                 "holding period and prices the exit a flip would have forced, "
+                 "against where the trade actually closed. Both R figures are "
+                 "PRICE-basis off the same entry and risk distance; neither is "
+                 "trades.realized_pl, which is money across a multi-leg ladder. "
+                 "mean_delta_r is the number that matters and must clear zero by "
+                 "more than stderr_delta_r at N>=" + str(significance_n) + ". A low "
+                 "flip_rate caps the value whatever the average says. Costs are "
+                 "NOT modelled, so the extra exit is charged no spread and the "
+                 "counterfactual is flattered slightly."),
+    }
+
+
+async def turtle_exit_report(session, adapter, broker_epic: str, *,
+                             symbol: str = "XAUUSD", frm=None, to=None,
+                             timeframe: str = "1h", window: int = 55,
+                             variant: str = "signal", max_bars: int = 1000) -> dict:
+    """Driver: ONE bar fetch, then every closed trade replayed against it.
+
+    Every trade is the same instrument, so a single ranged `get_bars` covers the
+    whole report instead of one call per trade. Bars start `window` periods
+    before the earliest entry so the channel is warm at the first trade."""
+    from sqlalchemy import select
+    from ..db.models import Leg, Signal, Source, Trade
+    from ..strategy.rules import entry_basis
+    from ..ta.registry import TF_RESOLUTION
+    from .turtle import exit_counterfactual
+
+    def _empty(reason, n_trades=0):
+        return {**turtle_exit_rollup([]), "symbol": symbol, "timeframe": timeframe,
+                "variant": variant, "window": window, "n_trades": n_trades,
+                "n_evaluated": 0, "trades": [], "skipped": {reason: n_trades}}
+
+    q = (select(Trade.id, Trade.direction, Source.name)
+         .join(Signal, Signal.id == Trade.signal_id)
+         .outerjoin(Source, Source.id == Signal.source_id)
+         .where(Trade.status == "closed"))
+    if frm is not None:
+        q = q.where(Signal.created_at >= frm)
+    if to is not None:
+        q = q.where(Signal.created_at < to)
+    trades = {tid: {"direction": d, "channel": ch}
+              for tid, d, ch in (await session.execute(q)).all()}
+    if not trades:
+        return _empty("no_closed_trades")
+
+    legs = (await session.execute(
+        select(Leg.trade_id, Leg.entry, Leg.fill_price, Leg.close_price, Leg.sl,
+               Leg.lot, Leg.created_at, Leg.closed_at)
+        .where(Leg.trade_id.in_(list(trades)), Leg.status == "closed"))).all()
+
+    # Collapse a trade's ladder into ONE position: earliest open -> latest close,
+    # lot-weighted average exit price. Leg-level P&L is never read (CLAUDE.md §2.5)
+    # — a close price is a price, not a P&L attribution.
+    agg = {}
+    for tid, entry, fill, close_px, sl, lot, created, closed in legs:
+        if close_px is None or closed is None or lot is None:
+            continue
+        a = agg.setdefault(tid, {"opened": None, "closed": None, "num": 0.0,
+                                 "den": 0.0, "entry": None, "sl": None})
+        a["opened"] = created if a["opened"] is None else min(a["opened"], created)
+        a["closed"] = closed if a["closed"] is None else max(a["closed"], closed)
+        a["num"] += float(close_px) * float(lot)
+        a["den"] += float(lot)
+        if a["entry"] is None:
+            a["entry"] = float(entry_basis(fill, entry))
+            a["sl"] = float(sl) if sl is not None else None
+
+    usable = {tid: a for tid, a in agg.items()
+              if a["den"] > 0 and a["opened"] and a["closed"] and a["sl"]}
+    if not usable:
+        return _empty("no_usable_legs", len(trades))
+
+    earliest = min(a["opened"] for a in usable.values())
+    latest = max(a["closed"] for a in usable.values())
+    warm = _timeframe_delta(timeframe) * window * 3      # slack for closed hours
+    bars = await adapter.get_bars(
+        broker_epic, TF_RESOLUTION.get(timeframe, "HOUR"),
+        from_ts=(earliest - warm).strftime("%Y-%m-%dT%H:%M:%S"),
+        to_ts=latest.strftime("%Y-%m-%dT%H:%M:%S"), max_bars=max_bars)
+
+    rows, skipped = [], defaultdict(int)
+    for tid, a in usable.items():
+        meta = trades[tid]
+        cf = exit_counterfactual(
+            bars=bars, entry_time=a["opened"], exit_time=a["closed"],
+            entry_price=a["entry"], sl_price=a["sl"],
+            actual_exit_price=a["num"] / a["den"], direction=meta["direction"],
+            window=window, variant=variant)
+        if cf is None:
+            skipped["counterfactual_unavailable"] += 1
+            continue
+        rows.append({"trade_id": tid, "channel": meta["channel"],
+                     "direction": meta["direction"], **cf})
+
+    out = turtle_exit_rollup(rows)
+    out.update({"symbol": symbol, "timeframe": timeframe, "variant": variant,
+                "window": window, "n_trades": len(trades), "n_evaluated": len(rows),
+                "n_bars": len(bars), "skipped": dict(skipped),
+                "trades": sorted(rows, key=lambda r: r["delta_r"])[:50]})
+    return out

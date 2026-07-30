@@ -131,6 +131,14 @@ export const api = {
   analyticsStructure: (range = {}) => req(`/analytics/structure${_perfQs("", range)}`),
   analyticsTrendAlignment: (range = {}) => req(`/analytics/trend-alignment${_perfQs("", range)}`),
   analyticsShadowStrategies: (range = {}) => req(`/analytics/shadow-strategies${_perfQs("", range)}`),
+  // On demand: costs one ranged bar fetch from the broker, so it is not loaded
+  // with the page (#170).
+  analyticsTurtleExit: (range = {}, variant = "signal") => {
+    const p = new URLSearchParams({ variant });
+    if (range.from) p.set("date_from", range.from);
+    if (range.to) p.set("date_to", range.to);
+    return req(`/analytics/turtle-exit?${p.toString()}`);
+  },
   signalAnalytics: (id) => req(`/analytics/signal/${id}`),
   structureMap: (symbol = "XAUUSD") => req(`/analytics/structure/map?symbol=${encodeURIComponent(symbol)}`),
   structureRecompute: () => req("/analytics/structure/recompute", { method: "POST" }),

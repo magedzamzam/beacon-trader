@@ -127,7 +127,7 @@ export default function Analytics() {
           { key: "trend", label: "Trend",
             node: <TrendAlignmentCard trend={trend} /> },
           { key: "shadow_strategies", label: "MC / Turtle",
-            node: <ShadowStrategiesCard shadow={shadow} /> },
+            node: <ShadowStrategiesCard shadow={shadow} range={range} /> },
           { key: "channel_regime", label: "Channel×Regime",
             node: <ChannelRegimeCard rep={rep} sigN={synth?.significance_n ?? 30} /> },
           ...(rep?.regime_mix_by_channel && Object.keys(rep.regime_mix_by_channel).length > 0
@@ -471,7 +471,7 @@ const pp = (v) => (v == null ? "—" : `${v >= 0 ? "+" : ""}${(v * 100).toFixed(
 const sgn = (v, d = 2) => (v == null ? "—" : `${v >= 0 ? "+" : ""}${Number(v).toFixed(d)}`);
 const edgeCls = (v) => (v == null ? "" : v > 0 ? "text-long" : v < 0 ? "text-short" : "text-muted");
 
-function ShadowStrategiesCard({ shadow }) {
+function ShadowStrategiesCard({ shadow, range }) {
   if (!shadow) return <Card><Empty>Loading…</Empty></Card>;
   const mc = shadow.montecarlo || {};
   const tu = shadow.turtle || {};
@@ -613,7 +613,131 @@ function ShadowStrategiesCard({ shadow }) {
           something the rule cannot see. Shadow — nothing gates.
         </div>
       </Card>
+
+      <TurtleExitCard range={range} />
     </div>
+  );
+}
+
+// Turtle exit counterfactual (#170): would closing on a trend flip have beaten
+// where each trade actually closed? This is the evidence that decides whether a
+// Turtle exit ever gets wired into the live SL engine — so it stays a backtest
+// until it earns that, and it is loaded ON DEMAND because it costs a broker
+// bar fetch.
+function TurtleExitCard({ range }) {
+  const [rep, setRep] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const [variant, setVariant] = useState("signal");
+
+  const run = async (v) => {
+    setBusy(true); setErr(null);
+    try { setRep(await api.analyticsTurtleExit(range?.range || {}, v ?? variant)); }
+    catch (e) { setErr(e.message); setRep(null); }
+    finally { setBusy(false); }
+  };
+  useEffect(() => { setRep(null); }, [range?.fromIso, range?.toIso]);
+
+  const o = rep?.overall;
+  // The mean only means something once it clears its own spread.
+  const clear = o && rep.stderr_delta_r != null &&
+    Math.abs(o.mean_delta_r) > rep.stderr_delta_r;
+  const verdict = !o ? null
+    : !o.significant ? { tone: "muted", text: "gathering" }
+    : !clear ? { tone: "muted", text: "inside the noise" }
+    : o.mean_delta_r > 0 ? { tone: "long", text: "flip-exit would have helped" }
+    : { tone: "short", text: "flip-exit would have hurt" };
+
+  return (
+    <Card>
+      <div className="px-4 py-3 border-b border-edge flex items-center justify-between gap-2 flex-wrap">
+        <div className="text-sm font-medium flex items-center gap-2">
+          Turtle exit counterfactual<HelpHint term="turtle_exit" />
+          {verdict && <Badge tone={verdict.tone}>{verdict.text}</Badge>}
+        </div>
+        <div className="flex items-center gap-2">
+          <select value={variant} onChange={(e) => { setVariant(e.target.value); setRep(null); }}
+            className="bg-panel2 border border-edge rounded-lg px-2.5 py-1.5 text-xs outline-none focus:border-beacon">
+            <option value="signal">reference (stop-and-reverse)</option>
+            <option value="signal_flat">exits to flat</option>
+          </select>
+          <Button variant="ghost" onClick={() => run()} disabled={busy}>
+            {busy ? "Replaying…" : rep ? "Re-run" : "Run backtest"}
+          </Button>
+        </div>
+      </div>
+
+      {err && <div className="px-4 py-3 text-sm text-short">{err}</div>}
+      {!rep && !err ? (
+        <Empty>
+          Replays the 55-bar Donchian across every closed trade and prices the exit a flip would
+          have forced. Costs one bar fetch, so it runs on demand — press <b>Run backtest</b>.
+        </Empty>
+      ) : !o ? (
+        <Empty>No closed trades with usable legs in this range.</Empty>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 p-4">
+            {[
+              { label: "Mean Δ R", value: sgn(o.mean_delta_r), cls: edgeCls(o.mean_delta_r),
+                sub: rep.stderr_delta_r != null ? `± ${fmt(rep.stderr_delta_r)} stderr` : "" },
+              { label: "Actual → flip-exit",
+                value: `${sgn(o.mean_actual_r)} → ${sgn(o.mean_counterfactual_r)}` },
+              { label: "Flip rate", value: pct0(o.flip_rate),
+                sub: `${o.n_flipped}/${o.n} trades` },
+              { label: "Helped / hurt", value: `${o.helped} / ${o.hurt}`,
+                sub: `n ${o.n}/${rep.significance_n}` },
+            ].map(t => (
+              <div key={t.label} className="rounded-lg border border-edge bg-panel2/40 p-3">
+                <div className="text-[10px] uppercase tracking-wider text-muted truncate">{t.label}</div>
+                <div className={`mt-1 num text-xl font-semibold ${t.cls || ""}`}>{t.value}</div>
+                {t.sub && <div className="text-[11px] text-muted mt-0.5 num">{t.sub}</div>}
+              </div>
+            ))}
+          </div>
+
+          {!o.significant && (
+            <div className="mx-4 mb-3 rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-warn">
+              <b>{o.n} of {rep.significance_n} trades.</b> Not enough to act on — a flip-exit
+              rule stays out of the live SL engine until this clears the floor <i>and</i> the mean
+              clears its own spread.
+            </div>
+          )}
+
+          <Table minW={860}>
+            <thead><tr className="border-b border-edge">
+              <Th>Channel</Th><Th right>n</Th><Th right>Flip rate</Th>
+              <Th right>Actual R</Th><Th right>Flip-exit R</Th><Th right>Δ R</Th>
+              <Th right>Helped / hurt</Th>
+            </tr></thead>
+            <tbody>
+              {Object.entries(rep.by_channel || {}).map(([ch, c]) => (
+                <tr key={ch} className={`border-b border-edge/60 ${c.significant ? "" : "opacity-55"}`}>
+                  <Td>{ch}</Td>
+                  <Td right mono>{c.n}</Td>
+                  <Td right mono>{pct0(c.flip_rate)}</Td>
+                  <Td right mono>{sgn(c.mean_actual_r)}</Td>
+                  <Td right mono>{sgn(c.mean_counterfactual_r)}</Td>
+                  <Td right mono><span className={edgeCls(c.mean_delta_r)}>{sgn(c.mean_delta_r)}</span></Td>
+                  <Td right mono><span className="text-long">{c.helped}</span>
+                    <span className="text-muted"> / </span>
+                    <span className="text-short">{c.hurt}</span></Td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+
+          <div className="px-4 py-2 text-[11px] text-muted">
+            {rep.n_evaluated}/{rep.n_trades} closed trades replayed over {rep.n_bars} {rep.timeframe} bars.
+            Both R figures are <b>price-basis</b> off the same entry and risk distance — not
+            <span className="num"> realized_pl</span>, which spans a multi-leg ladder. A 55-bar flip is a
+            <b> slow</b> signal, so it can only beat a stop that sits far away: check any positive result
+            is not just an artifact of stop distance. Costs are not modelled, so the extra exit is
+            charged no spread. Shadow — nothing gates.
+          </div>
+        </>
+      )}
+    </Card>
   );
 }
 

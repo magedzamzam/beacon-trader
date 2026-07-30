@@ -36,6 +36,7 @@ trading. Nothing here gates, resizes or delays a trade.
 """
 from __future__ import annotations
 
+import datetime as dt
 import math
 from typing import List, Optional
 
@@ -213,6 +214,113 @@ def signal_turtle(*, closes: List[float], direction: Optional[str],
         "agrees": agrees,
         "backtest": strategy_returns(cs, ref["signal"]),
     }
+
+
+# ===================== exit counterfactual (#170) =============================
+# The per-signal block above is a snapshot at ENTRY. It cannot answer "should we
+# have got out when the trend broke?", because nothing tracks the Turtle over a
+# trade's life. This replays the same series across the holding period and asks
+# where a flip-driven exit would have closed the position instead.
+#
+# SHADOW BY CONSTRUCTION: a backtest over bars we already fetch. It moves no
+# stop and closes no position — it exists to earn (or refuse) the right to wire
+# a Turtle exit into the live SL engine later.
+
+def _bar_time(b) -> Optional[dt.datetime]:
+    """A bar's timestamp as an aware UTC datetime, from `t` as datetime or ISO."""
+    t = b.get("t") if isinstance(b, dict) else None
+    if isinstance(t, dt.datetime):
+        return t if t.tzinfo else t.replace(tzinfo=dt.timezone.utc)
+    if isinstance(t, str):
+        try:
+            d = dt.datetime.fromisoformat(t.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return d if d.tzinfo else d.replace(tzinfo=dt.timezone.utc)
+    return None
+
+
+def _no_longer_backing(sig, direction: str, variant: str) -> bool:
+    """Has the Turtle stopped holding this trade's side?
+
+    The reference series never prints 0 (see module doc), so for it a flip means
+    a sign change. The `signal_flat` variant does go flat, and flat is already
+    'not backing you' — hence the <= / >=."""
+    if sig is None:
+        return False
+    if (direction or "").upper() == "BUY":
+        return sig <= 0 if variant == "signal_flat" else sig < 0
+    return sig >= 0 if variant == "signal_flat" else sig > 0
+
+
+def exit_counterfactual(*, bars, entry_time, exit_time, entry_price, sl_price,
+                        actual_exit_price, direction: str, window: int = 55,
+                        variant: str = "signal") -> Optional[dict]:
+    """Where a Turtle flip would have closed this trade vs where it actually did.
+
+    `bars` must extend far enough BEFORE `entry_time` for the 55-bar channel to
+    be warm — the series is built over the whole array, then read inside the
+    holding period, so the lookback is never truncated.
+
+    Both R figures are computed on a PRICE basis off the same entry and the same
+    risk distance, so they are comparable. Trade-level realized P&L is not mixed
+    in: it is money across a multi-leg ladder with partial closes, which a single
+    full-position counterfactual exit cannot be compared against. (Leg-level P&L
+    is not used at all — CLAUDE.md §2.5. `actual_exit_price` is a lot-weighted
+    average of leg close prices, which is a price, not a P&L attribution.)
+
+    Returns None when the inputs cannot support the question at all.
+    """
+    if not bars or entry_time is None or exit_time is None:
+        return None
+    try:
+        entry_price, sl_price = float(entry_price), float(sl_price)
+        actual_exit_price = float(actual_exit_price)
+    except (TypeError, ValueError):
+        return None
+    risk = abs(entry_price - sl_price)
+    if risk <= 0:
+        return None
+
+    rows = [(t, float(b["c"])) for b, t in ((b, _bar_time(b)) for b in bars)
+            if isinstance(b, dict) and b.get("c") is not None and t is not None]
+    if len(rows) <= window:
+        return None
+    closes = [c for _t, c in rows]
+    ref = reference_signals(closes, window)
+    series = ref["signal"] if variant != "signal_flat" else stateful_signals(ref)
+
+    long_side = (direction or "").upper() == "BUY"
+
+    def _r(px: float) -> float:
+        return ((px - entry_price) if long_side else (entry_price - px)) / risk
+
+    flip_i = None
+    for i, (t, _c) in enumerate(rows):
+        if t <= entry_time or t > exit_time:      # only inside the holding period
+            continue
+        if _no_longer_backing(series[i], direction, variant):
+            flip_i = i
+            break
+
+    actual_r = _r(actual_exit_price)
+    out = {"variant": variant, "window": window,
+           "n_bars": len(rows), "flipped": flip_i is not None,
+           "actual_exit_price": round(actual_exit_price, 5),
+           "actual_r": round(actual_r, 4)}
+    if flip_i is None:
+        # The Turtle never turned against the trade before it closed, so a
+        # flip-driven exit would have changed nothing.
+        out.update({"exit_time": None, "exit_price": None, "bars_held": None,
+                    "counterfactual_r": round(actual_r, 4), "delta_r": 0.0})
+        return out
+    t, px = rows[flip_i]
+    cf_r = _r(px)
+    out.update({"exit_time": t.isoformat(), "exit_price": round(px, 5),
+                "bars_held": sum(1 for tt, _ in rows if entry_time < tt <= t),
+                "counterfactual_r": round(cf_r, 4),
+                "delta_r": round(cf_r - actual_r, 4)})
+    return out
 
 
 def turtle_estimator(ctx) -> Optional[dict]:

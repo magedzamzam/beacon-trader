@@ -178,6 +178,14 @@ export const GLOSSARY = [
     guard: G_SHADOW,
   },
   {
+    id: "turtle_exit", term: "Turtle exit counterfactual · Mean Δ R", section: "analytics",
+    what: "A backtest: replays the 55-bar Donchian across every closed trade's holding period and prices the exit a trend flip would have forced, against where the trade actually closed.",
+    read: "Mean Δ R is the R a flip-driven exit would have ADDED. Read it next to Flip rate — a rule that almost never fires cannot help much however good its average looks.",
+    not: "NOT live. Nothing here moves a stop or closes a position; it exists to decide whether a Turtle exit ever earns its way into the SL engine. Also NOT money: both R figures are price-basis off the same entry and risk distance, not realized_pl (which spans a multi-leg ladder). Costs are not modelled, so the extra exit is charged no spread and is flattered slightly.",
+    act: "Act only when n ≥ 30 AND the mean clears its own stderr. Then check it is not an artifact of stop distance: a 55-bar flip is slow, so it can only beat a stop that sits far away — a positive result driven entirely by wide-stop trades is a finding about stops, not about the Turtle.",
+    guard: G_SHADOW,
+  },
+  {
     id: "atr_pct", term: "ATR %", section: "analytics",
     what: "Average True Range as a percentage of price — how much the instrument is moving.",
     read: "Higher = wider swings, so a fixed-distance stop is more likely to be tagged by noise.",

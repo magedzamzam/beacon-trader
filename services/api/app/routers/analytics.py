@@ -11,7 +11,8 @@ from beacon_core.analysis.report import (channel_regime_report,
                                          structure_magnet_outcome_report,
                                          trend_alignment_outcome_report,
                                          execution_geometry_ab_report,
-                                         shadow_strategy_report)
+                                         shadow_strategy_report,
+                                         turtle_exit_report)
 from beacon_core.analysis.sidecar import load_config
 from beacon_core.analysis import structure_map as struct_map
 from beacon_core.analysis._util import nearest_sides
@@ -122,6 +123,48 @@ async def shadow_strategies(date_from: str = None, date_to: str = None,
     trades by whether the 55-bar Donchian system agreed with the channel.
     Shadow / read-only — neither gates."""
     return await shadow_strategy_report(db, parse_iso_utc(date_from), parse_iso_utc(date_to))
+
+
+@router.get("/turtle-exit")
+async def turtle_exit(date_from: str = None, date_to: str = None,
+                      symbol: str = "XAUUSD", timeframe: str = "1h",
+                      window: int = 55, variant: str = "signal",
+                      db: AsyncSession = Depends(get_db)):
+    """Turtle exit counterfactual: would closing on a trend flip have beaten
+    where each trade actually closed?
+
+    Replays the 55-bar Donchian across every closed trade's holding period and
+    prices the exit a flip would have forced. Costs ONE ranged bar fetch for the
+    whole report (every trade is the same instrument), not one per trade.
+
+    `mean_delta_r` is the decision number and must clear zero by more than
+    `stderr_delta_r` at N>=30 before a Turtle exit is worth wiring into the live
+    SL engine. Read `flip_rate` beside it — a rule that rarely fires cannot help
+    much — and check the result is not just an artifact of stop distance: a
+    55-bar flip is SLOW, so it can only beat a stop that sits far away.
+
+    Shadow / read-only. Nothing here moves a stop or closes a position."""
+    from beacon_core.brokers import build_adapter, symbol_map
+    from beacon_core.db.models import Account
+
+    acct = (await db.execute(select(Account).where(
+        Account.enabled == True).limit(1))).scalar_one_or_none()   # noqa: E712
+    if acct is None:
+        raise HTTPException(503, "no enabled account to source bars from")
+    broker, adapter = await build_adapter(db, acct)
+    try:
+        smap = await symbol_map(db, broker.id, symbol)
+        if not smap:
+            raise HTTPException(404, f"no symbol map for {symbol} on broker {broker.id}")
+        return await turtle_exit_report(
+            db, adapter, smap.broker_epic, symbol=symbol,
+            frm=parse_iso_utc(date_from), to=parse_iso_utc(date_to),
+            timeframe=timeframe, window=max(2, int(window)), variant=variant)
+    finally:
+        try:
+            await adapter.aclose()
+        except Exception:
+            pass
 
 
 @router.get("/structure/outcome")
