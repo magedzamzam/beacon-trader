@@ -22,7 +22,15 @@ router = APIRouter(prefix="/strategies", tags=["strategies"],
 
 _SL_TARGETS = {"entry", "previous_tp", "tp", "number"}
 _SL_TRIGGERS = {"tp_hit", "price_move", "be_lock_at_r"}   # be_lock_at_r: #109
-_FILTER_WHEN = {"always", "session_in", "adx_regime"}   # extensible; see execution/strategy.apply_filter_rules
+# Extensible; see execution/strategy.apply_filter_rules. MUST stay in step with
+# EntryFilterRules.jsx RULE_TYPES — a type the UI offers but this set omits is a
+# 422 on save (mc_probability / turtle_signal shipped in #163 and were missing).
+# `trend_alignment` is deliberately NOT here: Strategies.jsx converts that rule
+# into the legacy entry_filters.trend_alignment block before saving, and the
+# evaluator has no case for it, so accepting one into `rules` would store a
+# permanently silent no-op.
+_FILTER_WHEN = {"always", "session_in", "adx_regime",
+                "mc_probability", "turtle_signal"}
 _FILTER_ACTIONS = {"skip", "scale"}
 
 
@@ -66,6 +74,18 @@ def _clean_entry_policy(ep) -> dict | None:
     return out or None
 
 
+def _clean_when(when: dict) -> dict:
+    """Drop cleared UI fields from a rule's `when` block (#164).
+
+    `EntryFilterRules.jsx` stores an untouched optional numeric as `""` (the ADX
+    Regime blank ships `min_adx: ""`). That is not None, so it slipped past every
+    guard and reached `float("")` in the evaluator, on the executor's live entry
+    path. Stripping here means the DB never holds one whichever client wrote it;
+    `execution.strategy._as_num` remains the runtime backstop for rows already
+    stored."""
+    return {k: v for k, v in when.items() if v != ""}
+
+
 def _clean_entry_filters(ef) -> dict | None:
     if ef is None:
         return None
@@ -75,10 +95,13 @@ def _clean_entry_filters(ef) -> dict | None:
     if rules is not None:
         if not isinstance(rules, list):
             raise HTTPException(422, "entry_filters.rules must be a list")
+        cleaned = []
         for r in rules:
             if not isinstance(r, dict) or (r.get("when") or {}).get("type") not in _FILTER_WHEN \
                     or r.get("action") not in _FILTER_ACTIONS:
                 raise HTTPException(422, "each filter rule needs a known when.type and action")
+            cleaned.append({**r, "when": _clean_when(r["when"])})
+        ef = {**ef, "rules": cleaned}
     return ef or None
 
 

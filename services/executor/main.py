@@ -495,7 +495,21 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                     _adx_ctx[_tf] = _a
             if _adx_ctx:
                 _filter_ctx["adx"] = _adx_ctx
-            _ff, _skip, _reasons = ST.apply_filter_rules(_frules, _filter_ctx)
+            # #164: FAIL OPEN. An evaluator that raises used to propagate out of
+            # handle_signal, where the consumer loop swallows it — AFTER the
+            # signal is off the durable queue. That silently deleted the trade:
+            # no order, no entry_filtered event, one stack trace. A filtration
+            # rule must never be able to lose a signal, so any evaluator failure
+            # now trades at full size and is recorded.
+            try:
+                _ff, _skip, _reasons = ST.apply_filter_rules(_frules, _filter_ctx)
+            except Exception as exc:
+                log.exception("signal %s acct %s: filtration evaluation FAILED — "
+                              "failing open at full size: %s", sig.id, acct.id, exc)
+                session.add(Event(kind="entry_filter_error", payload={
+                    "signal_id": sig.id, "account_id": acct.id,
+                    "error": str(exc), "rules": _frules}))
+                _ff, _skip, _reasons = 1.0, False, []
             if _skip:
                 log.info("signal %s acct %s: SKIP by filtration (%s)", sig.id, acct.id, _reasons)
                 session.add(Event(kind="entry_filtered", payload={

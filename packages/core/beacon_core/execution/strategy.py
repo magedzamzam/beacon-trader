@@ -177,6 +177,29 @@ def _adx_block(ctx, timeframe):
     return None
 
 
+def _as_num(v):
+    """`float(v)`, or None when v is missing, blank or unparseable (#164).
+
+    The SINGLE definition of "this numeric sub-condition was not supplied". The
+    UI stores a cleared numeric field as `""` — `EntryFilterRules.jsx` ships
+    `min_adx: ""` in the ADX Regime blank and labels it optional — and the API's
+    `_clean_entry_filters` validates only `when.type` / `action`, so `""` reaches
+    the evaluator straight from the normal save path.
+
+    An `is not None` guard followed by a bare `float()` let that through and
+    raised inside `handle_signal`, which the executor's consumer loop swallows
+    AFTER the signal is off the durable queue: no trade, no `entry_filtered`
+    event, one stack trace. Reading a bad bound as absent (fail open) is the
+    only safe behaviour — a filtration rule must never be able to delete a
+    signal by crashing."""
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def _match_adx_regime(when, ctx) -> bool:
     """`adx_regime` condition (#127): match on the per-TF ADX trend state.
 
@@ -191,17 +214,17 @@ def _match_adx_regime(when, ctx) -> bool:
     if block is None:
         return False
     want_trending = when.get("trending")
-    min_adx, max_adx = when.get("min_adx"), when.get("max_adx")
+    min_adx, max_adx = _as_num(when.get("min_adx")), _as_num(when.get("max_adx"))
     if want_trending is None and min_adx is None and max_adx is None:
         return False                                  # no condition -> no-op, not match-all
     if want_trending is not None:
         tr = block.get("trending")
         if tr is None or bool(tr) != bool(want_trending):
             return False
-    adx_val = block.get("adx")
-    if min_adx is not None and (adx_val is None or float(adx_val) < float(min_adx)):
+    adx_val = _as_num(block.get("adx"))
+    if min_adx is not None and (adx_val is None or adx_val < min_adx):
         return False
-    if max_adx is not None and (adx_val is None or float(adx_val) > float(max_adx)):
+    if max_adx is not None and (adx_val is None or adx_val > max_adx):
         return False
     return True
 
@@ -229,21 +252,19 @@ def _match_mc_probability(when, ctx) -> bool:
     bounds = (("min_p_win", "p_win_geometry", True), ("max_p_win", "p_win_geometry", False),
               ("min_expected_r", "expected_r", True), ("max_expected_r", "expected_r", False),
               ("min_rr", "rr_to_tp1", True), ("max_rr", "rr_to_tp1", False))
-    # "" is what the UI stores for a cleared numeric field — treat it as absent.
-    supplied = [b for b in bounds if when.get(b[0]) not in (None, "")]
+    # `_as_num` is the shared blank/unparseable guard (#164) — a cleared UI field
+    # reads as absent here rather than raising into the executor's entry path.
+    supplied = [(b, _as_num(when.get(b[0]))) for b in bounds]
+    supplied = [(b, bound) for b, bound in supplied if bound is not None]
     if not supplied:
         return False                                  # no condition -> no-op
-    for key, field, is_min in supplied:
-        val = mc.get(field)
+    for (_key, field, is_min), bound in supplied:
+        val = _as_num(mc.get(field))
         if val is None:
             return False                              # fail-open on a missing input
-        try:
-            bound = float(when[key])
-        except (TypeError, ValueError):
+        if is_min and val < bound:
             return False
-        if is_min and float(val) < bound:
-            return False
-        if not is_min and float(val) > bound:
+        if not is_min and val > bound:
             return False
     return True
 

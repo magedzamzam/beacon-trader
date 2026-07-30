@@ -152,6 +152,84 @@ def test_adx_regime_evaluator():
     assert ST.apply_filter_rules(hi, {"adx": {"4h": {"adx": 27.0, "trending": True}}})[1] is False
 
 
+def test_adx_regime_blank_bound_is_absent_not_a_crash():
+    """#164: the UI ships `min_adx: ""` in the ADX Regime blank, so saving the
+    rule without typing a bound persisted an empty string. `is not None` let it
+    through to float(""), which raised on the executor's live entry path and
+    silently deleted the signal. A blank bound must read as ABSENT."""
+    trending = {"adx": {"4h": {"adx": 31.2, "trending": True}}}
+    blank = [{"enabled": True, "name": "adx4h skip", "action": "skip",
+              "when": {"type": "adx_regime", "timeframe": "4h",
+                       "trending": True, "min_adx": ""}}]
+    assert ST.apply_filter_rules(blank, trending) == (1.0, True, ["adx4h skip"])
+
+    # ...and the same for max_adx, and for both blank at once.
+    for when in ({"type": "adx_regime", "timeframe": "4h", "trending": True, "max_adx": ""},
+                 {"type": "adx_regime", "timeframe": "4h", "trending": True,
+                  "min_adx": "", "max_adx": ""}):
+        assert ST.apply_filter_rules([{"when": when, "action": "skip"}], trending)[1] is True
+
+
+def test_adx_regime_unparseable_bound_fails_open():
+    """A junk bound must not raise either — it fails open like an absent one."""
+    trending = {"adx": {"4h": {"adx": 31.2, "trending": True}}}
+    junk = [{"when": {"type": "adx_regime", "timeframe": "4h", "min_adx": "abc"},
+             "action": "skip", "name": "r"}]
+    assert ST.apply_filter_rules(junk, trending) == (1.0, False, [])   # no-op, no raise
+    # a real bound alongside a junk one still applies
+    mixed = [{"when": {"type": "adx_regime", "timeframe": "4h",
+                       "min_adx": 30, "max_adx": "oops"},
+              "action": "skip", "name": "r"}]
+    assert ST.apply_filter_rules(mixed, trending)[1] is True           # 31.2 >= 30
+
+
+def test_adx_regime_blank_bound_does_not_become_match_all():
+    """A rule whose ONLY condition is a blank bound stays a no-op — dropping the
+    unusable bound must not leave an unconditional match."""
+    trending = {"adx": {"4h": {"adx": 31.2, "trending": True}}}
+    only_blank = [{"when": {"type": "adx_regime", "timeframe": "4h", "min_adx": ""},
+                   "action": "skip", "name": "r"}]
+    assert ST.apply_filter_rules(only_blank, trending) == (1.0, False, [])
+
+
+def test_adx_regime_numeric_bounds_unchanged():
+    """Regression guard for the 6 live rules (execution_strategies 45/48/51/54/
+    57/60): real numeric bounds must behave exactly as before the #164 fix."""
+    trending = {"adx": {"4h": {"adx": 31.2, "trending": True}}}
+    lo = {"adx": {"4h": {"adx": 27.0, "trending": True}}}
+    hi = [{"when": {"type": "adx_regime", "timeframe": "4h", "min_adx": 30}, "action": "skip"}]
+    cap = [{"when": {"type": "adx_regime", "timeframe": "4h", "max_adx": 30}, "action": "skip"}]
+    assert ST.apply_filter_rules(hi, trending)[1] is True
+    assert ST.apply_filter_rules(hi, lo)[1] is False
+    assert ST.apply_filter_rules(cap, trending)[1] is False
+    assert ST.apply_filter_rules(cap, lo)[1] is True
+    # a stringified number is still honoured (0 must not read as blank either)
+    zero = [{"when": {"type": "adx_regime", "timeframe": "4h", "min_adx": 0}, "action": "skip"}]
+    assert ST.apply_filter_rules(zero, lo)[1] is True
+    strnum = [{"when": {"type": "adx_regime", "timeframe": "4h", "min_adx": "30"}, "action": "skip"}]
+    assert ST.apply_filter_rules(strnum, trending)[1] is True
+
+
+def test_no_filter_rule_type_can_raise_on_a_blank_field():
+    """The whole class of bug (#164): every registered rule type must survive a
+    `when` block whose optional fields were left blank by the UI."""
+    ctx = {"adx": {"4h": {"adx": 31.2, "trending": True}}, "session": "LONDON",
+           "montecarlo": {"p_win_geometry": 0.8, "expected_r": -0.1, "rr_to_tp1": 0.2},
+           "turtle": {"agrees": False, "position": "short"}}
+    blanks = [
+        {"type": "adx_regime", "timeframe": "4h", "trending": True, "min_adx": "", "max_adx": ""},
+        {"type": "mc_probability", "min_p_win": "", "max_p_win": "", "min_rr": "",
+         "max_rr": "", "min_expected_r": "", "max_expected_r": ""},
+        {"type": "turtle_signal", "agrees": None, "position": "", "variant": "signal"},
+        {"type": "session_in", "sessions": []},
+        {"type": "always"},
+    ]
+    for when in blanks:
+        factor, skip, _ = ST.apply_filter_rules(
+            [{"enabled": True, "when": when, "action": "skip"}], ctx)
+        assert isinstance(factor, float) and isinstance(skip, bool)
+
+
 def test_adx_rule_timeframes():
     # #132: which TFs the executor must compute live ADX for (empty unless a rule uses it)
     assert ST.adx_rule_timeframes([]) == set()
