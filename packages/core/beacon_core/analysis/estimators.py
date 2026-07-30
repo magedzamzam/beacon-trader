@@ -34,10 +34,31 @@ def realized_vol(closes: List[float]) -> Optional[float]:
     return pstdev(rets) * 100.0
 
 
-def hurst_rs(series: List[float], min_window: int = 8) -> Optional[float]:
+def hurst_rs(series: List[float], min_window: int = 8,
+             on_returns: bool = True) -> Optional[float]:
     """Hurst exponent via rescaled-range (R/S) analysis. >0.5 trending, ~0.5
-    random walk, <0.5 mean-reverting. Returns None below ~20 points."""
+    random walk, <0.5 mean-reverting. Returns None below ~20 points.
+
+    R/S measures the INCREMENTS, not the level. Run on a price series directly it
+    returns H≈1 for any instrument by construction — prices are near-integrated —
+    and that is exactly what the capture showed (#168): 264/264 signals with H in
+    [0.9627, 1.0591], a median of 1.0065, and a quarter of them ABOVE 1.0, which
+    is outside the exponent's valid range. Not a thin sample, not a weak feature:
+    an estimator answering a question nobody asked.
+
+    It also had a second victim. `_regime_label`'s `hurst > 0.55` clause is an OR,
+    so a saturated H forced `label='trending'` on every signal regardless of ADX —
+    the constant `regime` was blamed on #111's null ADX read alone, but repairing
+    that read would not have moved it while this sat upstream.
+
+    So the series is differenced to log returns first. `on_returns=False` is for a
+    caller that has already differenced. Note for cross-epoch work: values written
+    before this fix are on a different scale and are NOT comparable to later ones.
+    """
     ts = [float(x) for x in series if x is not None]
+    if on_returns:
+        ts = [math.log(ts[i] / ts[i - 1]) for i in range(1, len(ts))
+              if ts[i - 1] > 0 and ts[i] > 0]
     n = len(ts)
     if n < 20:
         return None

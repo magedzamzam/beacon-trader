@@ -22,6 +22,7 @@ from beacon_core.analysis.report import (channel_verdict_report,
                                          execution_geometry_ab_report,
                                          shadow_strategy_report,
                                          turtle_exit_report)
+from beacon_core.analysis import sidecar
 from beacon_core.analysis.sidecar import load_config
 from beacon_core.analysis import structure_map as struct_map
 from beacon_core.analysis._util import nearest_sides
@@ -53,6 +54,21 @@ async def put_config(body: dict, db: AsyncSession = Depends(get_db)):
             cfg["window_bars"] = max(30, min(500, int(body["window_bars"])))
         except (TypeError, ValueError):
             pass
+    if "disabled" in body:
+        # Per-estimator off switch (#168). Only names that exist can be listed:
+        # a typo would otherwise read as "disabled nothing" and look identical to
+        # a working switch-off. Unknown names are a 422, not a silent no-op.
+        raw = body["disabled"] or []
+        if isinstance(raw, str):
+            raw = raw.split(",")
+        if not isinstance(raw, list):
+            raise HTTPException(422, "disabled must be a list of estimator names")
+        names = [str(x).strip() for x in raw if str(x).strip()]
+        unknown = sorted(set(names) - set(sidecar.ESTIMATORS))
+        if unknown:
+            raise HTTPException(422, f"unknown estimator(s): {', '.join(unknown)} "
+                                     f"(known: {', '.join(sorted(sidecar.ESTIMATORS))})")
+        cfg["disabled"] = names
     await set_setting(db, "analytics", cfg)
     return cfg
 

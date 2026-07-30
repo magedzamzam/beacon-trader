@@ -411,10 +411,24 @@ def geometry_ab_rollup(trades, legs, source_id=None) -> dict:
     }
 
 
-def _structure_membership(features: dict) -> tuple:
-    """(in_fvg, in_ob): is the entry price inside an UNFILLED FVG / UNMITIGATED
-    OB on any captured timeframe? The structure keys embed their params
-    (e.g. "fvg_0.25_50"), so match by prefix (#59)."""
+# How close to an unfilled zone still counts as "at" it, in percent of price.
+# `dist_pct == 0` means literally inside the band, and measured over the whole
+# capture (#168) that lands on 28/386 signals for FVG and **5/386 for Order
+# Block** — a bucket that needs a year to reach N>=30 and can never be ruled on.
+# The zone is a band, not a line, and an entry a hundredth of a percent outside
+# it is the same trade; 0.05% of gold is ~$2, well inside the spread-plus-slippage
+# an entry actually lands in. Set to 0.0 to recover the strict inside-only test.
+STRUCTURE_NEAR_PCT = 0.05
+
+
+def _structure_membership(features: dict, near_pct: float = STRUCTURE_NEAR_PCT) -> tuple:
+    """(in_fvg, in_ob): is the entry price inside — or within `near_pct` of — an
+    UNFILLED FVG / UNMITIGATED OB on any captured timeframe? The structure keys
+    embed their params (e.g. "fvg_0.25_50"), so match by prefix (#59).
+
+    `present` is load-bearing and stays required: the indicator falls back to
+    reporting the nearest FILLED gap when no unfilled one exists, so dropping it
+    would count mitigated zones as live ones."""
     in_fvg = in_ob = False
     for _tf, block in (features or {}).items():
         if not isinstance(block, dict):
@@ -422,7 +436,11 @@ def _structure_membership(features: dict) -> tuple:
         for key, val in block.items():
             if not isinstance(val, dict):
                 continue
-            inside = bool(val.get("present")) and val.get("dist_pct") == 0
+            dist = val.get("dist_pct")
+            inside = (bool(val.get("present"))
+                      and isinstance(dist, (int, float))
+                      and not isinstance(dist, bool)
+                      and dist <= near_pct)
             if key.startswith("fvg"):
                 in_fvg = in_fvg or inside
             elif key.startswith("order_block"):

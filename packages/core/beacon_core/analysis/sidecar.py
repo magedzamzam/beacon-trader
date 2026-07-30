@@ -33,6 +33,11 @@ DEFAULT_ANALYTICS = {
     "enabled": True,        # pure observability + off the hot path -> on by default
     "timeframe": "1h",      # primary price-window timeframe for series estimators
     "window_bars": 200,     # max closes retained for reproducibility
+    # Estimators to skip, by name (#168). CONFIG, not code deletion: a feature
+    # that has been shown to carry nothing gets switched off reversibly, and the
+    # history it already wrote stays interpretable and available for cross-epoch
+    # replication. Empty by default — an estimator has to be *shown* dead first.
+    "disabled": [],
     # Per-estimator blocks. Each is overlaid wholesale by overlay_config, then
     # re-defaulted key-by-key inside the estimator, so a partial stored block is
     # safe. Turning one off here stops it computing without touching the suite.
@@ -107,14 +112,32 @@ def build_window(ctx: AnalyticsCtx, max_bars: int) -> dict:
             "price": round(float(ctx.price), 5) if ctx.price is not None else None}
 
 
+def disabled_estimators(cfg: dict) -> set:
+    """Estimator names switched off in config (#168). Tolerates the list arriving
+    as a comma-separated string, because settings blobs are hand-edited by SQL as
+    often as by the UI, and a mistyped disable list must not become a mystery."""
+    raw = (cfg or {}).get("disabled") or []
+    if isinstance(raw, str):
+        raw = raw.split(",")
+    return {str(x).strip() for x in raw if str(x).strip()}
+
+
 async def run_estimators(ctx: AnalyticsCtx, estimators=None):
     """Run every estimator in isolation. Returns (analytics, degraded). A failure
     in one estimator never affects the others (or the trade) — it is swallowed
-    and its name recorded in `degraded`."""
+    and its name recorded in `degraded`.
+
+    An estimator named in `config.disabled` is skipped entirely: it costs nothing
+    and writes nothing. Skipped is NOT degraded — `degraded` means "tried and
+    failed", and conflating a deliberate switch-off with a fault would make the
+    one signal that matters unreadable."""
     estimators = ESTIMATORS if estimators is None else estimators
+    off = disabled_estimators(getattr(ctx, "config", None))
     analytics: dict = {}
     degraded: List[str] = []
     for name, fn in estimators.items():
+        if name in off:
+            continue
         try:
             res = fn(ctx)
             if inspect.isawaitable(res):
