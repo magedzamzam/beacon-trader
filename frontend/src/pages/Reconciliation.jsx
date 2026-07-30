@@ -12,10 +12,13 @@ const CAT = {
   match: ["Match", "long"],
   no_fill: ["No fill", "short"],
   shortfall_stopped_before_tp: ["Stopped before TP", "warn"],
-  shortfall_leg_missing: ["Leg missing", "warn"],
-  executed_no_trade: ["No-trade bug", "short"],
+  shortfall_leg_missing: ["No leg at claimed TP", "warn"],
+  // "No-trade bug" said nothing about what went wrong. This is the literal
+  // condition: the signal is marked executed, zero legs exist, and there is no
+  // block event explaining why — so it is not protection, it is unaccounted for.
+  executed_no_trade: ["Executed, placed nothing", "short"],
   not_executed: ["Protected / not-traded", "muted"],
-  claim_sl: ["Channel SL", "muted"],
+  claim_sl: ["Channel SL, bot differed", "muted"],
   no_claim: ["Channel silent", "violet"],
 };
 const catLabel = (c) => (CAT[c]?.[0] || c);

@@ -14,8 +14,13 @@ Categories (precedence order):
                                signal falls through to `claim_sl` (claimed_max_tp is 0
                                for both), which is how 38% of traded signals would end
                                up silently inflating that bucket.
-  claim_sl                     bot filled; channel claimed only a stop-loss (no TP)
-  match                        bot reached >= the highest claimed TP
+  claim_sl                     channel reported a stop and the bot did something
+                               ELSE. When BOTH stopped out that is agreement, so
+                               it is a `match` (#177) — this bucket is only for
+                               genuine divergence.
+  match                        bot and channel agree: the bot reached >= the
+                               highest claimed TP, or both stopped out, or both
+                               closed at breakeven
   shortfall_stopped_before_tp  filled, but closed (SL/BE) before the claimed TP
   shortfall_leg_missing        no leg exists at the claimed TP index
 
@@ -87,6 +92,7 @@ def reconcile_signal(*, signal_status: str, n_signal_tps: int, is_history: bool,
     bot_max_tp = _bot_max_tp(legs)
     max_leg_tp = max([l.get("tp_index", 0) for l in legs], default=0)
     n_cancelled = sum(1 for l in legs if l.get("status") == "cancelled")
+    exit_state = bot_exit(legs)                  # how the bot's trade ended (#174)
 
     if not legs:
         # The bot placed nothing. Only a signal marked "executed" with NO block on
@@ -109,8 +115,21 @@ def reconcile_signal(*, signal_status: str, n_signal_tps: int, is_history: bool,
         cat = "no_claim"
         detail = f"channel posted no outcome; bot reached TP{bot_max_tp}"
     elif claimed_max_tp <= 0:
-        cat = "claim_sl"
-        detail = "channel claimed SL — bot filled"
+        # The channel reported a non-TP outcome. AGREEMENT IS A MATCH (#177):
+        # "channel said SL, bot stopped out" is the two of us saying the same
+        # thing, and it used to be filed under claim_sl as though it were a
+        # divergence — 21 of 24 claim_sl rows were actually agreements, which
+        # under-reported the match rate by ~7 points. claim_sl now means what its
+        # name says: the channel stopped, and the bot did something ELSE.
+        if claimed_sl and exit_state == "sl":
+            cat = "match"
+            detail = "channel claimed SL, bot stopped out too"
+        elif not claimed_sl and exit_state == "breakeven":
+            cat = "match"
+            detail = "channel claimed breakeven, bot closed at breakeven too"
+        else:
+            cat = "claim_sl"
+            detail = "channel claimed SL — bot exited %s" % exit_state
     elif bot_max_tp >= claimed_max_tp:
         cat = "match"
         detail = f"bot reached TP{bot_max_tp} (claimed TP{claimed_max_tp})"
@@ -125,7 +144,7 @@ def reconcile_signal(*, signal_status: str, n_signal_tps: int, is_history: bool,
         "claimed_max_tp": claimed_max_tp, "claimed_sl": claimed_sl,
         "bot_max_tp": bot_max_tp, "bot_any_fill": bot_any_fill,
         # How it ENDED, not just that it started (#174). "filled" is interim.
-        "bot_exit": bot_exit(legs),
+        "bot_exit": exit_state,
         "bot_status": signal_status,
         "category": cat, "detail": detail, "is_history": is_history,
     }

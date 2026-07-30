@@ -273,11 +273,18 @@ export const GLOSSARY = [
     act: "This is the payoff-geometry lever: look at the exit ladder (break-even lock too early?) in Strategies → Exit.",
   },
   {
-    id: "executed_no_trade", term: "executed_no_trade", section: "reconciler",
-    what: "We marked the signal executed but no trade row exists AND no block is on record — an internal/plumbing gap rather than a market event.",
-    read: "A bug-shaped symptom, not a trading one. Risk-blocked / untrusted / skipped non-trades are NOT counted here — they land in 'Protected'.",
-    not: "NOT a signal-quality or execution-quality measure.",
-    act: "Treat as a defect to investigate, not a config to tune.",
+    id: "executed_no_trade", term: "Executed, placed nothing", section: "reconciler",
+    what: "The signal is marked 'executed', zero legs exist, and there is NO block event explaining why. The bot recorded that it acted on the signal and then placed no orders, with no reason logged.",
+    read: "Three things have to be true at once for a signal to land here: status = executed, no legs, and nothing in the block taxonomy (risk_blocked / ai_blocked / breaker_state / blocked_untrusted / entry_filtered). That combination should be impossible, which is why it reads as a defect.",
+    not: "NOT the same as Protected. A risk-blocked, untrusted or filtered signal DID have a reason and lands in 'Protected / not-traded'. This bucket is specifically the ones with no reason at all — the bot went quiet.",
+    act: "Investigate as a plumbing bug, not a config to tune. Start from the executor log for that signal id and look for an exception between the guard and order placement.",
+  },
+  {
+    id: "claim_sl", term: "Channel SL, bot differed", section: "reconciler",
+    what: "The channel reported a stop-out and the bot ended some other way — still open, breakeven, or closed without stopping.",
+    read: "A genuine divergence, and worth a look: the channel took the loss and we did not, or vice versa.",
+    not: "NOT 'the channel stopped out'. When the channel says SL and the bot ALSO stopped out, that is agreement and it is counted as a Match. This bucket used to hold both, which under-reported the match rate by about 7 points.",
+    act: "Read the legs. Bot better than the channel is worth understanding as much as bot worse.",
   },
   {
     id: "not_executed", term: "Protected / not-traded", section: "reconciler",

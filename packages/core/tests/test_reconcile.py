@@ -44,6 +44,57 @@ def test_match():
     assert r["category"] == "match" and r["bot_max_tp"] == 3
 
 
+def test_channel_sl_and_bot_sl_is_a_match():
+    """#177: if the channel says X and the bot says the same X, that is a MATCH.
+    "Channel claimed SL, bot stopped out" was filed under claim_sl as though it
+    were a divergence — 21 of 24 claim_sl rows were actually agreements, which
+    under-reported the match rate by ~7 points."""
+    legs = [_leg(1, "closed", "sl_hit", 4015)]
+    r = reconcile_signal(signal_status="executed", n_signal_tps=3, is_history=False,
+                         claims=[{"max_tp_claimed": 0, "sl_claimed": True,
+                                  "all_tp": False}], legs=legs)
+    assert r["category"] == "match"
+    assert r["bot_exit"] == "sl"
+
+
+def test_channel_breakeven_and_bot_breakeven_is_a_match():
+    legs = [_leg(1, "closed", "breakeven", 4015)]
+    r = reconcile_signal(signal_status="executed", n_signal_tps=3, is_history=False,
+                         claims=[{"max_tp_claimed": 0, "sl_claimed": False,
+                                  "all_tp": False}], legs=legs)
+    assert r["category"] == "match"
+
+
+def test_claim_sl_now_means_the_bot_actually_differed():
+    """The bucket keeps its name's meaning: channel stopped, bot did something
+    else. Those are the only rows that belong in it."""
+    for outcome, status in (("breakeven", "closed"), (None, "open")):
+        r = reconcile_signal(signal_status="executed", n_signal_tps=3, is_history=False,
+                             claims=[{"max_tp_claimed": 0, "sl_claimed": True,
+                                      "all_tp": False}],
+                             legs=[_leg(1, status, outcome, 4015)])
+        assert r["category"] == "claim_sl", outcome
+        assert "bot exited" in r["detail"]
+
+
+def test_a_channel_tp_claim_against_a_bot_stop_is_still_a_shortfall():
+    """Agreement is a match; disagreement must NOT be swept into one."""
+    legs = [_leg(1, "closed", "tp_hit", 4015), _leg(2, "closed", "sl_hit", 4015)]
+    r = reconcile_signal(signal_status="executed", n_signal_tps=3, is_history=False,
+                         claims=[{"max_tp_claimed": 2, "sl_claimed": False,
+                                  "all_tp": False}], legs=legs)
+    assert r["category"] == "shortfall_stopped_before_tp"
+
+
+def test_leg_and_fill_checks_still_outrank_the_sl_match():
+    """A signal that never filled cannot 'agree' with a stop-out claim."""
+    r = reconcile_signal(signal_status="executed", n_signal_tps=3, is_history=False,
+                         claims=[{"max_tp_claimed": 0, "sl_claimed": True,
+                                  "all_tp": False}],
+                         legs=[_leg(1, "cancelled", "cancelled")])
+    assert r["category"] == "no_fill"
+
+
 def test_bot_exit_resolves_filled_into_how_the_trade_actually_ended():
     """#174: 'filled' is an interim state — a position ends at a TP, the stop, or
     breakeven. 84 of 101 signals showing 'filled' were fully CLOSED (78 stopped
@@ -96,7 +147,10 @@ def test_no_claim_is_not_claim_sl():
     SL-claiming one BOTH have claimed_max_tp == 0, so without the `no_claim`
     branch, opening the query to traded signals would have dumped 38% of the book
     into `claim_sl` and quietly corrupted it."""
-    legs = [_leg(1, "closed", "sl_hit", 4015)]
+    # Bot at breakeven: silence -> no_claim, an SL claim -> claim_sl (a real
+    # divergence). Deliberately NOT a stopped-out bot, which since #177 is a
+    # match rather than claim_sl.
+    legs = [_leg(1, "closed", "breakeven", 4015)]
     silent = reconcile_signal(signal_status="executed", n_signal_tps=3, is_history=False,
                               claims=[], legs=legs)
     reported = reconcile_signal(signal_status="executed", n_signal_tps=3, is_history=False,
@@ -204,13 +258,20 @@ def test_override_to_claim_mapping():
 
 
 def test_override_flips_reconciliation():
-    """A misparsed 'REVERSED AND HIT OUR RISK' (parsed as TP) can be force-tagged SL:
-    with the override applied to the claim, a filled+stopped signal reads claim_sl."""
+    """A misparsed 'REVERSED AND HIT OUR RISK' (parsed as TP) can be force-tagged
+    SL. Shown as a real flip: the same stopped-out trade reads as a shortfall
+    under the bad parse, and as a MATCH once the override says the channel
+    stopped too (#177 — agreement is a match, it used to read claim_sl)."""
     legs = [_leg(1, "closed", "sl_hit", 4015)]
+    misparsed = {"max_tp_claimed": 2, "sl_claimed": False, "all_tp": False}
+    before = reconcile_signal(signal_status="executed", n_signal_tps=3, is_history=False,
+                              claims=[misparsed], legs=legs)
+    assert before["category"] == "shortfall_leg_missing"
+
     ov = override_to_claim("sl_hit", 3)
-    r = reconcile_signal(signal_status="executed", n_signal_tps=3, is_history=False,
-                         claims=[ov], legs=legs)
-    assert r["category"] == "claim_sl"
+    after = reconcile_signal(signal_status="executed", n_signal_tps=3, is_history=False,
+                             claims=[ov], legs=legs)
+    assert after["category"] == "match"
 
 
 def test_all_tp_resolves_to_signal_tp_count():
@@ -220,8 +281,13 @@ def test_all_tp_resolves_to_signal_tp_count():
     assert r["claimed_max_tp"] == 2 and r["category"] == "match"
 
 
-def test_claim_sl_only():
+def test_claim_sl_when_the_bot_won_instead():
+    """The most interesting divergence in this bucket: the channel took the loss
+    and WE DID NOT. Still claim_sl, because the two disagree — the bucket is not
+    only for the bot doing worse."""
     r = reconcile_signal(signal_status="executed", n_signal_tps=3, is_history=False,
                          claims=[{"max_tp_claimed": 0, "sl_claimed": True, "all_tp": False}],
-                         legs=[_leg(1, "closed", "sl_hit", 4015)])
+                         legs=[_leg(1, "closed", "tp_hit", 4015),
+                               _leg(2, "closed", "tp_hit", 4015)])
     assert r["category"] == "claim_sl"
+    assert r["bot_max_tp"] == 2
