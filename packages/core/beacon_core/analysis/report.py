@@ -916,6 +916,104 @@ def _timeframe_delta(timeframe: str):
     return _dt.timedelta(minutes=mins.get(timeframe, 60))
 
 
+def _stderr(vals):
+    """Standard error of the mean. None below 2 points."""
+    if len(vals) < 2:
+        return None
+    mu = sum(vals) / len(vals)
+    var = sum((x - mu) ** 2 for x in vals) / (len(vals) - 1)
+    return (var / len(vals)) ** 0.5
+
+
+def _mean_block(vals, significance_n, key="mean_delta_r"):
+    """n / mean / stderr / `clear` for a list of R figures. `clear` is the honest
+    bar: the mean has to beat its own spread before it says anything."""
+    if not vals:
+        return None
+    mu = sum(vals) / len(vals)
+    se = _stderr(vals)
+    return {"n": len(vals), key: round(mu, 4),
+            "stderr": round(se, 4) if se is not None else None,
+            "significant": len(vals) >= significance_n,
+            "clear": bool(se is not None and abs(mu) > se and len(vals) >= significance_n)}
+
+
+def _exit_rule_block(rows, significance_n):
+    """The ONLY population that can justify a close-at-market exit primitive:
+    trades the Turtle BACKED at entry and then turned against (#171). For these,
+    `delta_r` is a real exit-rule comparison — a different exit price for a trade
+    we would have taken either way."""
+    turned = [r for r in rows if r.get("backed_at_entry") is True
+              and r.get("mechanism") == "flipped_mid_trade" and r.get("delta_r") is not None]
+    backed = [r for r in rows if r.get("backed_at_entry") is True
+              and r.get("delta_r") is not None]
+    out = _mean_block([float(r["delta_r"]) for r in turned], significance_n)
+    if out is None:
+        return {"n": 0, "n_backed_at_entry": len(backed), "note": "no mid-trade turns yet"}
+    out.update({
+        "n_backed_at_entry": len(backed),
+        "turn_rate": round(len(turned) / len(backed), 4) if backed else None,
+        "mean_actual_r": round(sum(float(r["actual_r"]) for r in turned) / len(turned), 4),
+        "mean_counterfactual_r": round(
+            sum(float(r["counterfactual_r"]) for r in turned) / len(turned), 4),
+        "helped": sum(1 for r in turned if float(r["delta_r"]) > 0),
+        "hurt": sum(1 for r in turned if float(r["delta_r"]) < 0),
+    })
+    return out
+
+
+def _entry_filter_block(rows, significance_n):
+    """Trades the Turtle already opposed when they opened (#171). Skipping one
+    means it is never taken, so its counterfactual is R = 0 EXACTLY — not an exit
+    price one bar after entry. `mean_delta_r` here is therefore -mean_actual_r:
+    the R that not trading these would have added.
+
+    A strong result here points at the `turtle_signal` FILTRATION rule that
+    already exists and is inert (#163) — a far cheaper change than an exit
+    engine."""
+    opposed = [r for r in rows if r.get("backed_at_entry") is False
+               and r.get("actual_r") is not None]
+    if not opposed:
+        return {"n": 0, "note": "the Turtle opposed no trade at entry"}
+    actual = [float(r["actual_r"]) for r in opposed]
+    out = _mean_block([-a for a in actual], significance_n)
+    out.update({
+        "mean_actual_r": round(sum(actual) / len(actual), 4),
+        "counterfactual_r": 0.0,                  # skipped -> no trade -> no R
+        "win_rate": round(sum(1 for a in actual if a > 0) / len(actual), 4),
+        "basis": "skip (R = 0), not an exit price",
+    })
+    return out
+
+
+def _stop_distance_block(rows):
+    """Is the effect just an artifact of stop distance? (#170 warned, #171 tests.)
+
+    A 55-bar flip is a SLOW signal: it can only beat a stop that sits far away.
+    Trades are split into risk-distance TERTILES computed from the sample itself,
+    so there are no magic thresholds. If the delta lives entirely in the widest
+    tertile, that is a finding about stop placement, not about the Turtle."""
+    scored = [r for r in rows if r.get("risk") is not None and r.get("delta_r") is not None]
+    if len(scored) < 6:
+        return None
+    ordered = sorted(scored, key=lambda r: float(r["risk"]))
+    third = len(ordered) // 3
+    bands = [("narrow", ordered[:third]), ("mid", ordered[third:2 * third]),
+             ("wide", ordered[2 * third:])]
+    out = {}
+    for name, band in bands:
+        if not band:
+            continue
+        deltas = [float(r["delta_r"]) for r in band]
+        risks = [float(r["risk"]) for r in band]
+        se = _stderr(deltas)
+        out[name] = {"n": len(band),
+                     "risk_lo": round(min(risks), 5), "risk_hi": round(max(risks), 5),
+                     "mean_delta_r": round(sum(deltas) / len(deltas), 4),
+                     "stderr": round(se, 4) if se is not None else None}
+    return out
+
+
 def turtle_exit_rollup(rows, significance_n: int = SIGNIFICANCE_N) -> dict:
     """Pure reduction behind /analytics/turtle-exit. DB-free, unit-testable.
 
@@ -972,28 +1070,34 @@ def turtle_exit_rollup(rows, significance_n: int = SIGNIFICANCE_N) -> dict:
 
     # A crude spread on the mean, so a large average off 4 trades cannot read as
     # a finding. NOT a credible interval — these deltas are not Bernoulli.
-    stderr = None
-    if len(deltas) >= 2:
-        mu = sum(deltas) / len(deltas)
-        var = sum((x - mu) ** 2 for x in deltas) / (len(deltas) - 1)
-        stderr = (var / len(deltas)) ** 0.5
+    stderr = _stderr(deltas)
 
+    # --- #171: the blended mean is NOT readable, so split the two mechanisms ---
+    rows = list(rows) if not isinstance(rows, list) else rows
     return {
         "significance_n": significance_n,
         "overall": _fmt(overall),
         "stderr_delta_r": round(stderr, 4) if stderr is not None else None,
+        "exit_rule": _exit_rule_block(rows, significance_n),
+        "entry_filter": _entry_filter_block(rows, significance_n),
+        "by_stop_distance": _stop_distance_block(rows),
         "by_channel": {k: _fmt(v) for k, v in by_channel.items() if v["n"]},
         "by_direction": {k: _fmt(v) for k, v in by_direction.items() if v["n"]},
         "note": ("SHADOW backtest — replays the 55-bar Donchian across each trade's "
-                 "holding period and prices the exit a flip would have forced, "
-                 "against where the trade actually closed. Both R figures are "
-                 "PRICE-basis off the same entry and risk distance; neither is "
-                 "trades.realized_pl, which is money across a multi-leg ladder. "
-                 "mean_delta_r is the number that matters and must clear zero by "
-                 "more than stderr_delta_r at N>=" + str(significance_n) + ". A low "
-                 "flip_rate caps the value whatever the average says. Costs are "
-                 "NOT modelled, so the extra exit is charged no spread and the "
-                 "counterfactual is flattered slightly."),
+                 "holding period. READ `exit_rule` AND `entry_filter` SEPARATELY; "
+                 "`overall` blends two different mechanisms and is not actionable "
+                 "on its own (#171). `exit_rule` covers trades the Turtle BACKED at "
+                 "entry and then turned against — only that can justify a "
+                 "close-at-market exit primitive. `entry_filter` covers trades it "
+                 "already opposed at entry, valued against R = 0 because skipping "
+                 "means never taking them; a result there points at the inert "
+                 "`turtle_signal` filtration rule, a far cheaper change. Check "
+                 "`by_stop_distance` before believing either: a 55-bar flip is SLOW, "
+                 "so an effect living entirely in the widest tertile is a finding "
+                 "about stop placement. All R is PRICE-basis off the same entry and "
+                 "risk distance, never trades.realized_pl. Act only when `clear` is "
+                 "true (mean beats its own stderr at N>=" + str(significance_n) +
+                 "). Costs are NOT modelled."),
     }
 
 
@@ -1015,7 +1119,8 @@ async def turtle_exit_report(session, adapter, broker_epic: str, *,
     def _empty(reason, n_trades=0):
         return {**turtle_exit_rollup([]), "symbol": symbol, "timeframe": timeframe,
                 "variant": variant, "window": window, "n_trades": n_trades,
-                "n_evaluated": 0, "trades": [], "skipped": {reason: n_trades}}
+                "n_evaluated": 0, "worst_trades": [], "sample_trades": [],
+                "skipped": {reason: n_trades}}
 
     q = (select(Trade.id, Trade.direction, Source.name)
          .join(Signal, Signal.id == Trade.signal_id)
@@ -1052,10 +1157,25 @@ async def turtle_exit_report(session, adapter, broker_epic: str, *,
             a["entry"] = float(entry_basis(fill, entry))
             a["sl"] = float(sl) if sl is not None else None
 
-    usable = {tid: a for tid, a in agg.items()
-              if a["den"] > 0 and a["opened"] and a["closed"] and a["sl"]}
+    # #171: account for EVERY trade that drops out, with a reason. 26% of closed
+    # trades vanished from the first run with no explanation, which makes the
+    # remaining sample impossible to trust.
+    skipped = defaultdict(int)
+    usable = {}
+    for tid in trades:
+        a = agg.get(tid)
+        if a is None:
+            skipped["no_closed_legs"] += 1
+        elif a["den"] <= 0:
+            skipped["zero_lot"] += 1
+        elif not (a["opened"] and a["closed"]):
+            skipped["missing_timestamps"] += 1
+        elif not a["sl"]:
+            skipped["no_stop_on_first_leg"] += 1
+        else:
+            usable[tid] = a
     if not usable:
-        return _empty("no_usable_legs", len(trades))
+        return {**_empty("no_usable_legs", len(trades)), "skipped": dict(skipped)}
 
     earliest = min(a["opened"] for a in usable.values())
     latest = max(a["closed"] for a in usable.values())
@@ -1065,7 +1185,7 @@ async def turtle_exit_report(session, adapter, broker_epic: str, *,
         from_ts=(earliest - warm).strftime("%Y-%m-%dT%H:%M:%S"),
         to_ts=latest.strftime("%Y-%m-%dT%H:%M:%S"), max_bars=max_bars)
 
-    rows, skipped = [], defaultdict(int)
+    rows = []
     for tid, a in usable.items():
         meta = trades[tid]
         cf = exit_counterfactual(
@@ -1080,8 +1200,12 @@ async def turtle_exit_report(session, adapter, broker_epic: str, *,
                      "direction": meta["direction"], **cf})
 
     out = turtle_exit_rollup(rows)
+    # `worst_trades` is named for what it is: selected BY delta_r, so it is useless
+    # for judging the distribution. `sample_trades` is ordered by trade id, which
+    # is independent of the metric — that is the one to eyeball (#171).
     out.update({"symbol": symbol, "timeframe": timeframe, "variant": variant,
                 "window": window, "n_trades": len(trades), "n_evaluated": len(rows),
                 "n_bars": len(bars), "skipped": dict(skipped),
-                "trades": sorted(rows, key=lambda r: r["delta_r"])[:50]})
+                "worst_trades": sorted(rows, key=lambda r: r["delta_r"])[:25],
+                "sample_trades": sorted(rows, key=lambda r: r["trade_id"])[:25]})
     return out

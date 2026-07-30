@@ -178,11 +178,11 @@ export const GLOSSARY = [
     guard: G_SHADOW,
   },
   {
-    id: "turtle_exit", term: "Turtle exit counterfactual · Mean Δ R", section: "analytics",
-    what: "A backtest: replays the 55-bar Donchian across every closed trade's holding period and prices the exit a trend flip would have forced, against where the trade actually closed.",
-    read: "Mean Δ R is the R a flip-driven exit would have ADDED. Read it next to Flip rate — a rule that almost never fires cannot help much however good its average looks.",
-    not: "NOT live. Nothing here moves a stop or closes a position; it exists to decide whether a Turtle exit ever earns its way into the SL engine. Also NOT money: both R figures are price-basis off the same entry and risk distance, not realized_pl (which spans a multi-leg ladder). Costs are not modelled, so the extra exit is charged no spread and is flattered slightly.",
-    act: "Act only when n ≥ 30 AND the mean clears its own stderr. Then check it is not an artifact of stop distance: a 55-bar flip is slow, so it can only beat a stop that sits far away — a positive result driven entirely by wide-stop trades is a finding about stops, not about the Turtle.",
+    id: "turtle_exit", term: "Turtle exit counterfactual · Exit rule vs Entry filter", section: "analytics",
+    what: "A backtest: replays the 55-bar Donchian across every closed trade's holding period and asks what the Turtle would have done differently — split into the two mechanisms, because they imply completely different work.",
+    read: "'Exit rule' = the Turtle BACKED the trade at entry and then turned against it; only that could justify a close-at-market exit in the live SL engine. 'Entry filter' = it ALREADY opposed the trade at entry, so the counterfactual is simply not taking it (R = 0) — and the filtration rule for that already exists, inert. A number is only a result when its badge says it clears its own noise.",
+    not: "The blended Mean Δ R is NOT actionable — it mixes both mechanisms, and the cheap one is indistinguishable from the expensive one inside it. Nothing here is live: no stop moves, no position closes. Not money either: all R is price-basis off the same entry and risk distance, never realized_pl. Costs are not modelled.",
+    act: "Act only when n ≥ 30 AND the block clears its own stderr. Then check Stop distance: a 55-bar flip is slow, so it can only beat a stop that sits far away — a delta living entirely in the wide band is a finding about stop placement, not about the Turtle. If the effect is mostly Entry filter, wire the existing turtle_signal rule rather than building an exit engine.",
     guard: G_SHADOW,
   },
   {

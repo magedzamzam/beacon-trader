@@ -619,7 +619,37 @@ function ShadowStrategiesCard({ shadow, range }) {
   );
 }
 
-// Turtle exit counterfactual (#170): would closing on a trend flip have beaten
+// One of the two mechanisms (#171). `clear` is the honest bar — a mean that does
+// not beat its own stderr at N>=30 is not a result, however large it looks.
+// Static, because Tailwind's JIT cannot see a class name built at runtime.
+const MECH_BORDER = { beacon: "border-beacon/40", violet: "border-violet/40" };
+
+function MechanismCard({ title, tone, blurb, b, extra, sigN }) {
+  const state = !b || !b.n ? { tone: "muted", text: "no trades" }
+    : !b.significant ? { tone: "muted", text: `n ${b.n}/${sigN}` }
+    : !b.clear ? { tone: "muted", text: "inside the noise" }
+    : b.mean_delta_r > 0 ? { tone: "long", text: "clears its noise" }
+    : { tone: "short", text: "negative, clears its noise" };
+  return (
+    <div className={`rounded-lg border p-3 bg-panel2/40 ${
+      b?.clear ? (MECH_BORDER[tone] || "border-edge") : "border-edge"}`}>
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-sm font-medium">{title}</span>
+        <Badge tone={state.tone}>{state.text}</Badge>
+      </div>
+      <div className={`mt-2 num text-2xl font-semibold ${edgeCls(b?.mean_delta_r)}`}>
+        {b?.n ? sgn(b.mean_delta_r) : "—"}
+        {b?.stderr != null && <span className="text-[11px] text-muted font-normal"> ± {fmt(b.stderr)}</span>}
+      </div>
+      <div className="text-[11px] text-muted num">
+        {b?.n ? `n ${b.n}` : ""}{extra ? ` · ${extra}` : ""}
+      </div>
+      <p className="mt-2 text-[11px] text-muted">{blurb}</p>
+    </div>
+  );
+}
+
+// Turtle exit counterfactual (#170, split in #171): would closing on a trend flip have beaten
 // where each trade actually closed? This is the evidence that decides whether a
 // Turtle exit ever gets wired into the live SL engine — so it stays a backtest
 // until it earns that, and it is loaded ON DEMAND because it costs a broker
@@ -639,14 +669,15 @@ function TurtleExitCard({ range }) {
   useEffect(() => { setRep(null); }, [range?.fromIso, range?.toIso]);
 
   const o = rep?.overall;
-  // The mean only means something once it clears its own spread.
-  const clear = o && rep.stderr_delta_r != null &&
-    Math.abs(o.mean_delta_r) > rep.stderr_delta_r;
+  // #171: `overall` blends two mechanisms and is not actionable on its own, so
+  // the verdict is driven by whichever SPLIT block actually clears its noise.
+  const er = rep?.exit_rule, ef = rep?.entry_filter;
   const verdict = !o ? null
+    : er?.clear && er.mean_delta_r > 0 ? { tone: "long", text: "exit rule looks real" }
+    : ef?.clear && ef.mean_delta_r > 0 ? { tone: "beacon", text: "entry filter, not an exit rule" }
+    : (er?.clear || ef?.clear) ? { tone: "short", text: "would have hurt" }
     : !o.significant ? { tone: "muted", text: "gathering" }
-    : !clear ? { tone: "muted", text: "inside the noise" }
-    : o.mean_delta_r > 0 ? { tone: "long", text: "flip-exit would have helped" }
-    : { tone: "short", text: "flip-exit would have hurt" };
+    : { tone: "muted", text: "inside the noise" };
 
   return (
     <Card>
@@ -677,32 +708,56 @@ function TurtleExitCard({ range }) {
         <Empty>No closed trades with usable legs in this range.</Empty>
       ) : (
         <>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 p-4">
-            {[
-              { label: "Mean Δ R", value: sgn(o.mean_delta_r), cls: edgeCls(o.mean_delta_r),
-                sub: rep.stderr_delta_r != null ? `± ${fmt(rep.stderr_delta_r)} stderr` : "" },
-              { label: "Actual → flip-exit",
-                value: `${sgn(o.mean_actual_r)} → ${sgn(o.mean_counterfactual_r)}` },
-              { label: "Flip rate", value: pct0(o.flip_rate),
-                sub: `${o.n_flipped}/${o.n} trades` },
-              { label: "Helped / hurt", value: `${o.helped} / ${o.hurt}`,
-                sub: `n ${o.n}/${rep.significance_n}` },
-            ].map(t => (
-              <div key={t.label} className="rounded-lg border border-edge bg-panel2/40 p-3">
-                <div className="text-[10px] uppercase tracking-wider text-muted truncate">{t.label}</div>
-                <div className={`mt-1 num text-xl font-semibold ${t.cls || ""}`}>{t.value}</div>
-                {t.sub && <div className="text-[11px] text-muted mt-0.5 num">{t.sub}</div>}
-              </div>
-            ))}
+          {/* The two mechanisms, side by side. They imply very different work,
+              so the panel refuses to lead with the blended number (#171). */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 p-4">
+            <MechanismCard
+              title="Exit rule" tone="beacon"
+              blurb="Turtle BACKED the trade at entry, then turned against it. Only this could justify a close-at-market exit in the live SL engine."
+              b={er} extra={er?.n ? `turn rate ${pct0(er.turn_rate)} · ${er.helped}/${er.hurt} helped/hurt` : null}
+              sigN={rep.significance_n} />
+            <MechanismCard
+              title="Entry filter" tone="violet"
+              blurb="Turtle ALREADY opposed the trade at entry. Skipping means never taking it, so the counterfactual is R = 0 — this points at the turtle_signal filter that already exists, inert."
+              b={ef} extra={ef?.n ? `actual ${sgn(ef.mean_actual_r)} · win ${pct0(ef.win_rate)}` : null}
+              sigN={rep.significance_n} />
           </div>
 
-          {!o.significant && (
-            <div className="mx-4 mb-3 rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-warn">
-              <b>{o.n} of {rep.significance_n} trades.</b> Not enough to act on — a flip-exit
-              rule stays out of the live SL engine until this clears the floor <i>and</i> the mean
-              clears its own spread.
-            </div>
+          {rep.by_stop_distance && (
+            <>
+              <div className="px-4 pt-1 text-[11px] text-muted">
+                <b>Stop distance</b> — a 55-bar flip is slow, so it can only beat a stop that sits
+                far away. If Δ R lives entirely in the <b>wide</b> band this is a finding about stop
+                placement, not about the Turtle.
+              </div>
+              <Table minW={620}>
+                <thead><tr className="border-b border-edge">
+                  <Th>Risk band</Th><Th right>n</Th><Th right>Risk range</Th>
+                  <Th right>Mean Δ R</Th><Th right>± stderr</Th>
+                </tr></thead>
+                <tbody>
+                  {["narrow", "mid", "wide"].filter(k => rep.by_stop_distance[k]).map(k => {
+                    const b = rep.by_stop_distance[k];
+                    return (
+                      <tr key={k} className="border-b border-edge/60">
+                        <Td>{k}</Td>
+                        <Td right mono>{b.n}</Td>
+                        <Td right mono><span className="text-muted">{fmt(b.risk_lo)}–{fmt(b.risk_hi)}</span></Td>
+                        <Td right mono><span className={edgeCls(b.mean_delta_r)}>{sgn(b.mean_delta_r)}</span></Td>
+                        <Td right mono><span className="text-muted">{fmt(b.stderr)}</span></Td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </Table>
+            </>
           )}
+
+          <div className="mx-4 my-3 rounded-lg border border-edge bg-panel2/40 px-3 py-2 text-[11px] text-muted">
+            <b>Blended (not actionable):</b> mean Δ R {sgn(o.mean_delta_r)} over {o.n} trades,
+            flip rate {pct0(o.flip_rate)}, {o.helped} helped / {o.hurt} hurt. This mixes both
+            mechanisms above — read them separately.
+          </div>
 
           <Table minW={860}>
             <thead><tr className="border-b border-edge">
@@ -728,7 +783,9 @@ function TurtleExitCard({ range }) {
           </Table>
 
           <div className="px-4 py-2 text-[11px] text-muted">
-            {rep.n_evaluated}/{rep.n_trades} closed trades replayed over {rep.n_bars} {rep.timeframe} bars.
+            {rep.n_evaluated}/{rep.n_trades} closed trades replayed over {rep.n_bars} {rep.timeframe} bars
+            {rep.skipped && Object.keys(rep.skipped).length > 0 &&
+              ` · skipped: ${Object.entries(rep.skipped).map(([k, v]) => `${v} ${k.replace(/_/g, " ")}`).join(", ")}`}.
             Both R figures are <b>price-basis</b> off the same entry and risk distance — not
             <span className="num"> realized_pl</span>, which spans a multi-leg ladder. A 55-bar flip is a
             <b> slow</b> signal, so it can only beat a stop that sits far away: check any positive result

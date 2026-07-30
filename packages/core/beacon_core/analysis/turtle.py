@@ -269,6 +269,23 @@ def exit_counterfactual(*, bars, entry_time, exit_time, entry_price, sl_price,
     is not used at all — CLAUDE.md §2.5. `actual_exit_price` is a lot-weighted
     average of leg close prices, which is a price, not a P&L attribution.)
 
+    TWO MECHANISMS, SEPARATED (#171). "The Turtle is not backing this trade" is
+    true in two very different situations, and the first version of this function
+    reported them as one number:
+
+      opposed_at_entry   — the Turtle was ALREADY against the trade when it was
+                           opened. Exiting on the first bar is not a trend-exit,
+                           it is "do not take this trade" — an ENTRY FILTER, and
+                           one that already exists (#163's `turtle_signal` rule).
+      flipped_mid_trade  — the Turtle BACKED the trade at entry and turned during
+                           it. Only this can justify a close-at-market exit
+                           primitive in the live SL engine.
+
+    `backed_at_entry` is read from the last bar at or before `entry_time`, so it
+    is the state we would have seen when opening. `delta_r` remains the exit-rule
+    figure and is only meaningful for `flipped_mid_trade`; the rollup values an
+    `opposed_at_entry` trade against R = 0 (never taken) instead.
+
     Returns None when the inputs cannot support the question at all.
     """
     if not bars or entry_time is None or exit_time is None:
@@ -295,6 +312,16 @@ def exit_counterfactual(*, bars, entry_time, exit_time, entry_price, sl_price,
     def _r(px: float) -> float:
         return ((px - entry_price) if long_side else (entry_price - px)) / risk
 
+    # State at entry: the last bar we would have seen when the position opened.
+    entry_i = None
+    for i, (t, _c) in enumerate(rows):
+        if t <= entry_time:
+            entry_i = i
+        else:
+            break
+    backed_at_entry = (None if entry_i is None
+                       else not _no_longer_backing(series[entry_i], direction, variant))
+
     flip_i = None
     for i, (t, _c) in enumerate(rows):
         if t <= entry_time or t > exit_time:      # only inside the holding period
@@ -303,9 +330,18 @@ def exit_counterfactual(*, bars, entry_time, exit_time, entry_price, sl_price,
             flip_i = i
             break
 
+    if backed_at_entry is False:
+        mechanism = "opposed_at_entry"
+    elif flip_i is not None:
+        mechanism = "flipped_mid_trade"
+    else:
+        mechanism = None
+
     actual_r = _r(actual_exit_price)
     out = {"variant": variant, "window": window,
            "n_bars": len(rows), "flipped": flip_i is not None,
+           "backed_at_entry": backed_at_entry, "mechanism": mechanism,
+           "risk": round(risk, 5),               # for the stop-distance breakdown
            "actual_exit_price": round(actual_exit_price, 5),
            "actual_r": round(actual_r, 4)}
     if flip_i is None:

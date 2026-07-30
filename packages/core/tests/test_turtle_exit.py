@@ -164,6 +164,109 @@ def test_bars_without_a_usable_timestamp_are_dropped():
     assert cf is not None and cf["n_bars"] == len(SERIES)
 
 
+# ------------------------------------------- mechanism split (#171)
+def test_a_trade_the_turtle_already_opposed_is_not_a_flip():
+    """#171: entering a BUY while the Donchian is already short is not a
+    trend-exit signal — it is an ENTRY FILTER signal. The first version counted
+    it as a 'flip' exiting one bar after entry, which blended two mechanisms
+    with very different costs to act on."""
+    bars = _bars(SERIES)
+    # By the end of CRASH the Turtle is short; open a BUY there.
+    cf = exit_counterfactual(
+        bars=bars, entry_time=_at(95), exit_time=_at(len(SERIES) - 1),
+        entry_price=75.0, sl_price=70.0, actual_exit_price=70.0, direction="BUY")
+    assert cf["backed_at_entry"] is False
+    assert cf["mechanism"] == "opposed_at_entry"
+
+
+def test_a_trade_the_turtle_backed_then_turned_is_a_real_flip():
+    """The only population that could justify an exit engine."""
+    bars = _bars(SERIES)
+    cf = exit_counterfactual(
+        bars=bars, entry_time=_at(70), exit_time=_at(len(SERIES) - 1),
+        entry_price=110.0, sl_price=80.0, actual_exit_price=80.0, direction="BUY")
+    assert cf["backed_at_entry"] is True
+    assert cf["mechanism"] == "flipped_mid_trade"
+
+
+def test_a_backed_trade_that_never_turns_has_no_mechanism():
+    bars = _bars(BASE + RALLY)
+    cf = exit_counterfactual(
+        bars=bars, entry_time=_at(62), exit_time=_at(len(BASE + RALLY) - 1),
+        entry_price=103.0, sl_price=100.0, actual_exit_price=120.0, direction="BUY")
+    assert cf["backed_at_entry"] is True and cf["mechanism"] is None
+
+
+def test_risk_distance_is_reported_for_the_stop_artifact_check():
+    bars = _bars(SERIES)
+    cf = exit_counterfactual(
+        bars=bars, entry_time=_at(70), exit_time=_at(90), entry_price=110.0,
+        sl_price=80.0, actual_exit_price=100.0, direction="BUY")
+    assert cf["risk"] == 30.0
+
+
+def test_exit_rule_block_only_counts_backed_then_turned_trades():
+    rows = [
+        {"backed_at_entry": True, "mechanism": "flipped_mid_trade",
+         "actual_r": -1.0, "counterfactual_r": 0.0, "delta_r": 1.0},
+        {"backed_at_entry": True, "mechanism": None,          # never turned
+         "actual_r": 2.0, "counterfactual_r": 2.0, "delta_r": 0.0},
+        {"backed_at_entry": False, "mechanism": "opposed_at_entry",
+         "actual_r": -1.0, "counterfactual_r": 0.0, "delta_r": 1.0},
+    ]
+    out = turtle_exit_rollup(rows, significance_n=1)
+    er = out["exit_rule"]
+    assert er["n"] == 1                     # ONLY the backed-then-turned trade
+    assert er["n_backed_at_entry"] == 2
+    assert er["turn_rate"] == 0.5
+    assert er["mean_delta_r"] == 1.0
+
+
+def test_entry_filter_block_values_a_skip_at_zero_not_at_an_exit_price():
+    """Skipping a trade means it is never taken, so its counterfactual is R = 0
+    exactly — not a price one bar after an entry that never happened."""
+    rows = [{"backed_at_entry": False, "mechanism": "opposed_at_entry",
+             "actual_r": r, "counterfactual_r": 0.0, "delta_r": 0.0}
+            for r in (-1.0, -1.0, -1.0, 1.0)]
+    ef = turtle_exit_rollup(rows, significance_n=2)["entry_filter"]
+    assert ef["n"] == 4
+    assert ef["mean_actual_r"] == -0.5
+    assert ef["mean_delta_r"] == 0.5        # not trading them adds +0.5R
+    assert ef["counterfactual_r"] == 0.0
+    assert ef["win_rate"] == 0.25
+
+
+def test_a_mean_inside_its_own_noise_is_not_clear():
+    """`clear` is the honest bar — beating zero is not enough."""
+    noisy = [{"backed_at_entry": True, "mechanism": "flipped_mid_trade",
+              "actual_r": 0.0, "counterfactual_r": r, "delta_r": r}
+             for r in (5.0, -4.0, 4.0, -3.0, 3.0, -4.0)]
+    out = turtle_exit_rollup(noisy, significance_n=2)["exit_rule"]
+    assert out["mean_delta_r"] > 0 and out["clear"] is False
+    tight = [{"backed_at_entry": True, "mechanism": "flipped_mid_trade",
+              "actual_r": 0.0, "counterfactual_r": 1.0, "delta_r": 1.0}] * 6
+    assert turtle_exit_rollup(tight, significance_n=2)["exit_rule"]["clear"] is True
+
+
+def test_stop_distance_tertiles_expose_a_wide_stop_artifact():
+    """The artifact #170 warned about: if the whole delta sits in the widest
+    tertile it is a finding about stop placement, not about the Turtle."""
+    rows = ([{"risk": 1.0 + i, "delta_r": 0.0, "backed_at_entry": True,
+              "mechanism": "flipped_mid_trade", "actual_r": 0.0,
+              "counterfactual_r": 0.0} for i in range(6)]
+            + [{"risk": 50.0 + i, "delta_r": 2.0, "backed_at_entry": True,
+                "mechanism": "flipped_mid_trade", "actual_r": 0.0,
+                "counterfactual_r": 2.0} for i in range(3)])
+    bands = turtle_exit_rollup(rows)["by_stop_distance"]
+    assert bands["narrow"]["mean_delta_r"] == 0.0
+    assert bands["wide"]["mean_delta_r"] > 0
+    assert bands["wide"]["risk_lo"] >= bands["narrow"]["risk_hi"]
+
+
+def test_stop_distance_block_needs_a_real_sample():
+    assert turtle_exit_rollup([_row("A", 0.0, 1.0)])["by_stop_distance"] is None
+
+
 # ------------------------------------------------------------------- rollup
 def _row(ch, actual, cf, flipped=True, direction="BUY"):
     return {"channel": ch, "direction": direction, "actual_r": actual,
