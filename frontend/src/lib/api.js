@@ -127,9 +127,6 @@ export const api = {
   analyticsConfig: () => req("/analytics/config"),
   saveAnalyticsConfig: (c) => req("/analytics/config", { method: "PUT", body: JSON.stringify(c) }),
   analyticsSynthesis: (range = {}) => req(`/analytics/synthesis${_perfQs("", range)}`),
-  analyticsCorrelation: (range = {}) => req(`/analytics/correlation${_perfQs("", range)}`),
-  analyticsStructure: (range = {}) => req(`/analytics/structure${_perfQs("", range)}`),
-  analyticsTrendAlignment: (range = {}) => req(`/analytics/trend-alignment${_perfQs("", range)}`),
   analyticsShadowStrategies: (range = {}) => req(`/analytics/shadow-strategies${_perfQs("", range)}`),
   // On demand: costs one ranged bar fetch from the broker, so it is not loaded
   // with the page (#170).
@@ -140,14 +137,10 @@ export const api = {
     return req(`/analytics/turtle-exit?${p.toString()}`);
   },
   signalAnalytics: (id) => req(`/analytics/signal/${id}`),
+  // Still read by the Analytics summary strip's multi-TF bias tile. The monitor
+  // recomputes the map on its own schedule (#175 removed the manual trigger with
+  // the Structure card it belonged to).
   structureMap: (symbol = "XAUUSD") => req(`/analytics/structure/map?symbol=${encodeURIComponent(symbol)}`),
-  structureRecompute: () => req("/analytics/structure/recompute", { method: "POST" }),
-  // per-kind side-aware confluence zones for the panel (#137)
-  analyticsMagnets: (symbol = "XAUUSD", kind = "fvg", price = null) => {
-    const p = new URLSearchParams({ symbol, kind });
-    if (price != null) p.set("price", price);
-    return req(`/analytics/magnets?${p.toString()}`);
-  },
   // reconciliation: channel-claimed outcomes vs bot execution
   reconciliationSummary: (includeHistory = false, { from, to } = {}) => {
     const p = new URLSearchParams({ include_history: includeHistory });

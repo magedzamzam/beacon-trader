@@ -1,15 +1,24 @@
 """Shadow analytics sidecar API (#53): the signal↔channel↔regime correlation
 report and per-signal analytics. Read-only observability — nothing here gates
-or alters trading."""
+or alters trading.
+
+#175 removed the routes whose only consumer was a Details tab that could not
+inform a decision: `/correlation` and `/trend-alignment` (folded on features with
+no variance — `regime` is 'trending' on every captured row per #111, and 4h-EMA200
+alignment is a perfect relabelling of `direction`), `/structure`,
+`/structure/outcome` and `/magnets` (charts that never produced an actionable
+finding), and `/structure/recompute` (the manual button on the deleted Structure
+card — the monitor calls `recompute_all` in-process on its own schedule, so the
+map the surviving summary strip reads keeps refreshing).
+
+CAPTURE IS UNTOUCHED: every estimator still writes `signal_analytics`, and the
+report functions behind the deleted routes are still in `analysis/report.py` for
+the weekly quant work. This deleted views, not evidence."""
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from beacon_core.analysis.report import (channel_regime_report,
-                                         channel_verdict_report,
-                                         structure_outcome_report,
-                                         structure_magnet_outcome_report,
-                                         trend_alignment_outcome_report,
+from beacon_core.analysis.report import (channel_verdict_report,
                                          execution_geometry_ab_report,
                                          shadow_strategy_report,
                                          turtle_exit_report)
@@ -17,10 +26,8 @@ from beacon_core.analysis.sidecar import load_config
 from beacon_core.analysis import structure_map as struct_map
 from beacon_core.analysis._util import nearest_sides
 from beacon_core.analysis.structure import DEFAULT_STRUCTURE
-from beacon_core.db.models import ExecutionStrategy, SignalAnalytics
-from beacon_core.execution import strategy as ST
-from beacon_core.execution.trend_filter import trend_filter_cfg
-from beacon_core.settings_store import get_setting, set_setting
+from beacon_core.db.models import SignalAnalytics
+from beacon_core.settings_store import set_setting
 from beacon_core.timeutil import parse_iso_utc
 from ..deps import get_db
 from ..auth import require_token
@@ -59,42 +66,6 @@ async def synthesis(date_from: str = None, date_to: str = None,
     labelled analytics→trade join `/correlation` details — no new estimator,
     nothing gates on it. Optional date range anchored on signal time."""
     return await channel_verdict_report(db, parse_iso_utc(date_from), parse_iso_utc(date_to))
-
-
-@router.get("/correlation")
-async def correlation(date_from: str = None, date_to: str = None,
-                      db: AsyncSession = Depends(get_db)):
-    """Per-channel × regime performance (with credible intervals), regime mix by
-    channel, and a win/loss feature read. Optional date range (#58) anchored on
-    signal time."""
-    return await channel_regime_report(db, parse_iso_utc(date_from), parse_iso_utc(date_to))
-
-
-@router.get("/structure")
-async def structure(date_from: str = None, date_to: str = None,
-                    db: AsyncSession = Depends(get_db)):
-    """FVG/OB-vs-outcome cut (#59): win-rate & expectancy when the entry sits
-    inside an unfilled Fair Value Gap / unmitigated Order Block vs not, per
-    channel and regime with credible intervals. Shadow only."""
-    return await structure_outcome_report(db, parse_iso_utc(date_from), parse_iso_utc(date_to))
-
-
-@router.get("/trend-alignment")
-async def trend_alignment(date_from: str = None, date_to: str = None,
-                          db: AsyncSession = Depends(get_db)):
-    """Aligned-vs-counter split as a first-class metric (#72): win-rate, net PnL
-    and expectancy for trend-aligned vs counter-trend entries, overall and per
-    channel, with credible intervals. Classified from persisted signal_features
-    using the SAME timeframe/EMA the live #48 filter gates on. Shadow only.
-
-    Reads the trend config from the (Any, Any) strategy base — Strategies is the
-    single source of truth since #104, so this report can't drift from the filter."""
-    rows = (await db.execute(select(ExecutionStrategy))).scalars().all()
-    base = ST.resolve_chain(rows, None, None)             # the (Any, Any) base row
-    cfg = trend_filter_cfg(ST.resolve_entry_filters(base))
-    return await trend_alignment_outcome_report(
-        db, parse_iso_utc(date_from), parse_iso_utc(date_to),
-        timeframe=cfg["timeframe"], ema_period=int(cfg["ema_period"]))
 
 
 @router.get("/execution-geometry")
@@ -167,15 +138,6 @@ async def turtle_exit(date_from: str = None, date_to: str = None,
             pass
 
 
-@router.get("/structure/outcome")
-async def structure_outcome(date_from: str = None, date_to: str = None,
-                            db: AsyncSession = Depends(get_db)):
-    """Phase-2 measurement (#61): win-rate & expectancy by HTF alignment / magnet
-    proximity / adverse-side, with credible intervals. Shadow — informs Phase 3."""
-    return await structure_magnet_outcome_report(db, parse_iso_utc(date_from),
-                                                 parse_iso_utc(date_to))
-
-
 @router.get("/structure/config")
 async def structure_config(db: AsyncSession = Depends(get_db)):
     return await struct_map.load_config(db)
@@ -189,13 +151,6 @@ async def structure_config_put(body: dict, db: AsyncSession = Depends(get_db)):
             cfg[k] = body[k]
     await set_setting(db, "structure", cfg)
     return cfg
-
-
-@router.post("/structure/recompute")
-async def structure_recompute():
-    """On-demand recompute of the persistent map (#61). Runs in its own session
-    with an isolated adapter — zero impact on the execution path."""
-    return {"recomputed": await struct_map.recompute_all()}
 
 
 @router.get("/structure/map")
@@ -254,24 +209,6 @@ async def structure_map_view(symbol: str = "XAUUSD", price: float = None,
         "nearest_resistance": _side_zone(res_i),
         "nearest_support": _side_zone(sup_i),
     }
-
-
-@router.get("/magnets")
-async def magnets(symbol: str = "XAUUSD", kind: str = "fvg", price: float = None,
-                  db: AsyncSession = Depends(get_db)):
-    """Side-aware, per-KIND confluence zones for the panel (#137). `kind` is a
-    first-class parameter (`fvg` today; `order_block` / fib kinds reuse the same
-    path) — nothing is FVG-hardcoded. Returns, relative to the current price:
-    `buy_side` (zones BELOW price, discount) and `sell_side` (ABOVE, premium), each
-    the nearest 3 aggregated-across-TF zones, plus a `per_tf` breakdown. Each zone
-    carries its band, HIGH/MED/LOW strength, signed $ distance (+ below / − above),
-    and Open/Filled status. Shadow analytics — never gates trading."""
-    z = await struct_map.kind_zones(db, symbol, kind, price=price)
-    if not z:
-        return {"symbol": symbol, "kind": kind, "version_id": None,
-                "reference_price": price, "buy_side": [], "sell_side": [],
-                "per_tf": {}, "timeframes": []}
-    return z
 
 
 @router.get("/signal/{signal_id}")
