@@ -1122,7 +1122,13 @@ async def turtle_exit_report(session, adapter, broker_epic: str, *,
                 "n_evaluated": 0, "worst_trades": [], "sample_trades": [],
                 "skipped": {reason: n_trades}}
 
-    q = (select(Trade.id, Trade.direction, Source.name)
+    # #176: the R denominator comes from the SIGNAL's stop, never from Leg.sl.
+    # Leg.sl is the CURRENT stop and the ratchet mutates it, so a trade that
+    # trailed to breakeven has |entry - leg.sl| ~ 0 and R explodes — 20% of legs
+    # (all of them sl_moved, and all winners) had an effectively zero
+    # denominator. This is the same immutable-stop rule #109 established for
+    # be_lock_at_r; the monitor sources it identically (monitor/main.py:116).
+    q = (select(Trade.id, Trade.direction, Source.name, Signal.sl)
          .join(Signal, Signal.id == Trade.signal_id)
          .outerjoin(Source, Source.id == Signal.source_id)
          .where(Trade.status == "closed"))
@@ -1130,8 +1136,9 @@ async def turtle_exit_report(session, adapter, broker_epic: str, *,
         q = q.where(Signal.created_at >= frm)
     if to is not None:
         q = q.where(Signal.created_at < to)
-    trades = {tid: {"direction": d, "channel": ch}
-              for tid, d, ch in (await session.execute(q)).all()}
+    trades = {tid: {"direction": d, "channel": ch,
+                    "signal_sl": float(sl) if sl is not None else None}
+              for tid, d, ch, sl in (await session.execute(q)).all()}
     if not trades:
         return _empty("no_closed_trades")
 
@@ -1148,14 +1155,15 @@ async def turtle_exit_report(session, adapter, broker_epic: str, *,
         if close_px is None or closed is None or lot is None:
             continue
         a = agg.setdefault(tid, {"opened": None, "closed": None, "num": 0.0,
-                                 "den": 0.0, "entry": None, "sl": None})
+                                 "den": 0.0, "entry": None})
         a["opened"] = created if a["opened"] is None else min(a["opened"], created)
         a["closed"] = closed if a["closed"] is None else max(a["closed"], closed)
         a["num"] += float(close_px) * float(lot)
         a["den"] += float(lot)
         if a["entry"] is None:
+            # The leg still supplies the ENTRY basis — that is immutable and
+            # correct. Only its `sl` is untrustworthy (#176).
             a["entry"] = float(entry_basis(fill, entry))
-            a["sl"] = float(sl) if sl is not None else None
 
     # #171: account for EVERY trade that drops out, with a reason. 26% of closed
     # trades vanished from the first run with no explanation, which makes the
@@ -1170,8 +1178,10 @@ async def turtle_exit_report(session, adapter, broker_epic: str, *,
             skipped["zero_lot"] += 1
         elif not (a["opened"] and a["closed"]):
             skipped["missing_timestamps"] += 1
-        elif not a["sl"]:
-            skipped["no_stop_on_first_leg"] += 1
+        elif not trades[tid].get("signal_sl"):
+            # No original stop -> no honest R denominator. Skip and say so,
+            # rather than dividing by a ratcheted one (#176).
+            skipped["no_signal_stop"] += 1
         else:
             usable[tid] = a
     if not usable:
@@ -1190,7 +1200,7 @@ async def turtle_exit_report(session, adapter, broker_epic: str, *,
         meta = trades[tid]
         cf = exit_counterfactual(
             bars=bars, entry_time=a["opened"], exit_time=a["closed"],
-            entry_price=a["entry"], sl_price=a["sl"],
+            entry_price=a["entry"], sl_price=meta["signal_sl"],
             actual_exit_price=a["num"] / a["den"], direction=meta["direction"],
             window=window, variant=variant)
         if cf is None:

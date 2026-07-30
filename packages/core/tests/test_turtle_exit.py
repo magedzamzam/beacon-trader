@@ -1,5 +1,6 @@
 """Turtle exit counterfactual (#170) — would getting out on a trend flip have
 beaten where the trade actually closed? Pure backtest; nothing here gates."""
+import asyncio
 import datetime as dt
 
 from beacon_core.analysis.turtle import exit_counterfactual, _bar_time, _no_longer_backing
@@ -308,6 +309,60 @@ def test_rollup_ignores_rows_that_could_not_be_evaluated():
     out = turtle_exit_rollup(rows)
     assert out["overall"]["n"] == 1
     assert "B" not in out["by_channel"]
+
+
+# --------------------------------------------- R denominator (#176)
+class _Res:
+    def __init__(self, rows): self._rows = rows
+    def all(self): return self._rows
+
+
+class _Sess:
+    """First execute() -> trades, second -> legs."""
+    def __init__(self, trades, legs):
+        self._q = [trades, legs]
+
+    async def execute(self, _stmt):
+        return _Res(self._q.pop(0))
+
+
+class _Adapter:
+    def __init__(self, bars): self.bars, self.calls = bars, 0
+
+    async def get_bars(self, *_a, **_k):
+        self.calls += 1
+        return self.bars
+
+    async def aclose(self): pass
+
+
+def _report(signal_sl, leg_sl):
+    """One BUY: entry 110, exit 80. The LEG stop has ratcheted to 109.9 (a
+    breakeven trail); the SIGNAL's original stop was `signal_sl`."""
+    from beacon_core.analysis.report import turtle_exit_report
+    bars = _bars(SERIES)
+    trades = [(1, "BUY", "A", signal_sl)]
+    legs = [(1, 110.0, 110.0, 80.0, leg_sl, 1.0, _at(70), _at(len(SERIES) - 1))]
+    return asyncio.run(turtle_exit_report(_Sess(trades, legs), _Adapter(bars), "GOLD"))
+
+
+def test_r_is_computed_against_the_signal_stop_not_the_ratcheted_leg_stop():
+    """#176: Leg.sl is the CURRENT stop and the ratchet mutates it. 20% of legs
+    had trailed to breakeven, giving |entry - leg.sl| ~ 0 and an exploding R.
+    The denominator must be the signal's immutable stop, as #109 established for
+    be_lock_at_r and as the monitor already does."""
+    out = _report(signal_sl=80.0, leg_sl=109.9)     # ratcheted stop 0.1 from entry
+    row = out["sample_trades"][0]
+    assert row["risk"] == 30.0                      # |110 - 80|, NOT |110 - 109.9|
+    assert row["actual_r"] == -1.0                  # exited at 80 = exactly -1R
+    # With the leg stop it would have been (80-110)/0.1 = -300R.
+    assert abs(row["actual_r"]) < 10
+
+
+def test_a_signal_without_a_stop_is_skipped_with_a_reason():
+    out = _report(signal_sl=None, leg_sl=109.9)
+    assert out["n_evaluated"] == 0
+    assert out["skipped"].get("no_signal_stop") == 1
 
 
 def test_rollup_of_nothing_is_empty_not_a_crash():
