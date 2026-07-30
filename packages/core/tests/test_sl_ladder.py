@@ -195,6 +195,75 @@ def test_mfe_latches_retraced_tp_for_staged_runner():
     assert evaluate(runner, rules, levels_reached("BUY", mfe, _LADDER)) == D("4069")
 
 
+# ---- next_mfe: the in-progress candle closes the sub-poll sampling gap (#160) --
+
+
+def test_next_mfe_folds_candle_high_for_buy():
+    # The point quote missed the wick; the bar's high did not.
+    assert next_mfe("BUY", D("4076"), D("4076"), candle_high=D("4081")) == D("4081")
+
+
+def test_next_mfe_folds_candle_low_for_sell():
+    assert next_mfe("SELL", D("98"), D("98"), candle_low=D("97")) == D("97")
+
+
+def test_next_mfe_ignores_the_unfavourable_side_of_the_candle():
+    # A BUY's excursion is the HIGH only — the bar's low must never move it, and
+    # nothing may walk the MFE backwards.
+    assert next_mfe("BUY", D("4080"), D("4076"), candle_low=D("4060")) == D("4080")
+    assert next_mfe("SELL", D("98"), D("99"), candle_high=D("101")) == D("98")
+
+
+def test_next_mfe_seed_tick_ignores_the_candle():
+    # The in-progress bar spans up to a minute BEFORE the position opened; that is
+    # not this trade's excursion, so the seed tick stays on the point quote.
+    assert next_mfe("BUY", None, D("4070"), candle_high=D("4081")) == D("4070")
+    assert next_mfe("SELL", None, D("98"), candle_low=D("97")) == D("98")
+
+
+def test_next_mfe_without_a_candle_is_pre_160_behaviour():
+    # The bar fetch is best-effort: no candle -> byte-identical to #149.
+    assert next_mfe("BUY", D("4080"), D("4082"), candle_high=None) == D("4082")
+    assert next_mfe("BUY", D("4080"), D("4075"), candle_high=None) == D("4080")
+
+
+def test_candle_mfe_makes_the_arms_agree():
+    # THE #160 scenario: signal 851 fanned out to three accounts, each polled at its
+    # own instant. TP2 = 4037.6. acct5 sampled 4037.96 and acct7 4037.93 (both past
+    # TP2, both ratcheted to BE); acct8 only ever sampled 4037.00 and was left on
+    # its ORIGINAL stop. The minute bar's high is the same for all three, so folding
+    # it in makes every arm reach TP2 and ratchet identically.
+    ladder = {1: D("4035.8"), 2: D("4037.6"), 3: D("4046.0")}
+    bar_high = D("4037.96")
+    polls = {"acct5": D("4037.96"), "acct7": D("4037.93"), "acct8": D("4037.00")}
+
+    # before: acct8 disagrees with the other two arms.
+    assert {a: levels_reached("BUY", p, ladder) for a, p in polls.items()} == {
+        "acct5": {1, 2}, "acct7": {1, 2}, "acct8": {1}}
+
+    # after: one shared candle, one shared verdict.
+    hits = {a: levels_reached("BUY", next_mfe("BUY", D("4034"), p, candle_high=bar_high),
+                              ladder) for a, p in polls.items()}
+    assert hits == {"acct5": {1, 2}, "acct7": {1, 2}, "acct8": {1, 2}}
+
+    rules = [{"trigger": {"type": "tp_hit", "index": 2},
+              "action": {"type": "move_sl_to", "target": "entry"}}]
+    for acct, price in polls.items():
+        ctx = PositionCtx(side="BUY", entry=D("4034"), current_sl=D("4022"),
+                          current_price=price, tps=ladder)
+        assert evaluate(ctx, rules, hits[acct]) == D("4034"), acct   # all lock BE
+
+
+def test_candle_mfe_still_needs_the_tradeable_side_to_reach_the_tp():
+    # The monitor steps the MID bar back by half the spread before folding it, so a
+    # high that only the mid printed must not latch the TP (no premature BE).
+    ladder = {1: D("4035.8"), 2: D("4037.6")}
+    half_spread = D("0.20")
+    mid_high = D("4037.70")                      # mid cleared TP2, bid did not
+    mfe = next_mfe("BUY", D("4034"), D("4037.00"), candle_high=mid_high - half_spread)
+    assert levels_reached("BUY", mfe, ladder) == {1}
+
+
 # ---- entry_basis: a 0 fill_price is UNKNOWN, not a fill at zero (#159) --------
 from beacon_core.strategy.rules import entry_basis
 

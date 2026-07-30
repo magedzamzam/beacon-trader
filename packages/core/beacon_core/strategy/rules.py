@@ -158,15 +158,33 @@ def levels_reached(direction: str, price, tp_levels: Dict[int, Decimal]) -> Set[
     return hit
 
 
-def next_mfe(direction: str, prev, price) -> Decimal:
+def next_mfe(direction: str, prev, price, *, candle_high=None, candle_low=None) -> Decimal:
     """The updated max-favorable excursion: the best price the trade has printed —
     HIGHEST for BUY, LOWEST for SELL. `prev` is the stored MFE (None on the first
     tick, where the live price seeds it). Feeding this (instead of the instantaneous
     price) into `levels_reached` latches a TP the market reached then retraced
     BETWEEN polls, so a still-open staged runner ratchets its SL like the single-shot
-    LIMIT arms that fill at broker granularity (#149). Monotonic: never walks back."""
+    LIMIT arms that fill at broker granularity (#149). Monotonic: never walks back.
+
+    A point quote alone only ever sees the instants we happened to poll, so a TP
+    wicked BETWEEN two polls is still lost — and since every account's trade is
+    polled at its own instant, the SAME signal could latch a different TP set per
+    arm, leaving one leg on its original stop while the others locked breakeven
+    (#160, signal 851). Folding the IN-PROGRESS candle's extreme (`candle_high` for
+    BUY, `candle_low` for SELL) makes the excursion poll-rate-independent, so the
+    arms agree by construction. Both are optional — the bar fetch is best-effort,
+    and passing neither reproduces the pre-#160 behaviour exactly.
+
+    The candle is only folded from the SECOND tick on: the in-progress bar also
+    covers price action from BEFORE this trade opened, which is not ITS excursion,
+    and crediting it could ratchet a stop to breakeven on a high the position never
+    saw. `prev is None` is exactly the seed tick, so it stays on the point quote."""
     price = Decimal(str(price))
     if prev is None:
         return price
+    extreme = candle_high if direction == "BUY" else candle_low
+    if extreme is not None:
+        extreme = Decimal(str(extreme))
+        price = max(price, extreme) if direction == "BUY" else min(price, extreme)
     prev = Decimal(str(prev))
     return max(prev, price) if direction == "BUY" else min(prev, price)

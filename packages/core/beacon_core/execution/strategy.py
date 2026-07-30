@@ -93,6 +93,42 @@ def cancel_pending_on_stop(chain, *, source_strategy=None, default=True) -> bool
     return default
 
 
+# What `cancel_pending_on_stop` retires, and why.
+CANCEL_PROGRESSED = "progressed"
+CANCEL_STOPPED_OUT = "stopped_out"
+
+
+def cancel_reason(leg_statuses, *, tps_hit: bool = False,
+                  sl_moved: bool = False) -> "str | None":
+    """Why a trade's still-resting entry orders should be retired now, or None to
+    leave them working.
+
+      `stopped_out` — a leg filled and NO position of the trade is open any more.
+        The trade is over; anything still resting at the broker (a stale ladder
+        rung, or a staged reclaim STOP that is ARMED) would open a brand-new,
+        UNMANAGED position on a dead trade — no ratchet, no exit rules, no risk
+        accounting — and today only the leg TTL ever retires it, up to an hour
+        later (#161). `cancel_pending_on_stop` is named for exactly this case, but
+        only ever implemented the next one.
+      `progressed` — a leg filled AND the trade moved our way (a TP was reached
+        or a stop ratcheted). The remaining unfilled rungs are stale: price went
+        where we wanted without them, so filling now would be entering late (#25).
+
+    Pass EVERY leg of the trade (any status), so a position that filled and closed
+    on an earlier tick still counts as filled. Both reasons require a real fill —
+    a phantom TP computed off price with zero fills must never tear down a ladder
+    we were never in (#25).
+    """
+    statuses = list(leg_statuses)
+    if not any(s in ("open", "closed") for s in statuses):
+        return None
+    if not any(s == "open" for s in statuses):
+        return CANCEL_STOPPED_OUT              # strictly stronger than progressed
+    if tps_hit or sl_moved:
+        return CANCEL_PROGRESSED
+    return None
+
+
 # ---- Entry pillar ------------------------------------------------------------
 def entry_policy(chain, *, global_planner=None, source_ttl=None) -> dict:
     """Merged entry policy (#104): built-in planner defaults, a legacy source TTL,

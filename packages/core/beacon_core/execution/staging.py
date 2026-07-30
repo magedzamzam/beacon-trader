@@ -60,6 +60,11 @@ ARMED = "armed"         # reclaim only: a STOP is resting at the broker
 FILLED = "filled"       # at least one leg filled
 EXPIRED = "expired"     # TTL elapsed without deploying/filling
 SKIPPED = "skipped"     # a decider vetoed the deployment
+CANCELLED = "cancelled"  # its resting order was pulled at the broker (#161)
+
+# A tranche in any of these is RESOLVED: it owns nothing at the broker any more,
+# so "armed with a live broker_order_ref" is never a permanent state (#161).
+TERMINAL_STATES = (FILLED, EXPIRED, SKIPPED, CANCELLED)
 
 # --- decision actions ---------------------------------------------------------
 WAIT = "wait"           # do nothing this tick

@@ -169,6 +169,39 @@ async def _evict_adapter(account_id: int) -> None:
             pass
 
 
+# High/low of the IN-PROGRESS bar per (broker, epic), fetched at most ONCE per tick
+# (cleared in `tick()`). Two things fall out of that: one bar fetch serves every
+# trade on the instrument, and every arm of the same signal folds the IDENTICAL
+# wick into its MFE, so they can no longer disagree about which TPs were reached —
+# bars are public market data, so sharing one across accounts is what makes the
+# arms consistent by construction rather than by luck of poll timing (#160).
+_CANDLE: dict = {}
+# The finest resolution Capital.com offers — the tighter the bar, the less
+# pre-entry price action an in-progress candle can carry.
+_MFE_CANDLE_RESOLUTION = "MINUTE"
+
+
+async def _candle_extremes(adapter, broker_id, epic) -> tuple:
+    """(high, low) of the in-progress bar for `epic` as MID prices, or (None, None).
+    Best-effort and cached per tick: if the fetch fails the MFE simply falls back to
+    point quotes (pre-#160 behaviour) — it must never disturb position management."""
+    key = (broker_id, epic)
+    cached = _CANDLE.get(key)
+    if cached is not None:
+        return cached
+    hi = lo = None
+    try:
+        bars = await adapter.get_bars(epic, _MFE_CANDLE_RESOLUTION, max_bars=2)
+        if bars:
+            last = bars[-1]
+            hi = Decimal(str(last["h"])) if last.get("h") is not None else None
+            lo = Decimal(str(last["l"])) if last.get("l") is not None else None
+    except Exception as exc:
+        log.info("candle fetch failed for %s: %s", epic, exc)
+    _CANDLE[key] = (hi, lo)
+    return hi, lo
+
+
 def _classify_outcome(close_px, entry_px, tp, sl, sl_moved, tol, realized_pl=None) -> str:
     """Name a close: tp_hit | sl_hit | breakeven | manual.
 
@@ -401,18 +434,42 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
         # staged trades. Pre-#156 trades have entry_style NULL: they fall back to
         # the old behaviour once their tranches settle, which is what they did
         # before — and both knobs default to it anyway.
-        staged_ttl_cfg, late_leg_ids = None, set()
+        staged_ttl_cfg, late_leg_ids, tranches = None, set(), []
         if trade.entry_style == "staged" or staged_pending:
             _se = (await session.execute(select(StagedEntry).where(
                 StagedEntry.trade_id == trade.id))).scalar_one_or_none()
             if _se is not None:
                 staged_ttl_cfg = STG.staged_config(_se.cfg)
+                # ALL tranches, not just the non-toe-in ones: besides the TTL clock
+                # we now have to advance a tranche's state when its legs resolve, so
+                # `armed` with a live broker_order_ref can't outlive the order (#161).
+                tranches = (await session.execute(select(StagedTranche).where(
+                    StagedTranche.trade_id == trade.id))).scalars().all()
                 # toe-in is placed by the executor at signal time and keeps the
                 # ordinary TTL; only the monitor-deployed tranches reset the clock.
-                for _tr in (await session.execute(select(StagedTranche).where(
-                        StagedTranche.trade_id == trade.id,
-                        StagedTranche.role != STG.TOE_IN))).scalars().all():
-                    late_leg_ids.update(_tr.leg_ids or [])
+                for _tr in tranches:
+                    if _tr.role != STG.TOE_IN:
+                        late_leg_ids.update(_tr.leg_ids or [])
+
+        def _tranche_of(leg_id):
+            for _tr in tranches:
+                if leg_id in (_tr.leg_ids or []):
+                    return _tr
+            return None
+
+        def _resolve_tranche(leg_id, state: str, reason: str) -> None:
+            """Advance the tranche that owns `leg_id` to a TERMINAL state once its
+            leg resolves (#161). Without this a reclaim stays `armed` forever with a
+            broker_order_ref that is long gone, so 'is an order still resting?' is
+            unanswerable from the DB — 15 CLOSED trades read that way today."""
+            tr = _tranche_of(leg_id)
+            if tr is None or tr.state in STG.TERMINAL_STATES:
+                return
+            tr.state = state
+            tr.state_since = utcnow()
+            tr.reason = (reason or "")[:96]
+            session.add(Event(trade_id=trade.id, leg_id=leg_id, kind="staged_" + state,
+                              payload={"tranche": tr.role, "reason": reason}))
         # TP price map across ALL legs of the trade, so (a) a ratchet rule that
         # references a TP whose legs already closed still resolves its level, and
         # (b) hit-DETECTION runs off the FULL ladder — a TP consumed as a staged
@@ -430,8 +487,21 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
         # Tracking the best price (max for BUY, min for SELL) keeps a reached TP
         # latched for the open runner. NULL MFE (pre-#149 trades / DB without the
         # ALTER, CLAUDE.md §6) falls back to live price → behaviour unchanged.
+        # ...and fold the in-progress candle's extreme in too, so a TP wicked
+        # BETWEEN two polls is not lost and every arm of the signal sees the same
+        # wick whenever it happened to poll (#160). Bars are MID prices while
+        # `price` is the side we would close on (bid for BUY, offer for SELL), so
+        # step the extreme back by half the spread — an MFE must never claim a
+        # level the TRADEABLE side never reached, or a stop ratchets to breakeven
+        # on a high that was only ever a mid.
+        _c_hi, _c_lo = await _candle_extremes(adapter, broker.id, smap.broker_epic)
+        _half_spread = ((quote.offer - quote.bid) / 2
+                        if (quote.bid is not None and quote.offer is not None
+                            and quote.offer > quote.bid) else Decimal("0"))
         prev_mfe = trade.max_favorable_price
-        mfe = next_mfe(trade.direction, prev_mfe, price)
+        mfe = next_mfe(trade.direction, prev_mfe, price,
+                       candle_high=None if _c_hi is None else _c_hi - _half_spread,
+                       candle_low=None if _c_lo is None else _c_lo + _half_spread)
         if prev_mfe is None or Decimal(str(prev_mfe)) != mfe:
             trade.max_favorable_price = mfe
         tps_hit = levels_reached(trade.direction, mfe, tp_levels)
@@ -546,19 +616,27 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                 return a.get("source")
             return None
 
-        async def _close_leg(leg, txns, require_txn: bool = False) -> bool:
+        async def _close_leg(leg, txns, require_txn: bool = False,
+                             exact_only: bool = False) -> bool:
             """Close a leg. Realized P&L and the close identity come from the
             broker's closing transaction, matched to THIS leg by position dealId
             (source of truth). With require_txn=True the leg is only closed when
             such a transaction exists — used to tell a genuine fill+close apart
-            from a cancelled/expired working order."""
+            from a cancelled/expired working order.
+
+            exact_only=True drops the instrument-level fallback, for a leg the
+            broker still lists as a RESTING order: it cannot have filled, so any
+            unclaimed close on the instrument belongs to some OTHER leg. Letting it
+            match there labelled a never-filled reclaim STOP `closed`/`sl_hit` with
+            `fill_price = None` — and, because the close 'succeeded', we skipped the
+            cancel and left the order live at the broker (#161, trade t391)."""
             tp = Decimal(str(leg.tp)); sl = Decimal(str(leg.sl))
             entry_px = entry_basis(leg.fill_price, leg.entry)   # 0 == unknown (#159)
             tol = Decimal(str(smap.min_stop_distance or "0")) or (abs(tp) * Decimal("0.001"))
             lot = Decimal(str(leg.lot))
 
             m = _txn_by_dealid(txns, leg.broker_position_ref)
-            if m is None and not leg.broker_position_ref:
+            if m is None and not leg.broker_position_ref and not exact_only:
                 m = _txn_by_instrument(txns, smap.broker_epic)
             if m is None and require_txn:
                 return False
@@ -699,8 +777,11 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                         _why = ("leg_ttl" if (ttl_min and ttl_min > 0 and age > ttl_min)
                                 else None)
                     if _why:
-                        # Never expire something that actually filled+closed.
-                        if not await _close_leg(leg, await _transactions(), require_txn=True):
+                        # Never expire something that actually filled+closed. The
+                        # broker still lists this order as resting, so only an EXACT
+                        # dealId close can mean that — see _close_leg (#161).
+                        if not await _close_leg(leg, await _transactions(),
+                                                require_txn=True, exact_only=True):
                             try:
                                 await adapter.cancel_order(leg.broker_order_ref)
                             except Exception:
@@ -711,6 +792,9 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                             session.add(Event(trade_id=trade.id, leg_id=leg.id,
                                               kind="expired",
                                               payload={"age_min": age, "reason": _why}))
+                            _resolve_tranche(leg.id, STG.EXPIRED, _why)
+                        else:
+                            _resolve_tranche(leg.id, STG.FILLED, "filled and closed")
                     continue
 
                 # Left the order book: it became a position (fill), filled+closed
@@ -730,12 +814,16 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                         "symbol": trade.symbol, "direction": trade.direction,
                         "price": str(leg.fill_price) if leg.fill_price is not None else None,
                         "detail": f"TP{leg.tp_index} entry filled"})
+                    _resolve_tranche(leg.id, STG.FILLED, f"filled via {via}")
                 elif not await _close_leg(leg, await _transactions(), require_txn=True):
                     leg.status = "cancelled"
                     leg.outcome = "cancelled"
                     leg.closed_at = utcnow()
                     session.add(Event(trade_id=trade.id, leg_id=leg.id,
                                       kind="cancelled_at_broker", payload={}))
+                    _resolve_tranche(leg.id, STG.CANCELLED, "gone from the order book")
+                else:
+                    _resolve_tranche(leg.id, STG.FILLED, "filled and closed in one tick")
                 continue
 
             if (leg.status == "open" and leg.broker_position_ref
@@ -784,20 +872,27 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                 except Exception as exc:
                     log.warning("SL move failed (leg %s): %s", leg.id, exc)
 
-        # --- cancel stale limit entries once the trade has progressed ---
-        # If a TP has been hit or a stop rule has ratcheted the SL, the remaining
-        # unfilled LIMIT entries of THIS trade are stale — price moved the intended
-        # way without them (e.g. a 4025-4020 buy where 4025 filled and hit TP1
-        # while 4020 never triggered). Cancel them so we don't enter late.
-        # Only cancels orders the broker confirms are still cancellable, so an
-        # order that just filled is never mislabelled. Configurable per source.
-        # Only cancel the resting ladder once a leg of THIS trade actually filled
-        # (open/closed) — never on a phantom TP computed off price with zero fills
-        # (that used to tear down entries we were never in — #25).
-        any_filled = any(l.status in ("open", "closed") for l in legs)
-        progressed = any_filled and (bool(effective_tps_hit) or any(l.sl_moved for l in legs))
-        if progressed and strat.get("cancel_pending_on_stop", True):
-            for leg in legs:
+        # --- retire resting entries: the trade progressed, or it is fully out ---
+        # `progressed`: a TP was hit or a stop ratcheted, so the remaining unfilled
+        # LIMIT entries of THIS trade are stale — price moved the intended way
+        # without them (e.g. a 4025-4020 buy where 4025 filled and hit TP1 while
+        # 4020 never triggered). Cancel them so we don't enter late.
+        # `stopped_out`: EVERY position of the trade has closed. Anything still
+        # resting — a ladder rung, or a staged reclaim STOP sitting ARMED — would
+        # open a fresh position on a trade that is over, with no ratchet, no exit
+        # rules and no risk accounting. Only the leg TTL retired those before, up to
+        # an hour after the trade died (#161). Both are gated by the SAME per-source
+        # `cancel_pending_on_stop` flag, which is finally true to its name.
+        # Only cancels orders the broker confirms are still cancellable, so an order
+        # that just filled is never mislabelled — and never fires before a leg of
+        # THIS trade actually filled (#25).
+        why_cancel = ST.cancel_reason([l.status for l in _all_legs],
+                                      tps_hit=bool(effective_tps_hit),
+                                      sl_moved=any(l.sl_moved for l in _all_legs))
+        if why_cancel and strat.get("cancel_pending_on_stop", True):
+            _detail = {ST.CANCEL_PROGRESSED: "trade progressed (TP hit / SL ratcheted); stale entry",
+                       ST.CANCEL_STOPPED_OUT: "trade fully closed; orphaned resting entry"}[why_cancel]
+            for leg in _all_legs:
                 if leg.status != "working" or leg.broker_order_ref not in orders:
                     continue
                 ok = False
@@ -810,11 +905,30 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                     leg.outcome = "cancelled"
                     leg.closed_at = utcnow()
                     session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="cancelled_by_rule",
-                                      payload={"reason": "trade progressed (TP hit / SL ratcheted); stale limit entry"}))
+                                      payload={"reason": _detail, "trigger": why_cancel}))
+                    _resolve_tranche(leg.id, STG.CANCELLED, _detail)
                     _notify("order_cancelled", {
                         "symbol": trade.symbol, "direction": trade.direction,
-                        "detail": f"TP{leg.tp_index} limit cancelled — trade progressed"})
-                    log.info("trade %s leg %s cancelled — stale limit after progress", trade.id, leg.id)
+                        "detail": f"TP{leg.tp_index} entry cancelled — {why_cancel}"})
+                    log.info("trade %s leg %s cancelled — %s", trade.id, leg.id, why_cancel)
+            # A dead trade must not deploy anything NEW either: retire the tranches
+            # that were never placed, so `_drive_staged` below can't put a fresh
+            # order on the book the same tick we cleared the old one.
+            if why_cancel == ST.CANCEL_STOPPED_OUT:
+                for tr in await _staged_pending(session, trade.id):
+                    for leg in (await session.execute(select(Leg).where(
+                            Leg.id.in_(tr.leg_ids or []),
+                            Leg.status == "staged"))).scalars().all():
+                        leg.status = "cancelled"
+                        leg.outcome = "cancelled"
+                        leg.closed_at = utcnow()
+                    tr.state = STG.CANCELLED
+                    tr.state_since = utcnow()
+                    tr.reason = _detail[:96]
+                    session.add(Event(trade_id=trade.id, kind="staged_cancelled",
+                                      payload={"tranche": tr.role, "reason": _detail}))
+                    log.info("trade %s tranche %s -> cancelled (stopped out)", trade.id, tr.role)
+                staged_pending = []
 
         # --- confirmation-staged entry (#129): drive the DECIDE engine off live
         # price. Runs only for staged trades; deploys the runner at the deep edge
@@ -856,6 +970,7 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
 
 
 async def tick() -> None:
+    _CANDLE.clear()             # one bar fetch per epic per tick, shared by all arms
     async with Session()() as session:
         ai_cfg = await ai_service.load_config(session)
         trades = await _open_trades(session)
@@ -938,8 +1053,61 @@ async def _maybe_recompute_structure() -> None:
         log.warning("structure recompute check failed: %s", exc)
 
 
+async def _sweep_orphaned_orders() -> None:
+    """Start-up safety net (#161): cancel any order still resting at the broker
+    whose trade we already consider CLOSED.
+
+    The tick loop only ever looks at open/partial trades, so an order left behind
+    by a crash (or by a restart between deciding to cancel and committing) is
+    invisible to it and rests until its TTL — long enough to fill and open an
+    unmanaged position. We only ever touch orders WE placed (looked up by our own
+    `broker_order_ref`) and only when the broker still lists them as cancellable.
+    Best-effort: a broker error here must never stop the monitor from starting."""
+    try:
+        async with Session()() as session:
+            rows = (await session.execute(
+                select(Leg, Trade).join(Trade, Leg.trade_id == Trade.id).where(
+                    Leg.status == "working", Leg.broker_order_ref.isnot(None),
+                    Trade.status == "closed"))).all()
+            if not rows:
+                return
+            by_account: dict = {}
+            for leg, trade in rows:
+                by_account.setdefault(trade.account_id, []).append(leg)
+            for account_id, legs in by_account.items():
+                try:
+                    _, _, adapter = await _adapter_for(session, account_id)
+                    live = {o.broker_order_ref for o in await adapter.list_orders()}
+                except Exception as exc:
+                    log.warning("orphan sweep: broker unreachable (account %s): %s",
+                                account_id, exc)
+                    continue
+                for leg in legs:
+                    if leg.broker_order_ref not in live:
+                        continue                    # already gone — nothing to pull
+                    try:
+                        ok = await adapter.cancel_order(leg.broker_order_ref)
+                    except Exception as exc:
+                        log.warning("orphan sweep: cancel failed (leg %s): %s", leg.id, exc)
+                        continue
+                    if ok:
+                        leg.status = "cancelled"
+                        leg.outcome = "cancelled"
+                        leg.closed_at = utcnow()
+                        session.add(Event(trade_id=leg.trade_id, leg_id=leg.id,
+                                          kind="cancelled_by_rule",
+                                          payload={"reason": "orphaned order on a closed trade",
+                                                   "trigger": "startup_sweep"}))
+                        log.warning("orphan sweep: cancelled resting order on closed "
+                                    "trade %s (leg %s)", leg.trade_id, leg.id)
+            await session.commit()
+    except Exception as exc:                        # never block start-up
+        log.warning("orphan sweep failed: %s", exc)
+
+
 async def main() -> None:
     await init_models()
+    await _sweep_orphaned_orders()
     spawn_bg(run_health_server("monitor", bus, port=8080))
     log.info("monitor loop every %ss", settings.monitor_interval)
     while True:
