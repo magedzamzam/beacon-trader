@@ -285,6 +285,34 @@ def test_every_registry_entry_computes_on_a_real_series():
     assert dead == []
 
 
+def test_declared_outputs_match_what_compute_returns():
+    """The generic entry filter (#167) addresses `outputs` by name and the API
+    validator 422s an unlisted field, so a drift between the declaration and the
+    real dict would either hide a usable field or reject a valid rule."""
+    ctx = _synthetic_ctx()
+    mismatched = {}
+    for spec in R.REGISTRY:
+        params = {p["name"]: p["default"] for p in spec["params"]}
+        res = R.compute_one(ctx, {"id": spec["id"], "params": params})
+        actual, declared = set(res[1]), set(spec["outputs"])
+        if actual != declared:
+            mismatched[spec["id"]] = {"missing": sorted(actual - declared),
+                                      "stale": sorted(declared - actual)}
+    assert mismatched == {}
+
+
+def test_every_registry_entry_declares_its_outputs_explicitly():
+    assert all(s["id"] in R._OUTPUTS for s in R.REGISTRY)
+
+
+def test_resolve_instance_is_the_shared_key_derivation():
+    inst = R.resolve_instance("rsi", {"period": 999})       # clamped to the max
+    assert inst["key"] == "rsi_200" and inst["params"] == {"period": 200}
+    assert inst["outputs"] == ["value"]
+    assert R.resolve_instance("rsi")["key"] == "rsi_14"     # defaults merged
+    assert R.resolve_instance("nope") is None
+
+
 def test_new_indicators_are_all_in_the_catalog():
     added = {"pivots", "pivot_fib", "psar", "vortex", "ichimoku", "dema", "tema",
              "hma", "zlema", "kama", "tsi", "cmo", "uo", "ao", "fisher",

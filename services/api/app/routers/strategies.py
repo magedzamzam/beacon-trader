@@ -13,6 +13,7 @@ from beacon_core.db.models import Account, ExecutionStrategy, Source
 from beacon_core.execution import strategy as ST
 from beacon_core.execution import staging as STG
 from beacon_core.execution.strategy import ENTRY_POLICY_KEYS
+from beacon_core.ta import registry as TA
 from beacon_core.timeutil import utcnow
 from ..deps import get_db
 from ..auth import require_token
@@ -30,7 +31,7 @@ _SL_TRIGGERS = {"tp_hit", "price_move", "be_lock_at_r"}   # be_lock_at_r: #109
 # evaluator has no case for it, so accepting one into `rules` would store a
 # permanently silent no-op.
 _FILTER_WHEN = {"always", "session_in", "adx_regime",
-                "mc_probability", "turtle_signal"}
+                "mc_probability", "turtle_signal", "indicator"}
 _FILTER_ACTIONS = {"skip", "scale"}
 
 
@@ -86,6 +87,69 @@ def _clean_when(when: dict) -> dict:
     return {k: v for k, v in when.items() if v != ""}
 
 
+def _check_indicator_side(side: dict, where: str, *, need_op: bool) -> None:
+    """Validate one side of a generic `indicator` rule (#167) against the registry.
+
+    Deliberately STRICT where the evaluator is deliberately fail-open. The
+    evaluator must never delete a signal by raising, so it reads a bad reference
+    as "does not match" — which means a typo'd id or field would save fine and sit
+    there as a permanently silent no-op. This is the layer that can afford to say
+    no, so it does: unknown indicator, unknown field, unknown timeframe, unknown
+    operator are all 422s at write time."""
+    inst = TA.resolve_instance(side.get("id"), side.get("params"))
+    if not inst:
+        known = ", ".join(sorted(s["id"] for s in TA.REGISTRY))
+        raise HTTPException(422, f"{where}: unknown indicator '{side.get('id')}' "
+                                 f"(known: {known})")
+    tf = side.get("timeframe")
+    if tf not in (None, "") and tf not in TA.AVAILABLE_TIMEFRAMES:
+        raise HTTPException(422, f"{where}: unknown timeframe '{tf}'")
+    field = side.get("field") or "value"
+    if field not in inst["outputs"]:
+        raise HTTPException(422, f"{where}: '{inst['id']}' has no field '{field}' "
+                                 f"(fields: {', '.join(inst['outputs'])})")
+    if not need_op:
+        return
+    op = str(side.get("op") or "").strip().lower()
+    if op not in ST.FILTER_OPS:
+        raise HTTPException(422, f"{where}: unknown op '{side.get('op')}' "
+                                 f"(ops: {', '.join(sorted(ST.FILTER_OPS))})")
+    if op in ("between", "outside"):
+        v = side.get("value")
+        if not isinstance(v, (list, tuple)) or len(v) != 2:
+            raise HTTPException(422, f"{where}: op '{op}' needs value [lo, hi]")
+
+
+def _check_indicator_when(when: dict, where: str) -> None:
+    _check_indicator_side(when, where, need_op=True)
+    ref = when.get("ref")
+    if ref in (None, ""):
+        return
+    if isinstance(ref, str):
+        if ref.strip().lower() != "price":
+            raise HTTPException(422, f"{where}: ref must be 'price' or "
+                                     "{id, timeframe, field}")
+    elif isinstance(ref, dict):
+        _check_indicator_side(ref, f"{where}.ref", need_op=False)
+    else:
+        raise HTTPException(422, f"{where}: ref must be 'price' or "
+                                 "{id, timeframe, field}")
+
+
+def _clean_mode(rule: dict, where: str) -> str | None:
+    """Validate an explicit `mode`. Absent stays absent so the evaluator applies
+    its type-dependent default (shadow for `indicator`, live for the rule types
+    that predate it and are already deployed)."""
+    m = rule.get("mode")
+    if m in (None, ""):
+        return None
+    m = str(m).strip().lower()
+    if m not in ST.FILTER_MODES:
+        raise HTTPException(422, f"{where}: mode must be one of "
+                                 f"{', '.join(ST.FILTER_MODES)}")
+    return m
+
+
 def _clean_entry_filters(ef) -> dict | None:
     if ef is None:
         return None
@@ -96,11 +160,21 @@ def _clean_entry_filters(ef) -> dict | None:
         if not isinstance(rules, list):
             raise HTTPException(422, "entry_filters.rules must be a list")
         cleaned = []
-        for r in rules:
+        for i, r in enumerate(rules):
             if not isinstance(r, dict) or (r.get("when") or {}).get("type") not in _FILTER_WHEN \
                     or r.get("action") not in _FILTER_ACTIONS:
                 raise HTTPException(422, "each filter rule needs a known when.type and action")
-            cleaned.append({**r, "when": _clean_when(r["when"])})
+            where = f"rules[{i}]"
+            when = _clean_when(r["when"])
+            if when.get("type") == "indicator":
+                _check_indicator_when(when, where)
+            out = {**r, "when": when}
+            mode = _clean_mode(r, where)
+            if mode:
+                out["mode"] = mode
+            else:
+                out.pop("mode", None)
+            cleaned.append(out)
         ef = {**ef, "rules": cleaned}
     return ef or None
 
@@ -116,8 +190,13 @@ def _clean_exit_policy(xp) -> dict | None:
 
 
 def _shape(s: ExecutionStrategy) -> dict:
+    # `filter_modes` is derived, not stored (#167): how many enabled rules can
+    # actually skip/scale a trade vs how many are only being measured. Every
+    # simultaneous LIVE gate is another multiple comparison, so that count belongs
+    # on the surface rather than buried in the rules blob.
     return {"id": s.id, "account_id": s.account_id, "source_id": s.source_id,
             "entry_policy": s.entry_policy, "entry_filters": s.entry_filters,
+            "filter_modes": ST.filter_mode_counts((s.entry_filters or {}).get("rules")),
             "exit_policy": s.exit_policy, "enabled": s.enabled, "label": s.label,
             "note": s.note, "version": s.version,
             "updated_at": s.updated_at.isoformat() if s.updated_at else None}

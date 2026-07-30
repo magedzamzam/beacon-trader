@@ -42,6 +42,7 @@ from beacon_core.risk import cluster as CL
 from beacon_core.ta import capture as ta_capture
 from beacon_core.trading_hours import service as th_service
 from beacon_core.ta.registry import TF_RESOLUTION
+from beacon_core.ta.features import compute_timeframe as _ta_compute
 from beacon_core.ta.indicators import (ema as _ema, ema_full as _ema_full,
                                        atr as _atr, adx as _adx_ind)
 from beacon_core import notifications as notify
@@ -166,6 +167,49 @@ async def _adx_read(adapter, epic: str, timeframe: str, period: int = 14):
         if d and d.get("adx") is not None:
             return {"adx": d["adx"], "trending": bool(d.get("trending"))}
     return None
+
+
+async def _ta_ctx(adapter, epic: str, rules) -> dict:
+    """ctx['ta'][timeframe][instance_key] for every indicator an `indicator`
+    filtration rule references (#167) — the generic replacement for `_adx_read`'s
+    one-indicator plumbing.
+
+    The rule set says what it needs (`ta_rule_requirements`), so each referenced
+    timeframe's bars are fetched EXACTLY ONCE no matter how many rules read it,
+    the registry's own `compute` callables produce the values (no duplicated
+    math), and a rule set that references no TA fetches nothing at all — the hot
+    path stays free on the default install, which is the good property the ADX
+    version had and the reason it was worth generalising rather than replacing.
+
+    FAIL-OPEN everywhere: a broker error, an unknown timeframe or a thin series
+    just leaves that block out of ctx, and `_match_indicator` reads an absent
+    input as "does not match"."""
+    reqs = ST.ta_rule_requirements(rules)
+    if not reqs:
+        return {}
+    by_tf: dict[str, list] = {}
+    for r in reqs:
+        by_tf.setdefault(r["timeframe"], []).append(r)
+    out: dict[str, dict] = {}
+    for tf, items in by_tf.items():
+        resolution = TF_RESOLUTION.get(tf)
+        if not resolution:
+            continue
+        try:
+            bars = await adapter.get_bars(epic, resolution, max_bars=250)
+        except Exception as exc:
+            log.info("filter TA bars failed (%s/%s): %s", epic, resolution, exc)
+            continue
+        try:
+            feats = _ta_compute(bars, None,
+                                [{"id": r["id"], "params": r["params"]} for r in items])
+        except Exception as exc:
+            log.info("filter TA compute failed (%s/%s): %s", epic, tf, exc)
+            continue
+        block = {k: v for k, v in (feats or {}).items() if not k.startswith("_")}
+        if block:
+            out[tf] = block
+    return out
 
 
 async def _accounts_for(session, source: Source):
@@ -483,7 +527,7 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         _frules = (_entry_filters or {}).get("rules") or []
         if _frules:
             _active = await th_service.active_sessions(session)
-            _filter_ctx = {"sessions": _active}
+            _filter_ctx = {"sessions": _active, "price": float(current)}
             # #132: graduate the adx_regime filter (#127) from shadow to LIVE. Build
             # the per-TF ADX ctx by computing it in the hot path (features are
             # captured post-execution, so they're not persisted yet). Only fetches
@@ -495,6 +539,12 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                     _adx_ctx[_tf] = _a
             if _adx_ctx:
                 _filter_ctx["adx"] = _adx_ctx
+            # #167: the generic TA ctx — any registry indicator on any timeframe,
+            # resolved from the rule set itself. Same fail-open posture; still
+            # nothing fetched when no rule references TA.
+            _ta_block = await _ta_ctx(adapter, smap.broker_epic, _frules)
+            if _ta_block:
+                _filter_ctx["ta"] = _ta_block
             # #164: FAIL OPEN. An evaluator that raises used to propagate out of
             # handle_signal, where the consumer loop swallows it — AFTER the
             # signal is off the durable queue. That silently deleted the trade:
@@ -502,14 +552,24 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             # rule must never be able to lose a signal, so any evaluator failure
             # now trades at full size and is recorded.
             try:
-                _ff, _skip, _reasons = ST.apply_filter_rules(_frules, _filter_ctx)
+                _decision = ST.evaluate_filter_rules(_frules, _filter_ctx)
+                _ff, _skip, _reasons = _decision.factor, _decision.skip, _decision.reasons
+                _shadow = _decision.shadow
             except Exception as exc:
                 log.exception("signal %s acct %s: filtration evaluation FAILED — "
                               "failing open at full size: %s", sig.id, acct.id, exc)
                 session.add(Event(kind="entry_filter_error", payload={
                     "signal_id": sig.id, "account_id": acct.id,
                     "error": str(exc), "rules": _frules}))
-                _ff, _skip, _reasons = 1.0, False, []
+                _ff, _skip, _reasons, _shadow = 1.0, False, [], []
+            # #167: what the shadow rules WOULD have done. Recorded before the live
+            # skip returns, so a shadow rule is measurable on the very signals a
+            # live rule rejects — otherwise the record is conditioned on the gate
+            # we're trying to evaluate against.
+            if _shadow:
+                session.add(Event(kind="filter_shadow", payload={
+                    "signal_id": sig.id, "account_id": acct.id,
+                    "rules": _shadow}))
             if _skip:
                 log.info("signal %s acct %s: SKIP by filtration (%s)", sig.id, acct.id, _reasons)
                 session.add(Event(kind="entry_filtered", payload={

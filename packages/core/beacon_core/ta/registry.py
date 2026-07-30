@@ -339,6 +339,51 @@ REGISTRY = [
      "compute": _apz},
 ]
 
+# The output keys each indicator emits — DECLARED, not discovered. The generic
+# entry-filtration evaluator (#167) addresses one field of one indicator, and the
+# API validator rejects a field that isn't listed here: a rule pointing at a
+# misspelled field would otherwise save cleanly and sit there as a permanently
+# silent no-op, which is the worst kind of filter. `test_ta_extended` pins these
+# against what compute() actually returns, so the two can't drift.
+_MA_OUT = ["value", "above"]
+_BAND_OUT = ["middle", "upper", "lower"]
+_PIVOT_OUT = ["p", "r1", "s1", "r2", "s2", "nearest", "dist_pct", "above_p"]
+_OUTPUTS = {
+    "sma": _MA_OUT, "ema": _MA_OUT, "wma": _MA_OUT, "dema": _MA_OUT,
+    "tema": _MA_OUT, "hma": _MA_OUT, "zlema": _MA_OUT, "kama": _MA_OUT,
+    "vwap": _MA_OUT,
+    "macd": ["macd", "signal", "hist", "cross"],
+    "adx": ["adx", "plus_di", "minus_di", "trending"],
+    "aroon": ["up", "down", "osc"],
+    "rsi": ["value"], "cci": ["value"], "williams_r": ["value"], "roc": ["value"],
+    "momentum": ["value"], "hist_vol": ["value"], "obv": ["value"],
+    "tsi": ["value"], "cmo": ["value"], "uo": ["value"], "ao": ["value"],
+    "stoch": ["k", "d", "overbought", "oversold"],
+    "stochrsi": ["value", "overbought", "oversold"],
+    "atr": ["value", "pct"], "tr": ["value", "pct"], "msd": ["value", "pct"],
+    "bbands": ["middle", "upper", "lower", "width", "pct_b",
+               "above_upper", "below_lower"],
+    "keltner": _BAND_OUT, "donchian": ["upper", "lower", "middle"],
+    "apz": _BAND_OUT + ["above_upper", "below_lower"],
+    "support_resistance": ["support", "resistance",
+                           "dist_support_pct", "dist_resistance_pct"],
+    "fib": ["nearest", "price", "dist_pct", "up_swing"],
+    "fvg": ["present", "direction", "top", "bottom", "mid", "size_pct",
+            "dist_pct", "filled"],
+    "order_block": ["present", "type", "top", "bottom", "dist_pct", "mitigated"],
+    "pivots": _PIVOT_OUT, "pivot_fib": _PIVOT_OUT[:5] + ["r3", "s3"] + _PIVOT_OUT[5:],
+    "psar": ["value", "trend", "above"],
+    "vortex": ["plus", "minus", "diff", "bullish"],
+    "ichimoku": ["tenkan", "kijun", "cloud_a", "cloud_b", "above_cloud",
+                 "in_cloud", "chikou_above", "tenkan_above_kijun"],
+    "fisher": ["value", "signal"],
+    "elder_ray": ["bull", "bear"],
+    "chandelier": ["long", "short"],
+    "squeeze": ["on", "width_ratio"],
+}
+for _spec in REGISTRY:
+    _spec["outputs"] = list(_OUTPUTS.get(_spec["id"], ["value"]))
+
 _BY_ID = {s["id"]: s for s in REGISTRY}
 
 DEFAULT_CONFIG = {
@@ -396,10 +441,26 @@ def compute_one(ctx: Ctx, item: dict):
     return instance_key(spec, p), out
 
 
+def resolve_instance(indicator_id: str, params=None) -> Optional[dict]:
+    """{id, params, key, outputs} for a registry id with its params merged and
+    clamped, or None if the id is unknown.
+
+    The ONE place a config item is turned into the key its outputs land under, so
+    the entry-filtration evaluator (#167) and whatever computed the features agree
+    on that key by construction instead of by convention."""
+    spec = _BY_ID.get(indicator_id)
+    if not spec:
+        return None
+    p = _merge_params(spec, params)
+    return {"id": spec["id"], "params": p, "key": instance_key(spec, p),
+            "outputs": list(spec.get("outputs") or [])}
+
+
 def catalog() -> dict:
     return {"timeframes": AVAILABLE_TIMEFRAMES,
             "indicators": [{"id": s["id"], "label": s["label"],
-                            "category": s["category"], "params": s["params"]}
+                            "category": s["category"], "params": s["params"],
+                            "outputs": s["outputs"]}
                            for s in REGISTRY]}
 
 

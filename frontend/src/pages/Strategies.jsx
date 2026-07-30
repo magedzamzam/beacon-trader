@@ -219,7 +219,7 @@ export default function Strategies() {
 
         {tab === "filter" && (
           <div className="p-4 space-y-3">
-            <p className="text-[11px] text-muted"><HelpHint term="filtration_help" /> One list for every entry filter — add a rule and pick its type (Trend Alignment · ADX Regime · Session). Each can <b>skip</b> or <b>scale</b> (de-size ×factor) a trade. Fail-open: a rule whose inputs aren't available is a no-op. Most-specific strategy scope wins.</p>
+            <p className="text-[11px] text-muted"><HelpHint term="filtration_help" /> One list for every entry filter — add a rule and pick its type (Trend Alignment · ADX Regime · Session · any registry Indicator). Each can <b>skip</b> or <b>scale</b> (de-size ×factor) a trade. Every rule is <b>shadow</b> or <b>live</b>: shadow is computed and logged as <code>filter_shadow</code> and changes nothing, live actually acts — new Indicator rules start in shadow on purpose. Fail-open: a rule whose inputs aren't available is a no-op. Most-specific strategy scope wins.</p>
             <EntryFilterRules rules={form.rules} onChange={(rules) => setF("rules", rules)} />
           </div>
         )}

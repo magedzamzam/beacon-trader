@@ -1,5 +1,7 @@
+import { useEffect, useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { Field, Input, Select, Toggle, Button } from "./form";
+import { api } from "../lib/api";
 
 /**
  * EntryFilterRules (#84/#127) — one unified list for every entry-filtration rule.
@@ -43,12 +45,134 @@ export const RULE_TYPES = {
     hint: "act on whether the 55-bar breakout system agrees with the channel's direction. SHADOW: inert until graduated.",
     blank: { type: "turtle_signal", agrees: false, position: "", variant: "signal" },
   },
+  indicator: {
+    label: "Indicator (any)",
+    hint: "gate on ANY registry indicator / timeframe / field (#167). Ships in SHADOW mode: it is computed and logged as filter_shadow, and changes nothing until you switch it to LIVE — which needs N≥30 direction-folded, a 90% CI clear of the base rate, and replication across ≥2 epochs.",
+    blank: { type: "indicator", id: "rsi", timeframe: "1h", field: "value", op: "gte", value: 70 },
+    defaultMode: "shadow",
+  },
 };
 
-const newRule = (type) => ({ enabled: true, name: "", when: { ...RULE_TYPES[type].blank }, action: "scale", factor: 0.5 });
+// `op` values understood by execution.strategy._match_indicator. `arity` drives
+// which value input is rendered: none / one scalar / a [lo, hi] pair.
+const OPS = [
+  { op: "gt", label: ">", arity: 1 }, { op: "gte", label: "≥", arity: 1 },
+  { op: "lt", label: "<", arity: 1 }, { op: "lte", label: "≤", arity: 1 },
+  { op: "eq", label: "=", arity: 1 }, { op: "ne", label: "≠", arity: 1 },
+  { op: "between", label: "between", arity: 2 },
+  { op: "outside", label: "outside", arity: 2 },
+  { op: "is_true", label: "is true", arity: 0 },
+  { op: "is_false", label: "is false", arity: 0 },
+];
+const opArity = (op) => (OPS.find((o) => o.op === op)?.arity ?? 1);
 
-function RuleFields({ when, set }) {
+// A rule with no explicit `mode` inherits the evaluator's type-dependent default:
+// SHADOW for the generic indicator gate (a new rule must not be able to change
+// live behaviour by existing), LIVE for the types that predate it and are already
+// deployed. Mirrors execution.strategy.rule_mode — keep the two in step.
+const effectiveMode = (r) => r?.mode || RULE_TYPES[r?.when?.type]?.defaultMode || "live";
+
+const newRule = (type) => ({
+  enabled: true, name: "", when: { ...RULE_TYPES[type].blank },
+  action: "scale", factor: 0.5, mode: RULE_TYPES[type].defaultMode || "live",
+});
+
+/** The generic gate (#167): pick any registry indicator, timeframe, output field,
+ *  operator, and what to compare against. Nothing here is per-indicator code —
+ *  the option lists come from /ta/catalog, so a newly registered indicator shows
+ *  up here on its own. */
+function IndicatorFields({ when, set, setMany, catalog }) {
+  const inds = catalog?.indicators || [];
+  const spec = inds.find((i) => i.id === when.id);
+  const fields = spec?.outputs?.length ? spec.outputs : ["value"];
+  const arity = opArity(when.op ?? "gte");
+  const refKind = when.ref == null || when.ref === "" ? "value"
+    : typeof when.ref === "string" ? "price" : "indicator";
+  const refSpec = inds.find((i) => i.id === when.ref?.id);
+  const pair = Array.isArray(when.value) ? when.value : ["", ""];
+  const setPair = (i, v) => set("value", i === 0 ? [v, pair[1]] : [pair[0], v]);
+  const setRefKind = (k) => set("ref", k === "value" ? null : k === "price" ? "price"
+    : { id: when.id, timeframe: when.timeframe, field: "value" });
+
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <Field label="Indicator" hint={inds.length ? `${inds.length} in the registry` : "loading catalog…"}>
+          {/* one setMany, not three sets: each `set` rebuilds `when` from the same
+              render's copy, so chained calls would clobber each other. */}
+          <Select value={when.id ?? ""}
+            onChange={(e) => setMany({ id: e.target.value, field: "value", params: undefined })}>
+            {!spec && when.id ? <option value={when.id}>{when.id}</option> : null}
+            {inds.map((i) => <option key={i.id} value={i.id}>{i.label} · {i.category}</option>)}
+          </Select></Field>
+        <Field label="Timeframe" hint="bars are fetched once per TF, only when a rule needs them">
+          <Select value={when.timeframe ?? "4h"} onChange={(e) => set("timeframe", e.target.value)}>
+            {TIMEFRAMES.map((t) => <option key={t} value={t}>{t}</option>)}
+          </Select></Field>
+        <Field label="Field" hint="which output of this indicator">
+          <Select value={when.field ?? "value"} onChange={(e) => set("field", e.target.value)}>
+            {fields.map((f) => <option key={f} value={f}>{f}</option>)}
+          </Select></Field>
+        <Field label="Operator">
+          <Select value={when.op ?? "gte"} onChange={(e) => set("op", e.target.value)}>
+            {OPS.map((o) => <option key={o.op} value={o.op}>{o.label}</option>)}
+          </Select></Field>
+      </div>
+      {arity === 2 && (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <Field label="Low"><Input type="number" step="any" value={pair[0] ?? ""} onChange={(e) => setPair(0, e.target.value)} /></Field>
+          <Field label="High"><Input type="number" step="any" value={pair[1] ?? ""} onChange={(e) => setPair(1, e.target.value)} /></Field>
+        </div>
+      )}
+      {arity === 1 && (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <Field label="Compare to" hint="a fixed number, the live price, or another indicator's field">
+            <Select value={refKind} onChange={(e) => setRefKind(e.target.value)}>
+              <option value="value">a fixed value</option>
+              <option value="price">the live price</option>
+              <option value="indicator">another indicator</option>
+            </Select></Field>
+          {refKind === "value" && (
+            <Field label="Value" hint="numbers compare numerically; text fields (cross, trend) compare as text">
+              <Input value={when.value ?? ""} onChange={(e) => set("value", e.target.value)} /></Field>
+          )}
+          {refKind === "indicator" && (
+            <>
+              <Field label="Ref indicator">
+                <Select value={when.ref?.id ?? ""} onChange={(e) => set("ref", { ...when.ref, id: e.target.value, field: "value" })}>
+                  {inds.map((i) => <option key={i.id} value={i.id}>{i.label}</option>)}
+                </Select></Field>
+              <Field label="Ref timeframe" hint="blank = same TF as above">
+                <Select value={when.ref?.timeframe ?? ""} onChange={(e) => set("ref", { ...when.ref, timeframe: e.target.value || undefined })}>
+                  <option value="">same</option>
+                  {TIMEFRAMES.map((t) => <option key={t} value={t}>{t}</option>)}
+                </Select></Field>
+              <Field label="Ref field">
+                <Select value={when.ref?.field ?? "value"} onChange={(e) => set("ref", { ...when.ref, field: e.target.value })}>
+                  {(refSpec?.outputs?.length ? refSpec.outputs : ["value"]).map((f) => <option key={f} value={f}>{f}</option>)}
+                </Select></Field>
+            </>
+          )}
+        </div>
+      )}
+      {!!spec?.params?.length && (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          {spec.params.map((p) => (
+            <Field key={p.name} label={p.name} hint={`default ${p.default} · ${p.min}–${p.max}`}>
+              <Input type="number" step={p.type === "float" ? "any" : "1"}
+                value={when.params?.[p.name] ?? p.default}
+                onChange={(e) => set("params", { ...(when.params || {}), [p.name]: Number(e.target.value) })} />
+            </Field>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RuleFields({ when, set, setMany, catalog }) {
   const t = when?.type;
+  if (t === "indicator") return <IndicatorFields when={when} set={set} setMany={setMany} catalog={catalog} />;
   if (t === "trend_alignment") {
     return (
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -135,9 +259,23 @@ function RuleFields({ when, set }) {
 
 export default function EntryFilterRules({ rules, onChange }) {
   const list = rules || [];
+  const [catalog, setCatalog] = useState(null);
+  // Only the generic indicator gate needs the registry; don't pull it otherwise.
+  const needsCatalog = list.some((r) => r?.when?.type === "indicator");
+  useEffect(() => {
+    if (!needsCatalog || catalog) return;
+    api.taCatalog().then(setCatalog).catch(() => setCatalog({ indicators: [] }));
+  }, [needsCatalog, catalog]);
+
   const patch = (i, r) => onChange(list.map((x, j) => (j === i ? r : x)));
   const patchWhen = (i, k, v) => patch(i, { ...list[i], when: { ...list[i].when, [k]: v } });
-  const setType = (i, type) => patch(i, { ...list[i], when: { ...RULE_TYPES[type].blank } });
+  const patchWhenMany = (i, obj) => patch(i, { ...list[i], when: { ...list[i].when, ...obj } });
+  const setType = (i, type) => patch(i, {
+    ...list[i], when: { ...RULE_TYPES[type].blank },
+    mode: RULE_TYPES[type].defaultMode || "live",
+  });
+  const live = list.filter((r) => r?.enabled !== false && effectiveMode(r) === "live").length;
+  const shadow = list.filter((r) => r?.enabled !== false && effectiveMode(r) === "shadow").length;
 
   return (
     <div className="space-y-3">
@@ -148,6 +286,13 @@ export default function EntryFilterRules({ rules, onChange }) {
             <Plus className="w-3.5 h-3.5 inline -mt-0.5" /> {label}
           </Button>
         ))}
+        {!!list.length && (
+          // Every simultaneous LIVE gate is another multiple comparison. Keep the
+          // count visible so nobody has to count JSON to know how many are armed.
+          <span className="ml-auto text-[11px] text-muted">
+            <b className={live ? "text-warn" : ""}>{live}</b> live · {shadow} shadow
+          </span>
+        )}
       </div>
       {!list.length ? (
         <div className="text-[11px] text-muted">No filters — every signal trades at full size. Add a rule above, e.g. <i>Trend Alignment → skip</i> or <i>ADX Regime (4h trending) → skip</i>.</div>
@@ -166,6 +311,10 @@ export default function EntryFilterRules({ rules, onChange }) {
                   <Select value={r.action || "scale"} onChange={(e) => patch(i, { ...r, action: e.target.value })}>
                     <option value="skip">skip</option><option value="scale">scale</option>
                   </Select>
+                  <Select value={effectiveMode(r)} onChange={(e) => patch(i, { ...r, mode: e.target.value })}
+                    title="shadow = computed and logged as filter_shadow, changes nothing. live = actually skips/scales.">
+                    <option value="shadow">shadow</option><option value="live">live</option>
+                  </Select>
                   {r.action === "scale" && (
                     <input type="number" step="0.05" value={r.factor ?? 0.5}
                       onChange={(e) => patch(i, { ...r, factor: Number(e.target.value) })}
@@ -176,7 +325,8 @@ export default function EntryFilterRules({ rules, onChange }) {
                   <button onClick={() => onChange(list.filter((_, j) => j !== i))} className="ml-auto text-short" title="remove rule"><Trash2 className="w-4 h-4" /></button>
                 </div>
                 <p className="text-[11px] text-muted">{RULE_TYPES[type]?.hint}</p>
-                <RuleFields when={r.when} set={(k, v) => patchWhen(i, k, v)} />
+                <RuleFields when={r.when} set={(k, v) => patchWhen(i, k, v)}
+                  setMany={(obj) => patchWhenMany(i, obj)} catalog={catalog} />
               </div>
             );
           })}

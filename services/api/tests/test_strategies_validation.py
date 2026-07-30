@@ -20,6 +20,8 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
+from beacon_core.execution import strategy as ST
+
 from app.routers import strategies as S
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -171,6 +173,105 @@ def test_cleaned_filters_are_json_serialisable():
     ef = {"rules": [_rule({"type": "adx_regime", "timeframe": "4h",
                            "trending": True, "min_adx": ""})]}
     assert json.loads(json.dumps(S._clean_entry_filters(ef))) == S._clean_entry_filters(ef)
+
+
+# ------------------------------------------- generic indicator rules (#167)
+# The evaluator is deliberately fail-open: a rule it cannot resolve does not
+# match, because a filtration rule must never be able to delete a signal by
+# raising. That posture means a typo'd indicator or field would SAVE cleanly and
+# then sit there as a permanently silent no-op — the same failure mode
+# `trend_alignment` is kept out of `rules` to avoid. This layer is the one that
+# can afford to say no, so these tests pin that it does.
+def _ind(**kw):
+    return {"type": "indicator", "id": "rsi", "timeframe": "1h",
+            "field": "value", "op": "gte", "value": 70, **kw}
+
+
+def test_indicator_rule_round_trips():
+    out = S._clean_entry_filters({"rules": [_rule(_ind())]})
+    assert out["rules"][0]["when"] == _ind()
+
+
+def test_indicator_rule_accepts_a_multi_output_field_and_params():
+    when = _ind(id="macd", field="cross", op="eq", value="up",
+                params={"fast": 12, "slow": 26, "signal": 9})
+    assert S._clean_entry_filters({"rules": [_rule(when)]})["rules"][0]["when"] == when
+
+
+@pytest.mark.parametrize("when", [
+    _ind(id="not_an_indicator"),
+    _ind(field="not_a_field"),
+    _ind(timeframe="3y"),
+    _ind(op="approximately"),
+    _ind(op="between", value=70),            # needs [lo, hi]
+    _ind(op="between", value=[70]),
+    _ind(op="outside", value="70,80"),
+    _ind(ref="something_else"),              # ref must be 'price' or an object
+    _ind(ref=["rsi"]),
+    _ind(ref={"id": "not_an_indicator"}),
+    _ind(ref={"id": "rsi", "field": "not_a_field"}),
+])
+def test_indicator_rule_rejects_unresolvable_references(when):
+    with pytest.raises(HTTPException) as exc:
+        S._clean_entry_filters({"rules": [_rule(when)]})
+    assert exc.value.status_code == 422
+
+
+def test_indicator_rule_accepts_both_ref_forms():
+    for ref in ("price", {"id": "bbands", "field": "upper"},
+                {"id": "adx", "timeframe": "4h", "field": "adx"}):
+        out = S._clean_entry_filters({"rules": [_rule(_ind(op="gt", ref=ref))]})
+        assert out["rules"][0]["when"]["ref"] == ref
+
+
+def test_indicator_rule_error_names_the_offending_rule():
+    with pytest.raises(HTTPException) as exc:
+        S._clean_entry_filters({"rules": [_rule(_ind()), _rule(_ind(field="nope"))]})
+    assert "rules[1]" in exc.value.detail
+
+
+# ------------------------------------------------------------- rule `mode`
+def test_mode_is_validated_and_preserved():
+    for mode in ("live", "shadow"):
+        out = S._clean_entry_filters({"rules": [{**_rule(_ind()), "mode": mode}]})
+        assert out["rules"][0]["mode"] == mode
+
+
+def test_unknown_mode_is_rejected():
+    with pytest.raises(HTTPException) as exc:
+        S._clean_entry_filters({"rules": [{**_rule(_ind()), "mode": "sort-of-live"}]})
+    assert exc.value.status_code == 422
+
+
+def test_absent_mode_stays_absent_so_the_evaluator_default_applies():
+    """Storing a default here would freeze it: the evaluator's default is
+    type-dependent (shadow for `indicator`, live for the types that predate it and
+    are already deployed), and that has to stay one decision in one place."""
+    out = S._clean_entry_filters({"rules": [_rule(_ind()), {**_rule(_ind()), "mode": ""}]})
+    assert "mode" not in out["rules"][0] and "mode" not in out["rules"][1]
+
+
+def test_a_new_indicator_rule_defaults_to_shadow_end_to_end():
+    """The guardrail, checked through the write path the UI actually uses: a rule
+    saved with no explicit mode cannot skip or scale a trade."""
+    saved = S._clean_entry_filters({"rules": [_rule(_ind())]})
+    assert ST.rule_mode(saved["rules"][0]) == "shadow"
+    ctx = {"ta": {"1h": {"rsi_14": {"value": 99.0}}}}
+    assert ST.apply_filter_rules(saved["rules"], ctx) == (1.0, False, [])
+
+
+def test_shape_exposes_the_live_vs_shadow_count():
+    """#167 requires the number of simultaneous LIVE gates to be visible — each one
+    is another multiple comparison against a ~50–100 trade sample."""
+    class _Row:
+        id = 1; account_id = None; source_id = None
+        entry_policy = None; exit_policy = None; enabled = True
+        label = None; note = None; version = 1; updated_at = None
+        entry_filters = {"rules": [_rule(_ind()),                       # shadow
+                                   {**_rule(_ind()), "mode": "live"},
+                                   {"enabled": True, "action": "skip",
+                                    "when": {"type": "adx_regime"}}]}   # live
+    assert S._shape(_Row())["filter_modes"] == {"live": 2, "shadow": 1}
 
 
 # -------------------------------------------------------- _clean_entry_policy

@@ -11,7 +11,10 @@ on a bare box and is safe from both the executor (snapshot at entry) and monitor
 """
 from __future__ import annotations
 
+from typing import NamedTuple
+
 from ..strategy.rules import DEFAULT_SL_RULES
+from ..ta import registry as TA
 
 # The entry-policy keys the planner/executor understand (chase guard #67 + TTL).
 # entry_style + staged drive the confirmation-staged entry model (#129); staged is
@@ -315,6 +318,239 @@ def shadow_rule_inputs(rules) -> set:
     return need
 
 
+# ---- the generic indicator condition (#167) ---------------------------------
+# One evaluator for the WHOLE TA registry: {"type":"indicator", "id", "timeframe",
+# "field", "op", "value"|"ref", "params"}. Adding a gateable indicator is now
+# adding an indicator — there is no matching evaluator to hand-write, and no ctx
+# key to hand-plumb in the executor (that two-step is what #132 had to do for ADX
+# alone, and it does not scale to a 45-entry registry).
+DEFAULT_RULE_TIMEFRAME = "4h"
+
+_NUM_OPS = {
+    "gt": lambda a, b: a > b, "gte": lambda a, b: a >= b,
+    "lt": lambda a, b: a < b, "lte": lambda a, b: a <= b,
+}
+FILTER_OPS = frozenset({*_NUM_OPS, "eq", "ne", "between", "outside",
+                        "is_true", "is_false"})
+
+
+def _as_bool(v):
+    """True/False for a boolean-ish input, or None when it isn't one. Same posture
+    as `_as_num`: unparseable reads as absent, never as False."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return bool(v)
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in ("true", "yes", "1"):
+            return True
+        if s in ("false", "no", "0"):
+            return False
+    return None
+
+
+def _loose_eq(left, right) -> bool:
+    """Equality across the three output flavours the registry emits: booleans
+    (`trending`, `above`), numbers, and short strings (`cross`, `trend`)."""
+    if isinstance(left, bool):
+        rb = _as_bool(right)
+        return rb is not None and left is rb
+    ln, rn = _as_num(left), _as_num(right)
+    if ln is not None and rn is not None:
+        return ln == rn
+    return str(left).strip().lower() == str(right).strip().lower()
+
+
+def _ta_block(ctx, indicator_id, timeframe, key=None):
+    """The outputs dict for one indicator on one timeframe, or None (fail-open).
+
+    Looks up the exact instance key the executor wrote (`rsi_14`), then the bare
+    id, then a unique `<id>_…` instance — so a hand-built ctx in a test or a
+    future caller that keys by id still resolves, while an ambiguous match (two
+    EMAs on the same TF) deliberately resolves to nothing rather than to a coin
+    flip."""
+    ta = ctx.get("ta")
+    if not isinstance(ta, dict) or not ta or not indicator_id:
+        return None
+    if timeframe:
+        block = ta.get(timeframe)
+    elif len(ta) == 1:
+        block = next(iter(ta.values()))
+    else:
+        block = None                    # ambiguous multi-TF without a TF -> no-op
+    if not isinstance(block, dict):
+        return None
+    for k in ([key] if key else []) + [indicator_id]:
+        v = block.get(k)
+        if isinstance(v, dict):
+            return v
+    prefix = f"{indicator_id}_"
+    hits = [v for k, v in block.items()
+            if isinstance(v, dict) and k.startswith(prefix)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _ta_field(ctx, when, key=None):
+    block = _ta_block(ctx, when.get("id"), when.get("timeframe"), key)
+    if block is None:
+        return None
+    return block.get(when.get("field") or "value")
+
+
+def _right_operand(when, ctx):
+    """The value the left side is compared against: `ref` (another indicator field,
+    or the live price) when present, else the literal `value`. `ref` is what makes
+    price-vs-band and band-vs-band gates expressible without a bespoke rule type."""
+    ref = when.get("ref")
+    if ref not in (None, ""):
+        if isinstance(ref, str):
+            return ctx.get("price") if ref.strip().lower() == "price" else None
+        if isinstance(ref, dict):
+            return _ta_field(ctx, {"id": ref.get("id"),
+                                   "timeframe": ref.get("timeframe") or when.get("timeframe"),
+                                   "field": ref.get("field")},
+                             _rule_instance_key(ref))
+        return None
+    v = when.get("value")
+    return None if v == "" else v
+
+
+def _rule_instance_key(when):
+    """The `<id>_<params>` key this rule's indicator lands under, or None if the id
+    isn't in the registry."""
+    inst = TA.resolve_instance((when or {}).get("id"), (when or {}).get("params"))
+    return inst["key"] if inst else None
+
+
+def _match_indicator(when, ctx) -> bool:
+    """`indicator` condition (#167): compare one field of one registry indicator on
+    one timeframe against a literal or another field.
+
+    FAIL-OPEN throughout, exactly as `_match_adx_regime`: an unknown op, an
+    indicator that isn't in ctx['ta'], a missing field, an unparseable bound — all
+    of them mean "does not match". A filtration rule must never be able to delete a
+    signal by being wrong about its own inputs."""
+    op = str(when.get("op") or "").strip().lower()
+    if op not in FILTER_OPS:
+        return False
+    left = _ta_field(ctx, when, _rule_instance_key(when))
+    if left is None:
+        return False
+    if op in ("is_true", "is_false"):
+        lb = _as_bool(left)
+        return lb is not None and lb is (op == "is_true")
+    if op in ("between", "outside"):
+        pair = when.get("value")
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            return False
+        lo, hi, val = _as_num(pair[0]), _as_num(pair[1]), _as_num(left)
+        if lo is None or hi is None or val is None:
+            return False
+        if lo > hi:
+            lo, hi = hi, lo
+        inside = lo <= val <= hi
+        return inside if op == "between" else not inside
+    right = _right_operand(when, ctx)
+    if right is None:
+        return False
+    if op in ("eq", "ne"):
+        return _loose_eq(left, right) is (op == "eq")
+    lv, rv = _as_num(left), _as_num(right)
+    if lv is None or rv is None:
+        return False
+    return _NUM_OPS[op](lv, rv)
+
+
+def _requirements_of(when, default_timeframe) -> list:
+    """The (indicator, timeframe) instances one `indicator` rule needs computed —
+    its own, plus its `ref` side when that references another indicator."""
+    out = []
+    for side in (when, when.get("ref") if isinstance(when.get("ref"), dict) else None):
+        if not side or not side.get("id"):
+            continue
+        inst = TA.resolve_instance(side["id"], side.get("params"))
+        if not inst:
+            continue                                   # unknown id -> inert rule
+        tf = side.get("timeframe") or when.get("timeframe") or default_timeframe
+        if tf not in TA.AVAILABLE_TIMEFRAMES:
+            continue
+        out.append({**inst, "timeframe": tf})
+    return out
+
+
+def ta_rule_requirements(rules, default_timeframe: str = DEFAULT_RULE_TIMEFRAME) -> list:
+    """Every indicator instance an `indicator` rule set needs, deduped, as
+    [{id, params, key, outputs, timeframe}].
+
+    This is the generalisation of `adx_rule_timeframes`: the executor asks the rule
+    set what it needs, fetches each referenced timeframe's bars ONCE, and computes
+    only those registry entries. Empty when no rule references TA — so the default
+    install still fetches nothing extra on the entry path.
+
+    SHADOW rules are included: a rule that isn't allowed to act still has to be
+    computed, or there is nothing to measure and no way to ever promote it."""
+    seen, out = set(), []
+    for r in rules or []:
+        if not isinstance(r, dict) or not r.get("enabled", True):
+            continue
+        when = r.get("when") or {}
+        if when.get("type") != "indicator":
+            continue
+        for req in _requirements_of(when, default_timeframe):
+            token = (req["timeframe"], req["key"])
+            if token not in seen:
+                seen.add(token)
+                out.append(req)
+    return out
+
+
+# ---- shadow vs live (#167 guardrail) ----------------------------------------
+# Generic gating over a 45-entry registry is a false-discovery machine: at N≈50–100
+# correlated XAUUSD trades an unconstrained "gate on anything" API manufactures
+# significant-looking rules every week by chance. So a rule carries a `mode`, and
+# only `live` may skip or scale.
+FILTER_MODES = ("live", "shadow")
+# The generic `indicator` condition defaults to SHADOW — a newly authored rule must
+# not be able to change live behaviour by existing. The condition types that
+# predate it default to LIVE, because they are already deployed and configured and
+# flipping them to shadow would silently UN-gate trades that are being filtered
+# today (#127/#132's adx_regime is live on purpose). An explicit `mode` always wins.
+_SHADOW_DEFAULT_TYPES = frozenset({"indicator"})
+
+
+def rule_mode(rule) -> str:
+    """`live` or `shadow` for one rule. See `_SHADOW_DEFAULT_TYPES` for why the
+    default depends on the condition type."""
+    if not isinstance(rule, dict):
+        return "live"
+    m = str((rule.get("mode") or "")).strip().lower()
+    if m in FILTER_MODES:
+        return m
+    wtype = (rule.get("when") or {}).get("type")
+    return "shadow" if wtype in _SHADOW_DEFAULT_TYPES else "live"
+
+
+def filter_mode_counts(rules) -> dict:
+    """{'live': n, 'shadow': n} over the ENABLED rules — the count the API and UI
+    surface so the number of simultaneous live gates (each one another
+    multiple-comparison) is visible rather than buried in a JSON blob."""
+    counts = {"live": 0, "shadow": 0}
+    for r in rules or []:
+        if isinstance(r, dict) and r.get("enabled", True):
+            counts[rule_mode(r)] += 1
+    return counts
+
+
+class FilterDecision(NamedTuple):
+    """What the filtration pillar decided, plus what the shadow rules WOULD have
+    decided. `factor`/`skip`/`reasons` reflect live rules only."""
+    factor: float
+    skip: bool
+    reasons: list
+    shadow: list
+
+
 def adx_rule_timeframes(rules, default: str = "4h") -> set:
     """The timeframes an `adx_regime` rule set needs live ADX computed for (#132).
     A rule without an explicit `timeframe` falls back to `default`. Empty when no
@@ -327,14 +563,45 @@ def adx_rule_timeframes(rules, default: str = "4h") -> set:
     return tfs
 
 
-def apply_filter_rules(rules, ctx) -> tuple:
+def _matches(when, ctx) -> bool:
+    """Does one rule's condition hold against the trade context? Every branch is
+    fail-open: an unrecognised type, or an input that isn't in ctx, is False."""
+    wtype = when.get("type")
+    if wtype == "always":
+        return True
+    if wtype == "session_in":
+        want = when.get("sessions") or []
+        have = ctx.get("sessions")
+        if have is None and ctx.get("session") is not None:
+            have = [ctx["session"]]
+        return bool(have) and any(s in want for s in have)
+    if wtype == "adx_regime":
+        return _match_adx_regime(when, ctx)
+    if wtype == "mc_probability":
+        return _match_mc_probability(when, ctx)
+    if wtype == "turtle_signal":
+        return _match_turtle_signal(when, ctx)
+    if wtype == "indicator":
+        return _match_indicator(when, ctx)
+    # (structure/bayesian conditions plug in here — no-op until wired)
+    return False
+
+
+def _scale_factor(rule) -> float:
+    try:
+        return max(0.0, float(rule.get("factor", 1.0)))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def evaluate_filter_rules(rules, ctx) -> FilterDecision:
     """Evaluate the extensible filtration rules against a trade CONTEXT (#84).
 
-    Each rule: {enabled, name, when:{type, ...}, action:'skip'|'scale', factor}.
-    Returns (size_factor, skip, reasons). Rules compose multiplicatively for
-    'scale'; any matched 'skip' wins. A rule whose condition inputs are missing
-    from ctx is a no-op (fail-open) — so rules needing entry-time features simply
-    don't fire until those features are wired. Currently understood conditions:
+    Each rule: {enabled, name, mode:'live'|'shadow', when:{type, ...},
+    action:'skip'|'scale', factor}. Rules compose multiplicatively for 'scale';
+    any matched 'skip' wins. A rule whose condition inputs are missing from ctx is
+    a no-op (fail-open) — so rules needing entry-time features simply don't fire
+    until those features are wired. Understood conditions:
       session_in {sessions:[...]}          ctx['session'] in list
       always                               unconditional (baseline scaling)
       adx_regime {timeframe, trending,     ctx['adx'][tf] ADX trend state (#127);
@@ -344,38 +611,43 @@ def apply_filter_rules(rules, ctx) -> tuple:
                       min_rr, max_rr}         NO channel skill. Inert until wired.
       turtle_signal {agrees, position,      ctx['turtle'] Donchian breakout state
                      variant}                 at signal time. Inert until wired.
-    Structure/bayesian conditions are declared here as they're added."""
-    factor, skip, reasons = 1.0, False, []
+      indicator {id, timeframe, field,     ctx['ta'][tf][key] — ANY registry
+                 op, value|ref, params}      indicator (#167). SHADOW by default.
+
+    A `shadow` rule is evaluated and RECORDED but never applied: it contributes
+    nothing to factor/skip/reasons, and lands in `shadow` as {name, type, mode,
+    matched, action, factor} so the executor can emit `filter_shadow` and the
+    would-have-happened can be measured against outcomes. Promotion to `live` is a
+    deliberate config act that has to clear the documented bar (CLAUDE.md §2.4)."""
+    factor, skip, reasons, shadow = 1.0, False, [], []
     for r in rules or []:
         if not isinstance(r, dict) or not r.get("enabled", True):
             continue
         when = r.get("when") or {}
         wtype = when.get("type")
-        matched = None
-        if wtype == "always":
-            matched = True
-        elif wtype == "session_in":
-            want = when.get("sessions") or []
-            have = ctx.get("sessions")
-            if have is None and ctx.get("session") is not None:
-                have = [ctx["session"]]
-            matched = bool(have) and any(s in want for s in have)
-        elif wtype == "adx_regime":
-            matched = _match_adx_regime(when, ctx)
-        elif wtype == "mc_probability":
-            matched = _match_mc_probability(when, ctx)
-        elif wtype == "turtle_signal":
-            matched = _match_turtle_signal(when, ctx)
-        # (structure/bayesian conditions plug in here — no-op until wired)
+        matched = _matches(when, ctx)
+        mode = rule_mode(r)
+        if mode == "shadow":
+            # Recorded whether it matched or not — a gate's non-matches are half
+            # of the evidence you need to ever justify promoting it.
+            shadow.append({"name": r.get("name") or wtype or "rule", "type": wtype,
+                           "mode": mode, "matched": bool(matched),
+                           "action": r.get("action"),
+                           "factor": _scale_factor(r) if r.get("action") == "scale" else None})
+            continue
         if not matched:
             continue
         if r.get("action") == "skip":
             skip = True
             reasons.append(r.get("name") or wtype or "skip")
         elif r.get("action") == "scale":
-            try:
-                factor *= max(0.0, float(r.get("factor", 1.0)))
-            except (TypeError, ValueError):
-                pass
+            factor *= _scale_factor(r)
             reasons.append(r.get("name") or wtype or "scale")
-    return factor, skip, reasons
+    return FilterDecision(factor, skip, reasons, shadow)
+
+
+def apply_filter_rules(rules, ctx) -> tuple:
+    """(size_factor, skip, reasons) — the live decision only. Kept as the narrow
+    entry point for callers that don't care about the shadow record."""
+    d = evaluate_filter_rules(rules, ctx)
+    return d.factor, d.skip, d.reasons
