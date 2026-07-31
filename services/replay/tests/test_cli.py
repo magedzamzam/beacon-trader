@@ -52,6 +52,51 @@ def test_the_example_config_expresses_a_per_account_source_variant():
     assert any(a is not None and s is not None for a, s in scopes)
 
 
+def test_check_resolves_a_generator_config_without_a_database(capsys):
+    """The generated-signal half of the same guarantee (#184). An indicator the
+    condition names but the registry does not carry is silently UNKNOWN on every
+    bar — the generator emits nothing and nothing errors. `check` is where that
+    becomes visible, so it has to resolve the instance list offline."""
+    import main
+    rc = main.main(["check", "--config",
+                    str(SERVICE_ROOT / "runs" / "example-generator-rules.json")])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["ok"] is True
+    assert out["signal_source"] == "generator:rules"
+    gen = out["generator"]
+    assert gen["name"] == "rules" and gen["timeframe"] == "15m"
+    assert {i.split(":", 1)[1].split("_")[0] for i in gen["indicator_instances"]} \
+        >= {"macd", "rsi", "fvg"}
+    # The caps are not optional — an example that left them off would teach the
+    # wrong thing (see harness/generators.py).
+    assert gen["cooldown_bars"] > 0 and gen["max_signals_per_day"] > 0
+
+
+def test_a_broken_generator_config_fails_the_check_instead_of_the_sweep(capsys, tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({
+        "signal_source": "generator:rules", "variants": [],
+        "generator_config": {"timeframe": "15m",
+                             "long": {"when": {"type": "always"}}},
+    }), encoding="utf-8")
+    import main
+    assert main.main(["check", "--config", str(bad)]) == 2
+    assert json.loads(capsys.readouterr().out)["ok"] is False
+
+
+def test_the_generator_example_restates_that_it_is_not_a_route_to_live():
+    """A backtest is the SCREENING step. The Lever-5 chain has to be stated in
+    the config an operator actually opens, not only in a docstring."""
+    text = (SERVICE_ROOT / "runs" / "example-generator-rules.json").read_text(
+        encoding="utf-8")
+    assert "kind='engine'" in text
+    assert "shadow forward-R" in text
+    assert "validation gate" in text
+    cfg = json.loads(text)
+    assert cfg["holdout_from"]              # in-sample-only would not be an edge
+
+
 def _run_body():
     tree = ast.parse((SERVICE_ROOT / "main.py").read_text(encoding="utf-8"))
     return next(n for n in ast.walk(tree)

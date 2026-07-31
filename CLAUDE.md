@@ -132,6 +132,12 @@ CI (`.github/workflows/tests.yml`) runs this on every push/PR. **Add a test with
 sizing, guards, SL rules, the planner, or the analysis layer** — and to the strategy config
 validators, where a gap shipped two defects in a day (#163, #164).
 
+The condition grammar in `execution/strategy.py` is shared by BOTH the live filtration
+pillar and the offline signal generator (#184), so a change there is a change to the
+trading path even when it was made for replay. It is three-valued on purpose: a leaf whose
+input is missing is UNKNOWN, not False, so `{"not": X}` cannot fire because X could not be
+computed. `packages/core/tests/test_condition_grammar.py` pins both entry points agreeing.
+
 ## 5. Repo map (where things live)
 
 ```
@@ -152,11 +158,16 @@ frontend/       React + Vite (Configuration tabs, Positions, Signals, Performanc
 
 `services/replay` (#169) is RESEARCH, not trading — the `beacon_research` half of the #60
 ADR. It replays the signal history through the pure engines above under alternative
-configs. The one-way rule is absolute: replay may import `beacon_core`; **`beacon_core`
-and the trading services must never import replay.** It has no broker credentials, a
-SELECT-only DB role, writes only `replay_*`, and is behind a compose `research` profile so
-`docker compose up -d` never starts it. Its results are hypothesis-generating only — see
-`services/replay/README.md` and §2 above.
+configs, and (#184) can COMPUTE the signals instead of reading them
+(`signal_source: generator:rules`) using the same condition grammar `entry_filters` uses —
+a new strategy is JSON, not a deploy. The one-way rule is absolute: replay may import
+`beacon_core`; **`beacon_core` and the trading services must never import replay.** It has
+no broker credentials, a SELECT-only DB role, writes only `replay_*`, and is behind a
+compose `research` profile so `docker compose up -d` never starts it. It has **no HTTP
+surface**: the portal's *Backtest (Replay)* page (#183) is a READ path on `services/api`
+over the `replay.*` tables — three GETs, no route that can start a run, and it needs a
+one-off `GRANT SELECT … IN SCHEMA replay` to the API role. Its results are
+hypothesis-generating only — see `services/replay/README.md` and §2 above.
 
 **Key invariants**
 - The executor consumes a **durable queue** (`bus.enqueue` / `consume_queue`), *not* pub/sub.

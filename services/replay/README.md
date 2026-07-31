@@ -176,24 +176,96 @@ confirm-404 rejects (#150), orphaned armed STOPs (#161), `fill_price=0` unknown
 fills (#159). Those are broker faults with no candle signature. That is a reason
 to weight the bias term, not to explain a failure away.
 
-## 7. Phase 2 — the generator seam
+## 7. Phase 2 — generated signals (#184)
 
 ```
 signal_source:
   historical        -> read `signals` rows            (Phase 1, what-if)
-  generator:<name>  -> scan candles, emit signals     (Phase 2)
+  generator:rules   -> scan candles, emit signals     (Phase 2, backtest)
 ```
 
 A generator is a pure `(bars, config) -> [GeneratedSignal]` emitting the
 existing `ParsedSignal` shape, so planner, sizing, sl_rules, staging and metrics
-are byte-identical to the Telegram path. **No generator ships with Phase 1** —
-the seam is the deliverable; §8 is explicit that generator search is a
-curve-fitting machine, and building one before the harness has passed its own
-validation gate would be fitting a model to a simulator nobody has checked.
+are byte-identical to the Telegram path.
 
-Path to live is unchanged: a validated generator does **not** go live from a
-backtest. It needs a `kind='engine'` source (which does not exist today), a
-producer, and shadow forward-R, and only then a weekend config act on one arm.
+**One generator ships, and only one: `generator:rules`.** Registering a Python
+function per idea — `generator:macd`, `generator:fvg`, `generator:order_block` —
+is the shape this deliberately does not have: it would repeat #167's mistake on
+the generation side, where gating on an indicator meant hand-writing an
+evaluator *and* hand-plumbing a ctx key, which does not scale to a 45-entry
+registry. **A new strategy is JSON, not a deploy.**
+
+The condition grammar is the **same one `entry_filters` uses**
+(`packages/core/beacon_core/execution/strategy.py`), now composable:
+
+```json
+{"all": [
+  {"type": "indicator", "id": "macd", "timeframe": "15m", "field": "cross",
+   "op": "eq", "value": "bull"},
+  {"type": "indicator", "id": "rsi", "timeframe": "15m", "field": "value",
+   "op": "lt", "value": 70},
+  {"any": [{"type": "indicator", "id": "fvg", "timeframe": "15m",
+            "field": "present", "op": "is_true"},
+           {"type": "indicator", "id": "order_block", "timeframe": "15m",
+            "field": "present", "op": "is_true"}]},
+  {"not": {"type": "session_in", "sessions": ["New York"]}}
+]}
+```
+
+`all` / `any` / `not` wrap the existing leaf types, so adding a leaf benefits
+filtration and generation at once. Evaluation is **three-valued**: a leaf whose
+input is missing is UNKNOWN, and UNKNOWN never fires — including through `not`,
+which is the whole reason it is three-valued. Two-valued logic would make
+`{"not": X}` true whenever X could not be computed, i.e. a generator emitting on
+the *absence* of evidence.
+
+What is genuinely new is `entry` / `sl` / `tps` — that is what makes a condition
+a **signal**, and what R is measured against. `entry`: `close` | `level` |
+`offset_atr`. `sl`: `atr_mult` | `points` | `level`. `tps[]`: `r_mult` |
+`atr_mult` | `points` | `level`. A geometry that cannot be priced from the bar,
+or that fails `planner.validate_signal`, is **dropped and counted** — never
+completed with a guessed level.
+
+`cooldown_bars` and `max_signals_per_day` are **not optional** (and default to
+non-zero). A condition true for 50 consecutive bars emits 50 signals, each
+opening a position, and `max_open_risk_per_symbol` then decides the strategy —
+you would be measuring the risk caps, not the indicator. Both, and everything
+the generator suppressed or dropped, ride on the run header under `generator`.
+
+No look-ahead: a trigger bucket's condition is evaluated at that bucket's
+**close** and sees only buckets that had fully closed by then
+(`ContextBuilder.closed_bars` owns that boundary; the generator does not
+re-implement it), and the signal is timestamped at the same instant. Generated
+signals carry **negative** `signal_id`s so a join against the trading `signals`
+table cannot silently match the wrong rows.
+
+See `runs/example-generator-rules.json`, and `check --config` for the offline
+resolve — it prints the indicator instances the condition will compute, which is
+the only place an unknown indicator id becomes visible (a condition naming one is
+UNKNOWN on every bar and emits nothing, silently, by design).
+
+### This is a screening step, not a route to live
+
+Unchanged, and it is the part most likely to be forgotten:
+
+- **It is not actionable until the §5 validation gate has passed.** Fitting a
+  strategy to a simulator nobody has verified compounds two unknowns.
+- **Held-out is the only reportable result.** In-sample generator output is a
+  description of the past, not an edge.
+- **`n_variants_searched` counts the whole grid**, not the arms shown — a 4×5×3
+  sweep is 60, and best-of-60 carries ~2.9σ of pure luck.
+- **N ≥ 30 per variant**, with effective-N ≪ raw-N (correlated same-instrument
+  trades), and the window's **regime composition** stated: ~7 months of 2026 gold
+  is one or two regimes.
+- A validated generator does **not** go live from a backtest. It needs the
+  Lever-5 chain — a `kind='engine'` source (which does not exist today;
+  `sources.kind ∈ {telegram, tradingview, manual, api}`), a producer, and shadow
+  forward-R — and only then a weekend config act on **one** arm.
+
+One useful asymmetry: Telegram signals only exist from **2026-07-05** (~4 weeks),
+whereas candles run from **2026-01-01**. Generated signals are therefore the only
+route to a materially longer sample today — which is also the first time the
+walk-forward split has had room to mean anything.
 
 ## 8. Running it
 
@@ -230,6 +302,12 @@ docker compose run --rm --no-deps replay python main.py validate --config runs/l
 
 # 6. only then, sweep
 docker compose run --rm --no-deps replay python main.py run --config runs/example-exit-ladder.json
+
+# 7. ...and only after 5 passes, generated signals (#184). `check` first: it
+#    resolves the condition offline and prints the indicator instances it will
+#    compute, which is the only place an unknown indicator id is visible.
+docker compose run --rm --no-deps replay python main.py check --config runs/example-generator-rules.json
+docker compose run --rm --no-deps replay python main.py run   --config runs/example-generator-rules.json
 ```
 
 `run` performs the same init before it simulates anything, so a grant problem
@@ -245,13 +323,26 @@ that are not in `docker-compose.yml` but may be doing something.
 `check --config` validates a run file offline (no DB). `run --dry-run` prints
 the report without writing.
 
-### There is no UI
+### There is no UI *on this service* — and no way to start a run from one
 
-Deliberately. The harness has no API endpoints and no frontend page: it is a
-batch job behind a `research` profile, and giving the trading API a route that
-triggers it would make a 400k-bar scan startable from a browser. Results are
-read with SQL, as `beacon_replay` — which can read every trading table plus the
-`replay.*` results, and write none of them:
+Deliberately, and unchanged. **This service has no API endpoints.** It is a batch
+job behind a `research` profile, and giving the trading API a route that triggers
+it would make a 400k-bar scan startable from a browser, competing with `monitor`
+for CPU on the box that manages open positions.
+
+What #183 added is a **read path on the API that already exists**: three GETs
+(`/replay/runs`, `/replay/runs/{id}`, `/replay/runs/{id}/results`) over the
+`replay.*` TABLES, plus the portal's *Backtest (Replay)* page. Reading a table is
+not importing a module — the router holds a local read-model and never imports
+`harness.*`, which `tests/test_isolation.py` and
+`services/api/tests/test_replay_routes.py` assert from both sides. There is no
+POST, no client call, and no button anywhere that starts, queues or schedules a
+run. It needs a one-off `GRANT SELECT … IN SCHEMA replay` to the API role (see
+the bottom of `sql/replay_role.sql`); until that is run the routes report
+`available: false` and print the SQL.
+
+Results are equally readable with SQL, as `beacon_replay` — which can read every
+trading table plus the `replay.*` results, and write none of them:
 
 ```sql
 -- did a variant beat the baseline, and on how many trades?

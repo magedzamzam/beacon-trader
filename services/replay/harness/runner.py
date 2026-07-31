@@ -107,7 +107,8 @@ def _pool_job(variant_dict: dict) -> tuple:
 
 
 def sweep(spec: RunSpec, series: B.BarSeries, signals: Sequence[SignalRow],
-          *, sources_by_id: Optional[dict] = None) -> dict:
+          *, sources_by_id: Optional[dict] = None,
+          generator_stats: Optional[dict] = None) -> dict:
     """Run every variant and build the reports.
 
     `n_variants_searched` is threaded into every report: the best of N backtests
@@ -117,7 +118,8 @@ def sweep(spec: RunSpec, series: B.BarSeries, signals: Sequence[SignalRow],
     variants = list(spec.variants or [])
     n = len(variants)
     if not n:
-        return {"run": _run_header(spec, series), "variants": {}, "results": {}}
+        return {"run": _run_header(spec, series, generator_stats),
+                "variants": {}, "results": {}}
 
     signals = list(signals)
     pairs: List[tuple] = []
@@ -145,13 +147,14 @@ def sweep(spec: RunSpec, series: B.BarSeries, signals: Sequence[SignalRow],
         reports[v.name] = metrics.variant_report(
             res, variant=v, series=series, holdout_from=spec.holdout_from,
             n_variants_searched=n, sources_by_id=sources_by_id)
-    return {"run": _run_header(spec, series),
+    return {"run": _run_header(spec, series, generator_stats),
             "variants": {k: reports[k] for k in sorted(reports)},
             "results": results}
 
 
-def _run_header(spec: RunSpec, series: B.BarSeries) -> dict:
-    return {
+def _run_header(spec: RunSpec, series: B.BarSeries,
+                generator_stats: Optional[dict] = None) -> dict:
+    head = {
         "label": spec.label, "symbol": spec.symbol, "timeframe": spec.timeframe,
         "from": _iso(spec.frm), "to": _iso(spec.to),
         "holdout_from": _iso(spec.holdout_from),
@@ -164,6 +167,14 @@ def _run_header(spec: RunSpec, series: B.BarSeries) -> dict:
                       "config remains the only thing that promotes a config "
                       "(CLAUDE.md §2; weekly manual Output 4)."),
     }
+    if generator_stats:
+        # A generated run's signal set is an OUTPUT of the config, not an input
+        # read from the ledger. What the generator suppressed and dropped
+        # therefore belongs on the run header beside the coverage — a reader who
+        # sees only the emitted count cannot tell a selective strategy from one
+        # the cooldown throttled (#184).
+        head["generator"] = dict(generator_stats)
+    return head
 
 
 def compare_variants(reports: Dict[str, dict], metric: str = "expectancy_R") -> List[dict]:

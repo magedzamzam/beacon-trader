@@ -203,36 +203,48 @@ def _as_num(v):
         return None
 
 
-def _match_adx_regime(when, ctx) -> bool:
+def _eval_adx_regime(when, ctx):
     """`adx_regime` condition (#127): match on the per-TF ADX trend state.
 
     Keys: timeframe (which TF's ADX), trending (bool — match when the TF's ADX
     `trending` equals this), min_adx / max_adx (numeric ADX bounds). Every
-    supplied sub-condition must hold. FAIL-OPEN: if the referenced ADX value is
-    absent (no `adx` in ctx, TF missing, or the specific field is None), the rule
-    does NOT match — so it's a no-op until the ADX is plumbed into ctx (the
-    measure-before-gate posture: the evaluator ships inert). A rule with no
-    sub-condition also stays a no-op rather than matching everything."""
+    supplied sub-condition must hold.
+
+    Tri-state (#184): `None` means UNKNOWN — the referenced ADX value is absent
+    (no `adx` in ctx, TF missing, the field is None) or the rule states no
+    condition at all. Both used to be `False`, and for filtration they still
+    read as False; the distinction exists so `not` cannot turn "we could not
+    look" into "it did not hold" (see `evaluate_condition`)."""
     block = _adx_block(ctx, when.get("timeframe"))
     if block is None:
-        return False
+        return None
     want_trending = when.get("trending")
     min_adx, max_adx = _as_num(when.get("min_adx")), _as_num(when.get("max_adx"))
     if want_trending is None and min_adx is None and max_adx is None:
-        return False                                  # no condition -> no-op, not match-all
+        return None                                   # no condition -> no-op, not match-all
     if want_trending is not None:
         tr = block.get("trending")
-        if tr is None or bool(tr) != bool(want_trending):
+        if tr is None:
+            return None                               # missing input, not a mismatch
+        if bool(tr) != bool(want_trending):
             return False
     adx_val = _as_num(block.get("adx"))
-    if min_adx is not None and (adx_val is None or adx_val < min_adx):
-        return False
-    if max_adx is not None and (adx_val is None or adx_val > max_adx):
-        return False
+    if min_adx is not None or max_adx is not None:
+        if adx_val is None:
+            return None
+        if min_adx is not None and adx_val < min_adx:
+            return False
+        if max_adx is not None and adx_val > max_adx:
+            return False
     return True
 
 
-def _match_mc_probability(when, ctx) -> bool:
+def _match_adx_regime(when, ctx) -> bool:
+    """Boolean face of `_eval_adx_regime` — UNKNOWN reads as "does not match"."""
+    return _eval_adx_regime(when, ctx) is True
+
+
+def _eval_mc_probability(when, ctx):
     """`mc_probability` condition: match on the Monte Carlo GEOMETRY NULL for this
     signal (analysis/montecarlo.py) — what the entry/SL/TP layout is worth before
     any channel skill is assumed.
@@ -246,12 +258,12 @@ def _match_mc_probability(when, ctx) -> bool:
     break even. A HIGH `p_win_geometry` is the opposite of a green light — it
     means the stop is far and the target near.
 
-    FAIL-OPEN: absent ctx['montecarlo'] (or an absent field) does NOT match, so
-    the rule is inert until the executor plumbs the block in. A rule with no
+    FAIL-OPEN: absent ctx['montecarlo'] (or an absent field) is UNKNOWN, so the
+    rule is inert until the executor plumbs the block in. A rule with no
     sub-condition stays a no-op rather than matching everything."""
     mc = ctx.get("montecarlo")
     if not isinstance(mc, dict) or not mc:
-        return False
+        return None
     bounds = (("min_p_win", "p_win_geometry", True), ("max_p_win", "p_win_geometry", False),
               ("min_expected_r", "expected_r", True), ("max_expected_r", "expected_r", False),
               ("min_rr", "rr_to_tp1", True), ("max_rr", "rr_to_tp1", False))
@@ -260,11 +272,11 @@ def _match_mc_probability(when, ctx) -> bool:
     supplied = [(b, _as_num(when.get(b[0]))) for b in bounds]
     supplied = [(b, bound) for b, bound in supplied if bound is not None]
     if not supplied:
-        return False                                  # no condition -> no-op
+        return None                                   # no condition -> no-op
     for (_key, field, is_min), bound in supplied:
         val = _as_num(mc.get(field))
         if val is None:
-            return False                              # fail-open on a missing input
+            return None                               # missing input, not a mismatch
         if is_min and val < bound:
             return False
         if not is_min and val > bound:
@@ -272,7 +284,11 @@ def _match_mc_probability(when, ctx) -> bool:
     return True
 
 
-def _match_turtle_signal(when, ctx) -> bool:
+def _match_mc_probability(when, ctx) -> bool:
+    return _eval_mc_probability(when, ctx) is True
+
+
+def _eval_turtle_signal(when, ctx):
     """`turtle_signal` condition: match on the Donchian breakout state at signal
     time (analysis/turtle.py) — a mechanical second opinion on the channel's call.
 
@@ -280,24 +296,32 @@ def _match_turtle_signal(when, ctx) -> bool:
     position (`long` / `short` / `flat`), variant (`signal` (reference,
     stop-and-reverse) or `signal_flat` (exits to flat); default `signal`).
 
-    FAIL-OPEN: absent ctx['turtle'] or an absent field does NOT match, so the rule
-    is inert until the executor plumbs the block in."""
+    FAIL-OPEN: absent ctx['turtle'] or an absent field is UNKNOWN, so the rule is
+    inert until the executor plumbs the block in."""
     tu = ctx.get("turtle")
     if not isinstance(tu, dict) or not tu:
-        return False
+        return None
     want_agrees, want_pos = when.get("agrees"), when.get("position")
     if want_agrees is None and not want_pos:
-        return False                                  # no condition -> no-op
+        return None                                   # no condition -> no-op
     if want_agrees is not None:
         got = tu.get("agrees")
-        if got is None or bool(got) != bool(want_agrees):
+        if got is None:
+            return None
+        if bool(got) != bool(want_agrees):
             return False
     if want_pos:
         key = "position_flat" if when.get("variant") == "signal_flat" else "position"
         got = tu.get(key)
-        if not got or got == "unknown" or got != want_pos:
+        if not got or got == "unknown":
+            return None                               # "we don't know" is not "no"
+        if got != want_pos:
             return False
     return True
+
+
+def _match_turtle_signal(when, ctx) -> bool:
+    return _eval_turtle_signal(when, ctx) is True
 
 
 # The shadow-analytics blocks a rule set needs in `ctx` before it can ever fire.
@@ -307,14 +331,16 @@ _SHADOW_RULE_INPUTS = {"mc_probability": "montecarlo", "turtle_signal": "turtle"
 
 
 def shadow_rule_inputs(rules) -> set:
-    """Which shadow blocks (`montecarlo` / `turtle`) this rule set references."""
+    """Which shadow blocks (`montecarlo` / `turtle`) this rule set references.
+    Walks composed conditions to their leaves (#184)."""
     need = set()
     for r in rules or []:
         if not isinstance(r, dict):
             continue
-        key = _SHADOW_RULE_INPUTS.get((r.get("when") or {}).get("type"))
-        if key:
-            need.add(key)
+        for leaf in condition_leaves(r.get("when") or {}):
+            key = _SHADOW_RULE_INPUTS.get(leaf.get("type"))
+            if key:
+                need.add(key)
     return need
 
 
@@ -332,6 +358,10 @@ _NUM_OPS = {
 }
 FILTER_OPS = frozenset({*_NUM_OPS, "eq", "ne", "between", "outside",
                         "is_true", "is_false"})
+
+# Boolean composition over the leaf conditions (#184). Checked in this order, so
+# a dict carrying both a composite key and a `type` reads as the composite.
+COMPOSITE_KEYS = ("all", "any", "not")
 
 
 def _as_bool(v):
@@ -398,6 +428,20 @@ def _ta_field(ctx, when, key=None):
     return block.get(when.get("field") or "value")
 
 
+def indicator_value(ctx, ref):
+    """One indicator field out of `ctx['ta']`, or None (#184).
+
+    Public because a `generator:rules` config resolves entry / SL / TP LEVELS
+    from the same ctx its conditions read — `{"type": "level", "id":
+    "order_block", "timeframe": "15m", "field": "bottom"}` is the far edge of the
+    block the condition just matched on. Same lookup, same fail-open: a level
+    that cannot be read is None, and the caller drops the signal rather than
+    inventing a price."""
+    if not isinstance(ref, dict):
+        return None
+    return _ta_field(ctx, ref, _rule_instance_key(ref))
+
+
 def _right_operand(when, ctx):
     """The value the left side is compared against: `ref` (another indicator field,
     or the live price) when present, else the literal `value`. `ref` is what makes
@@ -423,43 +467,48 @@ def _rule_instance_key(when):
     return inst["key"] if inst else None
 
 
-def _match_indicator(when, ctx) -> bool:
+def _eval_indicator(when, ctx):
     """`indicator` condition (#167): compare one field of one registry indicator on
     one timeframe against a literal or another field.
 
-    FAIL-OPEN throughout, exactly as `_match_adx_regime`: an unknown op, an
+    FAIL-OPEN throughout, exactly as `_eval_adx_regime`: an unknown op, an
     indicator that isn't in ctx['ta'], a missing field, an unparseable bound — all
-    of them mean "does not match". A filtration rule must never be able to delete a
-    signal by being wrong about its own inputs."""
+    of them are UNKNOWN, which reads as "does not match". A filtration rule must
+    never be able to delete a signal by being wrong about its own inputs, and a
+    generator must never EMIT one on the absence of evidence (#184)."""
     op = str(when.get("op") or "").strip().lower()
     if op not in FILTER_OPS:
-        return False
+        return None
     left = _ta_field(ctx, when, _rule_instance_key(when))
     if left is None:
-        return False
+        return None
     if op in ("is_true", "is_false"):
         lb = _as_bool(left)
-        return lb is not None and lb is (op == "is_true")
+        return None if lb is None else (lb is (op == "is_true"))
     if op in ("between", "outside"):
         pair = when.get("value")
         if not isinstance(pair, (list, tuple)) or len(pair) != 2:
-            return False
+            return None
         lo, hi, val = _as_num(pair[0]), _as_num(pair[1]), _as_num(left)
         if lo is None or hi is None or val is None:
-            return False
+            return None
         if lo > hi:
             lo, hi = hi, lo
         inside = lo <= val <= hi
         return inside if op == "between" else not inside
     right = _right_operand(when, ctx)
     if right is None:
-        return False
+        return None
     if op in ("eq", "ne"):
         return _loose_eq(left, right) is (op == "eq")
     lv, rv = _as_num(left), _as_num(right)
     if lv is None or rv is None:
-        return False
+        return None
     return _NUM_OPS[op](lv, rv)
+
+
+def _match_indicator(when, ctx) -> bool:
+    return _eval_indicator(when, ctx) is True
 
 
 def _requirements_of(when, default_timeframe) -> list:
@@ -479,6 +528,25 @@ def _requirements_of(when, default_timeframe) -> list:
     return out
 
 
+def condition_requirements(cond, default_timeframe: str = DEFAULT_RULE_TIMEFRAME) -> list:
+    """Every indicator instance ONE condition tree needs computed, deduped.
+
+    The generator's entry point (#184): a `generator:rules` config asks its own
+    condition what to compute and the harness resamples exactly that, once per
+    timeframe for the whole run. Same walk as `ta_rule_requirements`, minus the
+    rule-list wrapper."""
+    seen, out = set(), []
+    for leaf in condition_leaves(cond):
+        if leaf.get("type") != "indicator":
+            continue
+        for req in _requirements_of(leaf, default_timeframe):
+            token = (req["timeframe"], req["key"])
+            if token not in seen:
+                seen.add(token)
+                out.append(req)
+    return out
+
+
 def ta_rule_requirements(rules, default_timeframe: str = DEFAULT_RULE_TIMEFRAME) -> list:
     """Every indicator instance an `indicator` rule set needs, deduped, as
     [{id, params, key, outputs, timeframe}].
@@ -489,15 +557,16 @@ def ta_rule_requirements(rules, default_timeframe: str = DEFAULT_RULE_TIMEFRAME)
     install still fetches nothing extra on the entry path.
 
     SHADOW rules are included: a rule that isn't allowed to act still has to be
-    computed, or there is nothing to measure and no way to ever promote it."""
+    computed, or there is nothing to measure and no way to ever promote it.
+
+    Composed conditions are walked to their leaves (#184) — an `indicator` buried
+    in an `all`/`any`/`not` needs computing exactly as a flat one does, and one
+    that wasn't would be a rule that silently never fires."""
     seen, out = set(), []
     for r in rules or []:
         if not isinstance(r, dict) or not r.get("enabled", True):
             continue
-        when = r.get("when") or {}
-        if when.get("type") != "indicator":
-            continue
-        for req in _requirements_of(when, default_timeframe):
+        for req in condition_requirements(r.get("when") or {}, default_timeframe):
             token = (req["timeframe"], req["key"])
             if token not in seen:
                 seen.add(token)
@@ -521,14 +590,18 @@ _SHADOW_DEFAULT_TYPES = frozenset({"indicator"})
 
 def rule_mode(rule) -> str:
     """`live` or `shadow` for one rule. See `_SHADOW_DEFAULT_TYPES` for why the
-    default depends on the condition type."""
+    default depends on the condition type.
+
+    A COMPOSED condition (#184) is shadow-by-default if ANY leaf is: wrapping an
+    `indicator` in an `all` must not be a way to promote it to live by accident,
+    and the composite dict has no `type` of its own to read."""
     if not isinstance(rule, dict):
         return "live"
     m = str((rule.get("mode") or "")).strip().lower()
     if m in FILTER_MODES:
         return m
-    wtype = (rule.get("when") or {}).get("type")
-    return "shadow" if wtype in _SHADOW_DEFAULT_TYPES else "live"
+    types = {leaf.get("type") for leaf in condition_leaves(rule.get("when") or {})}
+    return "shadow" if types & _SHADOW_DEFAULT_TYPES else "live"
 
 
 def filter_mode_counts(rules) -> dict:
@@ -555,36 +628,126 @@ def adx_rule_timeframes(rules, default: str = "4h") -> set:
     """The timeframes an `adx_regime` rule set needs live ADX computed for (#132).
     A rule without an explicit `timeframe` falls back to `default`. Empty when no
     adx_regime rule is present — so the executor computes (and fetches) nothing
-    unless a rule actually references ADX (keeps the hot path free by default)."""
+    unless a rule actually references ADX (keeps the hot path free by default).
+    Walks composed conditions to their leaves (#184)."""
     tfs = set()
     for r in rules or []:
-        if isinstance(r, dict) and (r.get("when") or {}).get("type") == "adx_regime":
-            tfs.add((r.get("when") or {}).get("timeframe") or default)
+        if not isinstance(r, dict):
+            continue
+        for leaf in condition_leaves(r.get("when") or {}):
+            if leaf.get("type") == "adx_regime":
+                tfs.add(leaf.get("timeframe") or default)
     return tfs
 
 
-def _matches(when, ctx) -> bool:
-    """Does one rule's condition hold against the trade context? Every branch is
-    fail-open: an unrecognised type, or an input that isn't in ctx, is False."""
+def _eval_leaf(when, ctx):
+    """One LEAF condition against the context, tri-state.
+
+    `True` it held · `False` it did not · `None` we could not tell (the input is
+    not in ctx, the rule states no condition, or a bound is unparseable). Every
+    branch is fail-open: an unrecognised type is UNKNOWN, never True."""
+    if not isinstance(when, dict):
+        return None
     wtype = when.get("type")
     if wtype == "always":
         return True
     if wtype == "session_in":
-        want = when.get("sessions") or []
         have = ctx.get("sessions")
         if have is None and ctx.get("session") is not None:
             have = [ctx["session"]]
-        return bool(have) and any(s in want for s in have)
+        if not have:
+            return None                               # no session info -> unknown
+        want = when.get("sessions") or []
+        if not want:
+            return None                               # no condition -> no-op
+        return any(s in want for s in have)
     if wtype == "adx_regime":
-        return _match_adx_regime(when, ctx)
+        return _eval_adx_regime(when, ctx)
     if wtype == "mc_probability":
-        return _match_mc_probability(when, ctx)
+        return _eval_mc_probability(when, ctx)
     if wtype == "turtle_signal":
-        return _match_turtle_signal(when, ctx)
+        return _eval_turtle_signal(when, ctx)
     if wtype == "indicator":
-        return _match_indicator(when, ctx)
+        return _eval_indicator(when, ctx)
     # (structure/bayesian conditions plug in here — no-op until wired)
-    return False
+    return None
+
+
+def evaluate_condition(cond, ctx):
+    """A whole condition TREE against the context, tri-state (#184).
+
+    ONE GRAMMAR, TWO USES. `entry_filters` asks "should I filter this signal?";
+    a generator asks the same expression, bar by bar, "should I EMIT one?".
+    Adding a leaf type therefore benefits filtration and generation at once —
+    which is the entire reason this is shared rather than reimplemented, and the
+    reason #167's mistake (one hand-written evaluator per idea) is not repeated
+    on the generation side.
+
+        {"all": [c, ...]}  every sub must hold
+        {"any": [c, ...]}  at least one must hold
+        {"not": c}         the inverse
+        {"type": ...}      a leaf (see `_eval_leaf`)
+
+    THREE-VALUED, and that is the point of the whole design. Kleene logic:
+    `not UNKNOWN` is UNKNOWN, `all` is UNKNOWN unless something is definitely
+    False, `any` is UNKNOWN unless something is definitely True. Two-valued
+    logic with `False` standing in for "missing" would make `{"not": X}` fire
+    whenever X's inputs were absent — a generator trading on the absence of
+    evidence, which is exactly the failure fail-open exists to prevent. An empty
+    `all`/`any` is UNKNOWN too, not vacuous truth: an unfinished rule must not
+    match everything.
+
+    Callers that want a decision use `matches_condition` — UNKNOWN reads as "did
+    not match", so filtration behaviour is byte-identical to before this split."""
+    if not isinstance(cond, dict):
+        return None
+    for key in COMPOSITE_KEYS:
+        if key not in cond:
+            continue
+        if key == "not":
+            inner = evaluate_condition(cond[key], ctx)
+            return None if inner is None else (not inner)
+        subs = cond[key]
+        if not isinstance(subs, (list, tuple)) or not subs:
+            return None                               # empty -> no-op, not match-all
+        vals = [evaluate_condition(c, ctx) for c in subs]
+        if key == "all":
+            if any(v is False for v in vals):
+                return False
+            return None if any(v is None for v in vals) else True
+        if any(v is True for v in vals):
+            return True
+        return None if any(v is None for v in vals) else False
+    return _eval_leaf(cond, ctx)
+
+
+def matches_condition(cond, ctx) -> bool:
+    """Boolean face of `evaluate_condition`: UNKNOWN means "does not match"."""
+    return evaluate_condition(cond, ctx) is True
+
+
+def condition_leaves(cond):
+    """Every LEAF in a (possibly composed) condition tree, in authored order.
+
+    What `ta_rule_requirements`, `adx_rule_timeframes` and `shadow_rule_inputs`
+    walk, so a nested rule declares its inputs exactly as a flat one does — a
+    composite whose indicators were never computed would be silently inert."""
+    if not isinstance(cond, dict):
+        return
+    for key in COMPOSITE_KEYS:
+        if key not in cond:
+            continue
+        subs = [cond[key]] if key == "not" else cond[key]
+        if isinstance(subs, (list, tuple)):
+            for s in subs:
+                yield from condition_leaves(s)
+        return
+    yield cond
+
+
+def _matches(when, ctx) -> bool:
+    """Does one rule's condition hold against the trade context? Fail-open."""
+    return matches_condition(when, ctx)
 
 
 def _scale_factor(rule) -> float:
@@ -613,6 +776,13 @@ def evaluate_filter_rules(rules, ctx) -> FilterDecision:
                      variant}                 at signal time. Inert until wired.
       indicator {id, timeframe, field,     ctx['ta'][tf][key] — ANY registry
                  op, value|ref, params}      indicator (#167). SHADOW by default.
+
+    A `when` may also COMPOSE those leaves (#184): {"all": [...]}, {"any": [...]},
+    {"not": {...}} nest to any depth and are evaluated by `evaluate_condition` —
+    the same expression a `generator:rules` backtest uses to decide whether to
+    EMIT a signal. Composition is three-valued so `not` over a missing input
+    stays inert; a composed rule containing an `indicator` leaf is shadow by
+    default, exactly as the flat form is.
 
     A `shadow` rule is evaluated and RECORDED but never applied: it contributes
     nothing to factor/skip/reasons, and lands in `shadow` as {name, type, mode,

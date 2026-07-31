@@ -43,6 +43,43 @@ RUN CONFIG (JSON)
 only what differs between arms — which is the whole point of config-as-data.
 `instrument` is filled from `symbol_maps` when absent, so a run cannot silently
 size against a made-up value_per_point.
+
+GENERATED SIGNALS (#184)
+------------------------
+Set `signal_source` to `generator:rules` and the signals are COMPUTED from the
+bars instead of read from `signals` — the answer to "what if the entry came from
+an indicator instead of a Telegram channel?". Everything downstream is unchanged:
+the generator emits the same `ParsedSignal`, so planner, sizing, staging,
+`sl_rules`, risk caps, breaker, sessions and metrics are byte-identical.
+
+    "signal_source": "generator:rules",
+    "generator_config": {
+      "timeframe": "15m",
+      "long":  {"when": {"all": [
+        {"type": "indicator", "id": "macd", "timeframe": "15m",
+         "field": "cross", "op": "eq", "value": "bull"},
+        {"type": "indicator", "id": "rsi", "timeframe": "15m",
+         "field": "value", "op": "lt", "value": 70}]}},
+      "entry": {"type": "close"},
+      "sl":    {"type": "atr_mult", "timeframe": "1h", "period": 14, "mult": 1.5},
+      "tps":   [{"type": "r_mult", "r": 1}, {"type": "r_mult", "r": 2}],
+      "cooldown_bars": 60,
+      "max_signals_per_day": 8
+    }
+
+A new strategy is JSON, not a deploy — the condition grammar is the SAME one
+`entry_filters` uses (`execution/strategy.py`), so any registry indicator is
+expressible without touching this code. `check --config` resolves it offline and
+prints the indicator instances it will compute.
+
+Generated signals carry NEGATIVE `signal_id`s in `replay_results`, so a join
+against the trading `signals` table cannot silently match the wrong rows.
+
+**THIS IS A SCREENING STEP, NOT A ROUTE TO LIVE.** A validated generator still
+needs the Lever-5 chain — a `kind='engine'` source (which does not exist today),
+a producer, and shadow forward-R — before it can trade. And it is not actionable
+at all until #169's validation gate has passed: fitting a strategy to a simulator
+nobody has verified compounds two unknowns.
 """
 from __future__ import annotations
 
@@ -55,11 +92,18 @@ from pathlib import Path
 
 from sqlalchemy import text
 
+from beacon_core.execution import strategy as ST
+
 from harness import bars as B
 from harness import runner as R
 from harness import scaffold, store, validate
+from harness import signal_sources as SS
 from harness.models import REPLAY_SCHEMA
+from harness.portfolio import SignalRow
 from harness.variants import build_variant
+# Imported for its side effect: importing the module is what REGISTERS
+# `generator:rules` (#184). Nothing else here references it by name.
+from harness import generators as _generators            # noqa: F401
 
 # `main.py` is the ONLY module that touches the database, and it imports nothing
 # that can place an order. `tests/test_isolation.py` asserts both, statically and
@@ -100,6 +144,45 @@ def _spec(cfg: dict, variants: list) -> R.RunSpec:
         source_ids=cfg.get("source_ids"), account_ids=cfg.get("account_ids"))
 
 
+# Generated signals carry NEGATIVE ids. `replay_results.signal_id` is a plain
+# integer with no FK, so a positive one would be indistinguishable from a real
+# `signals.id` when someone joins a generated run against the trading tables —
+# and that join would silently succeed on the wrong rows.
+def _generated_rows(generated, *, account_ids, frm=None, to=None) -> list:
+    """`GeneratedSignal`s -> `SignalRow`s, windowed to the run's date range.
+
+    The window is applied HERE rather than inside the generator: bars are loaded
+    wider than the run window on purpose (an indicator needs history), so the
+    generator legitimately scans outside it and only the EMISSIONS are clipped."""
+    rows = []
+    for i, g in enumerate(generated):
+        if frm is not None and g.at < frm:
+            continue
+        if to is not None and g.at >= to:
+            continue
+        rows.append(SignalRow(id=-(i + 1), at=g.at, parsed=g.parsed,
+                              source_id=None, source_name="generator",
+                              account_ids=tuple(account_ids)))
+    return rows
+
+
+def _generator_account_ids(cfg: dict, spec: R.RunSpec) -> tuple:
+    """Which accounts a generated signal routes to.
+
+    A generated signal has no `source`, so there is no `account_map` to read.
+    Explicit `account_ids` wins; otherwise every account the variants declare —
+    which is what "run this strategy on the book as configured" means."""
+    if spec.account_ids:
+        return tuple(spec.account_ids)
+    ids = []
+    for v in (spec.variants or []):
+        for a in (v.get("accounts") or []):
+            aid = a.get("id")
+            if aid is not None and aid not in ids:
+                ids.append(aid)
+    return tuple(ids)
+
+
 async def _load(session, cfg: dict):
     symbol = str(cfg.get("symbol") or "XAUUSD")
     timeframe = str(cfg.get("timeframe") or "1m")
@@ -112,11 +195,24 @@ async def _load(session, cfg: dict):
     # after it to resolve. A run that clipped both ends would silently label
     # every late trade horizon-capped.
     series = await store.load_series(session, symbol=symbol, timeframe=timeframe)
-    signals = await store.load_signals(session, symbol=symbol, frm=frm, to=to,
-                                       source_ids=spec.source_ids,
-                                       account_ids=spec.account_ids)
+    gen_stats: dict = {}
+    if SS.is_generator(spec.signal_source):
+        # Phase 2 (#184): the signals are COMPUTED from the bars, not read from
+        # `signals`. Everything downstream is byte-identical — the rows are the
+        # same `SignalRow`/`ParsedSignal` the historical source produces.
+        generated = SS.run_generator(spec.signal_source, series.bars,
+                                     {"symbol": symbol, **(spec.generator_config or {})})
+        gen_stats = SS.output_stats(generated)
+        signals = _generated_rows(generated,
+                                  account_ids=_generator_account_ids(cfg, spec),
+                                  frm=frm, to=to)
+        gen_stats["n_in_window"] = len(signals)
+    else:
+        signals = await store.load_signals(session, symbol=symbol, frm=frm, to=to,
+                                           source_ids=spec.source_ids,
+                                           account_ids=spec.account_ids)
     sources = await store.load_sources(session)
-    return spec, series, signals, sources, symbol, timeframe, frm, to
+    return spec, series, signals, sources, symbol, timeframe, frm, to, gen_stats
 
 
 async def cmd_init(args) -> int:
@@ -174,12 +270,14 @@ async def cmd_run(args) -> int:
     if not args.dry_run:
         await store.init_replay_tables()
     async with store.Session()() as session:
-        spec, series, signals, sources, symbol, tf, frm, to = await _load(session, cfg)
+        (spec, series, signals, sources, symbol, tf, frm, to,
+         gen_stats) = await _load(session, cfg)
         if not len(series):
             print(json.dumps({"ok": False,
                               "error": f"no usable candles for {symbol} {tf}"}, indent=2))
             return 2
-        out = R.sweep(spec, series, signals, sources_by_id=sources)
+        out = R.sweep(spec, series, signals, sources_by_id=sources,
+                      generator_stats=gen_stats)
         reports = out["variants"]
         summary = {"run": out["run"], "variants": reports,
                    "ranking": R.compare_variants(reports)}
@@ -214,7 +312,8 @@ async def cmd_validate(args) -> int:
     is decoration."""
     cfg = json.loads(Path(args.config).read_text(encoding="utf-8"))
     async with store.Session()() as session:
-        spec, series, signals, sources, symbol, tf, frm, to = await _load(session, cfg)
+        (spec, series, signals, sources, symbol, tf, frm, to,
+         _gen) = await _load(session, cfg)
         if not len(series):
             print(json.dumps({"ok": False, "error": "no usable candles"}, indent=2))
             return 2
@@ -275,15 +374,44 @@ async def cmd_coverage(args) -> int:
 
 def cmd_check(args) -> int:
     """Parse + resolve a run config without touching the database. Catches a
-    malformed variant before a sweep burns an afternoon on it."""
+    malformed variant before a sweep burns an afternoon on it.
+
+    A `generator:` run is checked here too (#184): the condition is walked for
+    the indicator instances it needs, so an unknown id or a timeframe the
+    registry does not carry surfaces as a named requirement gap rather than as a
+    strategy that mysteriously never triggers."""
     cfg = json.loads(Path(args.config).read_text(encoding="utf-8"))
     variants = _merged_variants(cfg, None)
     spec = _spec(cfg, variants)
-    print(json.dumps({
+    out = {
         "ok": True, "n_variants": len(variants), "config_digest": spec.digest(),
+        "signal_source": spec.signal_source,
         "variants": [{"name": build_variant(v).name,
                       "digest": build_variant(v).digest()} for v in variants],
-    }, indent=2))
+    }
+    if SS.is_generator(spec.signal_source):
+        try:
+            gspec = _generators.RulesSpec(spec.generator_config or {})
+        except _generators.ConfigError as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}, indent=2))
+            return 2
+        reqs = []
+        for c in (gspec.long, gspec.short):
+            reqs.extend(ST.condition_requirements(c, gspec.timeframe))
+        out["generator"] = {
+            "name": SS.generator_name(spec.signal_source),
+            "timeframe": gspec.timeframe,
+            "cooldown_bars": gspec.cooldown_bars,
+            "max_signals_per_day": gspec.max_per_day,
+            "indicator_instances": sorted(
+                {f"{r['timeframe']}:{r['key']}" for r in reqs}),
+            "accounts": list(_generator_account_ids(cfg, spec)),
+            "note": ("An indicator the condition names but the registry does not "
+                     "carry is absent from `indicator_instances` — that condition "
+                     "is UNKNOWN on every bar and the generator will emit nothing "
+                     "(fail-open), which is silent unless you look here."),
+        }
+    print(json.dumps(out, indent=2))
     return 0
 
 

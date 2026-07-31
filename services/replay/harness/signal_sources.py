@@ -10,10 +10,19 @@ and adding a generator requires no change to the execution or metrics code. The
 test suite proves that by plugging a fake generator in and asserting it reaches
 the same simulator.
 
-NO GENERATOR SHIPS WITH PHASE 1, deliberately. The seam is the deliverable; the
-generators are the part §8 calls a curve-fitting machine, and building one
-before the harness has passed its own validation gate would be fitting a model
-to a simulator nobody has checked yet.
+ONE GENERATOR SHIPS, AND ONLY ONE: `generator:rules` (#184), which is
+config-as-data over the SAME condition grammar `entry_filters` uses. Registering
+one Python function per idea — `generator:macd`, `generator:fvg` — is the shape
+this deliberately does not have: it would repeat #167's mistake on the
+generation side, where every new idea meant a hand-written evaluator and a
+hand-plumbed ctx key. A new strategy is JSON, not a deploy. Importing
+`harness.generators` is what registers it (`main.py` does).
+
+Phase 1 shipped the seam with NO generator on purpose, because §8 calls a
+generator a curve-fitting machine and fitting one to a simulator nobody has
+checked compounds two unknowns. That ordering constraint has not gone away: the
+code exists, and a result from it is not actionable until #169's validation gate
+has passed.
 
 PATH TO LIVE, unchanged: a validated generator does NOT go live from a backtest.
 It needs a `kind='engine'` source (which does not exist today — `sources.kind` is
@@ -45,6 +54,28 @@ class GeneratedSignal(NamedTuple):
     look-ahead by one bar and would flatter every result."""
     at: dt.datetime
     parsed: ParsedSignal
+
+
+class GeneratorOutput(list):
+    """Signals, optionally carrying the generator's own suppression counts.
+
+    A list subclass rather than a tuple so the seam's contract is unchanged — a
+    generator may still return a plain list, and every caller that just iterates
+    keeps working. `stats` is where the honest half of a generated run lives
+    (#184): how many bars the condition fired on, how many emissions the
+    cooldown and the per-day cap suppressed, how many geometries could not be
+    priced. A run that emitted 40 signals having suppressed 900 is a different
+    strategy from one that triggered 40 times, and a reader who cannot see the
+    difference is reading the risk caps rather than the indicator."""
+
+    def __init__(self, items=(), stats=None):
+        super().__init__(items)
+        self.stats = dict(stats or {})
+
+
+def output_stats(out) -> dict:
+    """The `.stats` of a generator's return, or `{}` for a plain list."""
+    return dict(getattr(out, "stats", None) or {})
 
 
 # `(bars, config) -> [GeneratedSignal]`. Pure by contract: no DB, no clock, no
@@ -85,12 +116,19 @@ def run_generator(spec: str, bars: Sequence[B.Bar], config: dict) -> List[Genera
 
     A generator that emits an unusable geometry is a bug in the generator, not a
     signal the harness should quietly plan around — but it must not kill the run
-    either, so bad rows are dropped and the caller sees the count."""
+    either, so bad rows are dropped and the caller sees the count.
+
+    Returns a `GeneratorOutput` — still a list, so every existing caller is
+    unaffected — carrying whatever `.stats` the generator reported."""
+    raw = resolve_generator(spec)(bars, config or {})
     out = []
-    for item in (resolve_generator(spec)(bars, config or {}) or []):
+    for item in (raw or []):
         at, parsed = item
         if at is None or parsed is None:
             continue
         out.append(GeneratedSignal(at, parsed))
     out.sort(key=lambda g: g.at)
-    return out
+    stats = output_stats(raw)
+    if len(out) != len(raw or []):
+        stats["n_rows_dropped_unusable"] = len(raw or []) - len(out)
+    return GeneratorOutput(out, stats)

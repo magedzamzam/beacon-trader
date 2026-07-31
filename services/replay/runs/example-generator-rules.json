@@ -1,0 +1,155 @@
+{
+  "label": "generator: MACD cross + RSI ceiling, ATR stop, 3R ladder",
+  "symbol": "XAUUSD",
+  "timeframe": "1m",
+  "from": "2026-01-01T00:00:00Z",
+  "holdout_from": "2026-06-01T00:00:00Z",
+  "signal_source": "generator:rules",
+  "workers": 0,
+
+  "_read_this_first": [
+    "THIS IS A SCREENING STEP, NOT A ROUTE TO LIVE. A validated generator does",
+    "NOT go live from a backtest: it needs the Lever-5 chain — a kind='engine'",
+    "source (which does not exist today; sources.kind is telegram|tradingview|",
+    "manual|api), a producer, and shadow forward-R — and only then a weekend",
+    "config act on ONE arm.",
+    "",
+    "AND IT IS NOT ACTIONABLE AT ALL until #169's validation gate has passed.",
+    "Fitting a strategy to a simulator nobody has verified compounds two",
+    "unknowns. Run `validate --config runs/live-config.json` first.",
+    "",
+    "`holdout_from` is set on purpose. Without it the headline is IN-SAMPLE and",
+    "is a description of the past, not an edge. And `n_variants_searched` counts",
+    "the WHOLE grid you tried, not the arms left in this file — a 4x5x3 sweep is",
+    "60, and best-of-60 carries ~2.9 sigma of pure luck.",
+    "",
+    "One useful asymmetry: Telegram signals only exist from 2026-07-05 (~4",
+    "weeks), while candles run from 2026-01-01. Generated signals are the only",
+    "route to a materially longer sample today — which is also the first time",
+    "the walk-forward split has had room to mean anything."
+  ],
+
+  "generator_config": {
+    "timeframe": "15m",
+
+    "_grammar": [
+      "The SAME condition grammar `entry_filters` uses (execution/strategy.py),",
+      "so any of the 45 registry indicators is expressible here with no code",
+      "change and no redeploy. all / any / not compose over the leaf types;",
+      "an `indicator` leaf is {id, timeframe, field, op, value|ref, params}.",
+      "Fail-open is three-valued: a leaf whose input is missing is UNKNOWN, and",
+      "UNKNOWN never fires — including through `not`."
+    ],
+
+    "long": {
+      "when": {
+        "all": [
+          {"type": "indicator", "id": "macd", "timeframe": "15m",
+           "field": "cross", "op": "eq", "value": "bull"},
+          {"type": "indicator", "id": "rsi", "timeframe": "15m",
+           "field": "value", "op": "lt", "value": 70},
+          {"any": [
+            {"type": "indicator", "id": "fvg", "timeframe": "15m",
+             "field": "present", "op": "is_true"},
+            {"type": "indicator", "id": "order_block", "timeframe": "15m",
+             "field": "present", "op": "is_true"}
+          ]}
+        ]
+      }
+    },
+    "short": {
+      "when": {
+        "all": [
+          {"type": "indicator", "id": "macd", "timeframe": "15m",
+           "field": "cross", "op": "eq", "value": "bear"},
+          {"type": "indicator", "id": "rsi", "timeframe": "15m",
+           "field": "value", "op": "gt", "value": 30}
+        ]
+      }
+    },
+
+    "_geometry": [
+      "What makes it a SIGNAL rather than a condition, and what R is measured",
+      "against (#169 §7). entry: close | level | offset_atr. sl: atr_mult |",
+      "points | level. tps[]: r_mult | atr_mult | points | level. Anything that",
+      "cannot be priced from the bar drops the signal and is COUNTED — never",
+      "completed with a guessed level."
+    ],
+    "entry": {"type": "close"},
+    "sl": {"type": "atr_mult", "timeframe": "1h", "period": 14, "mult": 1.5},
+    "tps": [
+      {"type": "r_mult", "r": 1.0},
+      {"type": "r_mult", "r": 2.0},
+      {"type": "r_mult", "r": 3.0}
+    ],
+
+    "_caps": [
+      "NOT OPTIONAL. A condition true for 50 consecutive bars emits 50 signals,",
+      "each opening a position, and max_open_risk_per_symbol then decides the",
+      "strategy — you would be measuring the risk caps, not the indicator. Both",
+      "counts are reported on the run header."
+    ],
+    "cooldown_bars": 60,
+    "max_signals_per_day": 8
+  },
+
+  "defaults": {
+    "accounts": [
+      {"id": 1, "name": "A", "equity": 10000, "currency": "AEDd", "fx_factor": 1}
+    ],
+    "risk": {
+      "default": {"basis": "capital_percent", "value": 1.0, "allocation": "even"}
+    },
+    "risk_limits": {
+      "enabled": true,
+      "trading_halted": false,
+      "daily_loss_limit": 500,
+      "per_signal_max_pct_of_daily": 0.5,
+      "max_open_risk_per_account": 10000,
+      "max_open_risk_per_symbol": 10000,
+      "max_signal_risk_pct": 2.0,
+      "daily_soft_loss_limit": 0,
+      "breaker_cooldown_minutes": 0
+    },
+    "costs": {"slippage_points": 0.0},
+    "horizon_bars": 1440,
+    "ratchet_price": "extreme"
+  },
+
+  "variants": [
+    {
+      "name": "be_at_tp1",
+      "strategies": [
+        {
+          "account_id": null, "source_id": null, "label": "BE@TP1",
+          "entry_policy": {"entry_style": "limit", "ttl_minutes": 60},
+          "exit_policy": {
+            "cancel_pending_on_stop": true,
+            "sl_rules": [
+              {"trigger": {"type": "tp_hit", "index": 1},
+               "action": {"type": "move_sl_to", "target": "entry"}},
+              {"trigger": {"type": "tp_hit", "index": 2},
+               "action": {"type": "move_sl_to", "target": "previous_tp"}}
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "runner",
+      "strategies": [
+        {
+          "account_id": null, "source_id": null, "label": "no ratchet",
+          "entry_policy": {"entry_style": "limit", "ttl_minutes": 60},
+          "exit_policy": {
+            "cancel_pending_on_stop": true,
+            "sl_rules": [
+              {"trigger": {"type": "tp_hit", "index": 99},
+               "action": {"type": "move_sl_to", "target": "entry"}}
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

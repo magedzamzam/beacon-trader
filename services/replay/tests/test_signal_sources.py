@@ -29,9 +29,16 @@ def _fake_generator(bars, config):
 
 @pytest.fixture(autouse=True)
 def _clean_registry():
+    """An isolated registry for the fakes below, RESTORED afterwards.
+
+    It used to clear and leave it cleared, which silently unregistered
+    `generator:rules` (#184) for every test module that ran after this one — a
+    fixture with a side effect on someone else's suite."""
+    saved = dict(SS._GENERATORS)
     SS._GENERATORS.clear()
     yield
     SS._GENERATORS.clear()
+    SS._GENERATORS.update(saved)
 
 
 def test_the_historical_source_is_the_default_and_is_not_a_generator():
@@ -40,8 +47,10 @@ def test_the_historical_source_is_the_default_and_is_not_a_generator():
     assert SS.generator_name("generator:fvg") == "fvg"
 
 
-def test_no_generator_ships_by_default():
-    """Phase 1 delivers the seam, not the curve-fitting machine."""
+def test_the_registry_is_empty_until_something_registers():
+    """The seam itself ships with nothing in it — `generator:rules` (#184) exists
+    only because `harness.generators` was imported, which is the whole extension
+    mechanism. Registration is not implicit in the seam."""
     assert SS.available_generators() == []
 
 
