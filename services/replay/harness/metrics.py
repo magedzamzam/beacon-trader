@@ -36,6 +36,7 @@ import datetime as dt
 import math
 from collections import Counter, defaultdict
 from decimal import Decimal
+from statistics import median
 from typing import Iterable, List, Optional, Sequence
 
 from beacon_core.analysis.report import geometry_ab_rollup
@@ -175,6 +176,55 @@ def regime_composition(series: B.BarSeries, *, frm=None, to=None,
                      "of robustness outside this mix.")}
 
 
+def near_miss(trades: Sequence) -> dict:
+    """How close the entries that NEVER filled came to their level (#185).
+
+    47% of the validation gate's disagreements are legs the simulator expired
+    while live filled, and the two candidate causes — a candle feed whose spread
+    prints wider than Capital.com's was, versus a TTL/window bug — are
+    indistinguishable from the counts alone. The distribution separates them: a
+    median miss of a fraction of a point is the SPREAD; a large one is not.
+
+    Reported on every run, not only inside `validate`, because a sweep inherits
+    whatever the under-fill is doing and the operator needs the number beside the
+    result rather than in a diagnostic they have to remember to run."""
+    misses, n_orders, n_expired_fillable = [], 0, 0
+    for t in trades:
+        n_expired_fillable += int(getattr(t, "expired_on_fillable_bar", 0) or 0)
+        for leg in t.legs:
+            gap = getattr(leg, "closest_approach", None)
+            if gap is None:
+                continue
+            n_orders += 1
+            if leg.fill_price is None and gap > 0:
+                misses.append(gap)
+    misses.sort()
+    n = len(misses)
+
+    def _pct(p):
+        return round(misses[min(n - 1, int(p * n))], 5) if n else None
+
+    return {
+        "n_resting_orders": n_orders,
+        "n_never_reached": n,
+        "median_miss_points": round(median(misses), 5) if n else None,
+        "p90_miss_points": _pct(0.9),
+        "max_miss_points": round(misses[-1], 5) if n else None,
+        # A miss inside a typical spread is the FEED, not the strategy.
+        "n_missed_by_under_0_5_points": sum(1 for m in misses if m < 0.5),
+        "n_missed_by_under_2_points": sum(1 for m in misses if m < 2.0),
+        "n_expired_on_a_fillable_bar": n_expired_fillable,
+        "note": ("Distance the fillable side came SHORT of a resting entry, in "
+                 "points, for orders that never filled. Misses clustering below "
+                 "the spread point at the CANDLE FEED — a synthetic or "
+                 "non-Capital.com spread never reaches a level the real ask did. "
+                 "Large misses point at the TTL or the replay window instead. "
+                 "`n_expired_on_a_fillable_bar` isolates the third candidate: TTL "
+                 "expiry runs before fills within a bar, so those orders were "
+                 "retired on a bar they WOULD have filled in."),
+    }
+
+
 def _caveats(res: VariantResult, trades: Sequence) -> dict:
     n_filled = sum(1 for t in trades if t.ever_filled)
     return {
@@ -192,6 +242,10 @@ def _caveats(res: VariantResult, trades: Sequence) -> dict:
         "not_taken_breakdown": dict(Counter(
             r["reason"] for r in res.not_taken)),
         "suspect_bars_excluded": res.coverage.get("suspect_excluded"),
+        # #185: a never-filled entry is not a zero-P&L trade, but 34 of the
+        # gate's 72 disagreements are entries LIVE filled and the simulator did
+        # not. How near they came says whether that is the feed or the TTL.
+        "under_fill": near_miss(trades),
         "note": ("Same-bar TP+SL is scored as the STOP; the count is how often "
                  "the 1m bar could not say. Horizon-capped trades were still open "
                  "when the replay window ended and are marked to market, not won. "
@@ -260,6 +314,11 @@ def variant_report(res: VariantResult, *, variant, series: B.BarSeries,
         "settings": {"horizon_bars": variant.horizon_bars,
                      "slippage_points": variant.slippage_points,
                      "ratchet_price": variant.ratchet_price,
+                     # #185: which exit model this arm ran under. Two variants
+                     # that differ on it are not comparable, so it rides on the
+                     # RESULT rather than only in the config that produced it.
+                     "ratchet_timing": getattr(variant, "ratchet_timing",
+                                               "next_bar"),
                      # Whether the session risk multiplier and `session_in`
                      # rules were live for this run. Stated on the RESULT, so a
                      # variant that did not model them cannot be compared to one

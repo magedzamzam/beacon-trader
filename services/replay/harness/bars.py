@@ -90,6 +90,29 @@ def stop_triggered(direction: str, level: float, bar: Bar) -> bool:
     return bar.high_ask >= level if direction == BUY else bar.low_bid <= level
 
 
+def entry_shortfall(direction: str, order_type: str, level: float,
+                    bar: Bar) -> Optional[float]:
+    """How far the fillable side of `bar` came SHORT of `level`, in points (#185).
+
+    Zero or negative means the order was fillable in this bar; positive is the
+    gap that stopped it. It is the same comparison `limit_touched` /
+    `stop_triggered` make, expressed as a DISTANCE rather than a verdict — same
+    sided semantics, one place, so a diagnostic cannot drift from the predicate
+    it is diagnosing.
+
+    Why it is worth measuring: 34 of the gate's 72 disagreements are legs the
+    simulator expired while live filled (#185, defect A). That is either a spread
+    the candle feed prints wider than Capital.com's was, or a TTL/window problem
+    — and the two have completely different fixes. A miss clustering at a
+    fraction of a point is the spread; a large one is not. Guessing which,
+    without the distribution, is how a modelling assumption becomes folklore."""
+    if order_type == "LIMIT":
+        return (bar.low_ask - level) if direction == BUY else (level - bar.high_bid)
+    if order_type == "STOP":
+        return (level - bar.high_ask) if direction == BUY else (bar.low_bid - level)
+    return None                          # MARKET always fills; there is no gap
+
+
 def tp_touched(direction: str, tp: float, bar: Bar) -> bool:
     """We exit a BUY by SELLING at the bid, so a BUY take-profit needs
     `high_bid >= tp`. The mirror for a SELL."""

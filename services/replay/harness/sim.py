@@ -23,15 +23,31 @@ is never a fork of core.
 WITHIN-BAR ORDER, fixed and conservative:
 
     1. staged DECIDE (deploy / expire tranches)
-    2. TTL expiry of still-resting orders
-    3. entry fills
-    4. exits — ADVERSE FIRST, same-bar TP+SL scored as the stop
-    5. MFE update + SL ratchet, effective from the NEXT bar
-    6. cancel_pending_on_stop
+    2. near-miss tracking on still-resting orders (#185 diagnostic, no effect)
+    3. TTL expiry of still-resting orders
+    4. entry fills
+    5. exits — ADVERSE FIRST, same-bar TP+SL scored as the stop
+    6. MFE update + SL ratchet, effective from the NEXT bar
+    7. cancel_pending_on_stop
 
-Step 5 lands after step 4 on purpose: a stop that a rule would have ratcheted
+Step 6 lands after step 5 on purpose: a stop that a rule would have ratcheted
 during this bar does not get to protect the position retroactively within it.
 Live, the monitor observes and then acts; the same is true here.
+
+THAT CHOICE HAS A MEASURED COST (#185, defect B). 21 of the validation gate's 72
+disagreements are `sim=tp_hit` where live went `breakeven`: live ratcheted
+mid-minute and the retrace inside that same minute took the position out, while
+the simulation still had the original stop and let the trade run on to target.
+So the harness is optimistic on exits, and it is the largest single contributor
+to the residual +0.060R mean delta.
+
+It is a modelling choice with a real cost, not a bug — so it is now SELECTABLE
+rather than assumed. `ratchet_timing: "same_bar"` adds a second exit pass after
+step 6: the stop moves on this bar's favourable extreme and is then re-tested
+against this bar's adverse extreme. The default stays `next_bar`, so nothing
+changes until someone runs the gate both ways and keeps the winner. Whichever is
+in force is recorded on the result, because two variants that differ on it are
+not comparable.
 
 PURE — stdlib + beacon_core. No DB, no clock, no broker.
 """
@@ -53,7 +69,7 @@ from beacon_core.strategy.rules import (PositionCtx, entry_basis, evaluate,
 from . import bars as B
 from . import fills as F
 from .context import MarketContext
-from .variants import ResolvedConfig, Variant
+from .variants import RATCHET_SAME_BAR, ResolvedConfig, Variant
 
 # Roles whose legs are NOT placed at signal time — the monitor deploys them when
 # the DECIDE engine says so.
@@ -103,6 +119,8 @@ class SimTrade:
     max_adverse_beyond_deep: float = 0.0
     closed_tp_hits: set = field(default_factory=set)
     same_bar_ambiguous: int = 0
+    # Legs the TTL retired on a bar they would have filled in (#185 diagnostic).
+    expired_on_fillable_bar: int = 0
     horizon_capped: bool = False
     strategy_label: Optional[str] = None
     notes: List[str] = field(default_factory=list)
@@ -266,10 +284,24 @@ def step(trade: SimTrade, bar: B.Bar, *, variant: Variant) -> None:
     slip = variant.slippage_points
     if trade.entry_style == STAGED:
         _staged_step(trade, bar)
+    _track_approach(trade, bar)
     _expire_working(trade, bar)
     _fill_working(trade, bar, slip)
     _resolve_exits(trade, bar, variant, slip)
     _ratchet(trade, bar, variant)
+    if variant.ratchet_timing == RATCHET_SAME_BAR:
+        # #185 defect B: re-test the freshly-moved stops against THIS bar's
+        # adverse extreme. Idempotent for a stop that did not move — the first
+        # pass already tested it — so the ONLY legs this can close are the ones
+        # a ratchet just protected, which is precisely the population live took
+        # a breakeven on and `next_bar` lets run to target.
+        #
+        # Deliberately a SECOND pass rather than ratcheting before exits: the
+        # leg whose own TP armed the rule must still take that TP, exactly as
+        # the broker's resting TP order does live. Ratcheting first would stop
+        # it out at break-even on the bar its target was reached, which is a
+        # different (and wrong) model, not a more conservative one.
+        _resolve_exits(trade, bar, variant, slip)
     _cancel_pending(trade, bar)
 
 
@@ -372,7 +404,17 @@ def _minutes(since: Optional[dt.datetime], now: dt.datetime) -> float:
     return max(0.0, (now - since).total_seconds() / 60.0)
 
 
-# --- 2. TTL ------------------------------------------------------------------
+# --- 2. near-miss tracking (#185, diagnostic only) ---------------------------
+def _track_approach(trade: SimTrade, bar: B.Bar) -> None:
+    """Record how close each resting order came to filling. Pure bookkeeping —
+    it changes no decision, and exists so "the simulator under-fills" can be
+    checked against a distribution instead of debated."""
+    for leg in trade.legs:
+        if leg.is_working:
+            F.track_approach(leg, trade.direction, bar)
+
+
+# --- 3. TTL ------------------------------------------------------------------
 def _expire_working(trade: SimTrade, bar: B.Bar) -> None:
     """Retire resting orders past their TTL, via the shipped precedence
     (`staging.entry_expiry_reason`) for a staged trade so the absolute
@@ -392,17 +434,24 @@ def _expire_working(trade: SimTrade, bar: B.Bar) -> None:
             ttl = int(trade.entry_ttl_minutes or 0)
             reason = "leg_ttl" if (ttl > 0 and leg_age > ttl) else None
         if reason:
+            # Counted BEFORE retiring it: expiry runs ahead of fills, so an
+            # order whose TTL lapsed on a bar it would have filled in is lost
+            # here. That is the cheapest of #185's candidate causes to
+            # eliminate, and a count settles it without changing behaviour.
+            if F.would_fill(leg, trade.direction, bar):
+                leg.expired_on_fillable_bar = True
+                trade.expired_on_fillable_bar += 1
             F.expire(leg, bar.ts, reason)
 
 
-# --- 3. fills ----------------------------------------------------------------
+# --- 4. fills ----------------------------------------------------------------
 def _fill_working(trade: SimTrade, bar: B.Bar, slip: float) -> None:
     for leg in trade.legs:
         if leg.is_working:
             F.try_fill(leg, trade.direction, bar, slippage_points=slip)
 
 
-# --- 4. exits ----------------------------------------------------------------
+# --- 5. exits ----------------------------------------------------------------
 def _resolve_exits(trade: SimTrade, bar: B.Bar, variant: Variant, slip: float) -> None:
     acct = variant.account(trade.account_id)
     fx = acct.fx_factor if acct else Decimal("1")
@@ -418,7 +467,7 @@ def _resolve_exits(trade: SimTrade, bar: B.Bar, variant: Variant, slip: float) -
                 trade.closed_tp_hits.add(leg.tp_index)
 
 
-# --- 5. MFE + ratchet ---------------------------------------------------------
+# --- 6. MFE + ratchet ---------------------------------------------------------
 def _ratchet(trade: SimTrade, bar: B.Bar, variant: Variant) -> None:
     """Update the max-favourable excursion and apply the SL rules.
 
@@ -460,7 +509,7 @@ def _ratchet(trade: SimTrade, bar: B.Bar, variant: Variant) -> None:
             leg.note(bar.ts, "sl_moved")
 
 
-# --- 6. cancel_pending_on_stop -----------------------------------------------
+# --- 7. cancel_pending_on_stop -----------------------------------------------
 def _cancel_pending(trade: SimTrade, bar: B.Bar) -> None:
     """Retire still-resting orders once the trade is over or has progressed —
     the shipped `cancel_reason` decides which, including the `stopped_out` case

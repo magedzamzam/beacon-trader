@@ -90,6 +90,22 @@ class SimLeg:
     same_bar_ambiguous: bool = False
     events: list = field(default_factory=list)   # (ts, kind) audit, deterministic
 
+    # --- under-fill diagnostic (#185) ----------------------------------------
+    # The CLOSEST the fillable side ever came to this order's level while it was
+    # working, in points; None for a MARKET order (there is no gap to close).
+    # Positive means it never reached.
+    #
+    # It exists because "the simulator expired it, live filled it" is 47% of the
+    # gate's disagreements and has two incompatible explanations — a candle feed
+    # whose spread prints wider than Capital.com's was, or a TTL/window bug. The
+    # DISTRIBUTION of these numbers tells them apart; nothing else does, and the
+    # gate passing does not.
+    closest_approach: Optional[float] = None
+    # True when the TTL retired this order on a bar it WOULD have filled in.
+    # `_expire_working` runs before `_fill_working`, which is the cheapest of the
+    # candidate causes to eliminate — so it is COUNTED rather than argued about.
+    expired_on_fillable_bar: bool = False
+
     # --- helpers --------------------------------------------------------------
     @property
     def is_working(self) -> bool:
@@ -124,6 +140,43 @@ class SimLeg:
 
     def note(self, ts, kind: str) -> None:
         self.events.append((ts, kind))
+
+
+def level_of(leg: SimLeg) -> float:
+    """The price this order is waiting for: a STOP's trigger, else its entry."""
+    if leg.order_type == "STOP" and leg.trigger is not None:
+        return leg.trigger
+    return leg.entry
+
+
+def track_approach(leg: SimLeg, direction: str, bar: B.Bar) -> None:
+    """Record how close this bar came to filling a resting order (#185).
+
+    Called on every bar a leg spends WORKING, including the one it fills on — the
+    minimum is what matters, and an order that filled has a shortfall of <= 0 by
+    definition, which is what makes the two populations comparable."""
+    if not leg.is_working:
+        return
+    gap = B.entry_shortfall(direction, leg.order_type, level_of(leg), bar)
+    if gap is None:
+        return
+    if leg.closest_approach is None or gap < leg.closest_approach:
+        leg.closest_approach = gap
+
+
+def would_fill(leg: SimLeg, direction: str, bar: B.Bar) -> bool:
+    """Would this resting order fill inside `bar`? The predicate `try_fill` uses,
+    without the side effect — so the TTL can ask "was this bar fillable?" before
+    retiring the order, and the answer is counted rather than assumed."""
+    if not leg.is_working:
+        return False
+    if leg.order_type == "MARKET":
+        return True
+    if leg.order_type == "LIMIT":
+        return B.limit_touched(direction, leg.entry, bar)
+    if leg.order_type == "STOP":
+        return B.stop_triggered(direction, level_of(leg), bar)
+    return False
 
 
 def try_fill(leg: SimLeg, direction: str, bar: B.Bar, *,

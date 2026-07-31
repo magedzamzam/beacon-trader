@@ -90,6 +90,11 @@ def compare(sim_legs: Sequence[dict], live_legs: Sequence[dict]) -> dict:
 
     fill_deltas: List[float] = []
     adverse_deltas: List[float] = []
+    # #185 defect A: legs the simulator never filled and live did. 34 of the 72
+    # disagreements sit here, and the CAUSE is not readable from the count.
+    under_fill_misses: List[float] = []
+    under_fill_by_live_outcome: dict = {}
+    n_under_fill = n_under_fill_ttl = 0
     outcome_n = outcome_ok = 0
     label_mismatch = 0
     confusion: dict = {}
@@ -111,6 +116,19 @@ def compare(sim_legs: Sequence[dict], live_legs: Sequence[dict]) -> dict:
                                    sf, lf)
             if d_adv is not None:
                 adverse_deltas.append(d_adv)
+        if sf is None and lf is not None:
+            # The simulator never filled an entry live DID fill. Record how far
+            # its side came short, and what live went on to do — a miss that
+            # cost a winner and a miss that dodged a loser are the same defect
+            # but they pull the bias term in opposite directions.
+            n_under_fill += 1
+            gap = _pos_or_none(s.get("closest_approach"))
+            if gap is not None:
+                under_fill_misses.append(gap)
+            if s.get("expired_on_fillable_bar"):
+                n_under_fill_ttl += 1
+            lo = str(lv.get("outcome"))
+            under_fill_by_live_outcome[lo] = under_fill_by_live_outcome.get(lo, 0) + 1
         agree = None
         if lf is not None:                       # only filled legs have an outcome
             agree = _same_outcome(s.get("outcome"), lv.get("outcome"))
@@ -160,7 +178,72 @@ def compare(sim_legs: Sequence[dict], live_legs: Sequence[dict]) -> dict:
             "delta_fill re-signed so POSITIVE = the simulation got the WORSE "
             "entry. A negative mean is the harness giving itself better fills "
             "than live got, which flatters every variant it ranks."),
+        "under_fill": _under_fill_block(under_fill_misses, n_under_fill,
+                                        n_under_fill_ttl,
+                                        under_fill_by_live_outcome),
         "rows": rows,
+    }
+
+
+# A miss this small is inside the spread — the level WAS reached at the broker
+# and the feed's wider quote is what stopped the simulated side getting there.
+SPREAD_SCALE_POINTS = 0.5
+
+
+def _under_fill_block(misses: List[float], n: int, n_ttl: int,
+                      by_live_outcome: dict) -> dict:
+    """Name the cause of `sim=expired, live=filled` instead of guessing it (#185).
+
+    Three candidates, and they have three different fixes:
+
+      * THE FEED — a candle source whose spread prints wider than Capital.com's
+        was. The simulated ask never reaches a level the real ask did, so the
+        order expires on TTL. Signature: misses clustered at a fraction of a
+        point, i.e. inside a spread.
+      * THE TTL / THE WINDOW — the resolved entry TTL differing from what live
+        used, or the replay window clipping the order's life. Signature: large
+        misses, or none at all where the sim simply ran out of bars.
+      * WITHIN-BAR ORDERING — `_expire_working` runs before `_fill_working`, so
+        an order whose TTL lapsed on a bar it would have filled in is lost.
+        Isolated exactly, as `n_expired_on_a_fillable_bar`; no inference needed.
+
+    The verdict here is a POINTER, not a conclusion. It says which hypothesis the
+    distribution favours so the next hour is spent on the right one — the
+    feed-provenance diff against Capital.com bars is still the thing that settles
+    the first candidate, and this cannot do it."""
+    misses = sorted(misses)
+    m = len(misses)
+    med = median(misses) if m else None
+    near = sum(1 for x in misses if x <= SPREAD_SCALE_POINTS)
+    if n == 0:
+        verdict = "none — the simulator filled every entry live filled"
+    elif n_ttl and n_ttl >= 0.5 * n:
+        verdict = ("within-bar ordering: most of these were retired by the TTL "
+                   "on a bar they would have filled in")
+    elif m and near >= 0.5 * m:
+        verdict = (f"feed-shaped: {near}/{m} missed by <= {SPREAD_SCALE_POINTS} "
+                   "points, which is inside a spread — diff the candle source "
+                   "against Capital.com bars on high/low before anything else")
+    elif m:
+        verdict = ("not spread-shaped: the misses are large, so look at the "
+                   "resolved entry TTL and the replay window first")
+    else:
+        verdict = ("no distance recorded — these entries were MARKET orders or "
+                   "were never placed, not levels the market failed to reach")
+    return {
+        "n_sim_never_filled_live_did": n,
+        "n_with_a_recorded_miss": m,
+        "median_miss_points": round(med, 5) if med is not None else None,
+        "max_miss_points": round(misses[-1], 5) if m else None,
+        f"n_missed_by_under_{SPREAD_SCALE_POINTS}_points": near,
+        "n_expired_on_a_fillable_bar": n_ttl,
+        "live_outcome_of_the_missed": dict(sorted(by_live_outcome.items())),
+        "verdict": verdict,
+        "note": ("An entry the simulator never took is a trade it never scored. "
+                 "These do not enter the R comparison at all, so they are "
+                 "INVISIBLE in mean delta R while still changing which signals "
+                 "each variant is ranked on — which is why they get their own "
+                 "block rather than a line in the confusion matrix."),
     }
 
 
@@ -316,6 +399,15 @@ def _adverse_delta(direction, sim_fill: float, live_fill: float) -> Optional[flo
 def _pos(v) -> Optional[float]:
     """A price that is present AND positive. `fill_price = 0` means unknown, and
     treating it as a number is exactly the bug #159 fixed."""
+    f = _num(v)
+    return f if (f is not None and f > 0) else None
+
+
+def _pos_or_none(v) -> Optional[float]:
+    """A recorded miss DISTANCE, kept only when it is a real gap. Zero or
+    negative means the level was reached and the order failed to fill for some
+    other reason — a different finding, and averaging it in would drag the
+    median toward "it was basically touching" (#185)."""
     f = _num(v)
     return f if (f is not None and f > 0) else None
 

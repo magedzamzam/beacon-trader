@@ -77,7 +77,13 @@ same bar.
   (the fills that cross the spread). LIMIT entries and TP exits are passive.
   Default `0.0` — an explicit operator input, not a number the harness invents.
 * **A never-filled entry is excluded from the rollup**, not scored as a
-  zero-P&L loss.
+  zero-P&L loss — and, since #185, the closest its side ever came to its level
+  is recorded, so "the simulator under-fills" is a distribution rather than a
+  suspicion (`caveats.under_fill`).
+* **A ratchet takes effect from the NEXT bar** by default, so a stop does not
+  protect the position retroactively. That is conservative about the stop and
+  *optimistic* about the outcome — it skips breakevens live took. `same_bar`
+  (#185) is the alternative; the gate decides which is kept.
 * **Still open when the window ends** → marked to market and labelled
   `horizon`, never a win. Counted.
 * **`quality != 'ok'` bars are excluded** and the count rides on every result.
@@ -175,6 +181,77 @@ What it cannot model, and therefore what it is structurally optimistic by:
 confirm-404 rejects (#150), orphaned armed STOPs (#161), `fill_price=0` unknown
 fills (#159). Those are broker faults with no candle signature. That is a reason
 to weight the bias term, not to explain a failure away.
+
+### A pass is not a clean bill of health (#185)
+
+The first real gate run **passed** — agreement 0.9216, median |ΔR| 0.063, mean ΔR
++0.060 — and **76% of its 72 disagreements sat in two cells**, pulling in
+opposite directions:
+
+| sim | live | n | what it is |
+|---|---|---|---|
+| `expired` | filled (any outcome) | 34 | **defect A** — the simulator under-fills entries |
+| `tp_hit` | `breakeven` | 21 | **defect B** — the ratchet takes effect a bar late |
+
+`disagreement_bias: "balanced"` is a balance of COUNTS between two unrelated
+mechanisms. They cancel by accident, not by construction: the ratio depends on
+the signal mix, so a sweep over one channel, session or regime will not enjoy the
+same offset — **and per-channel verdicts are exactly where that bites**.
+
+**Defect A is now diagnosed rather than guessed.** Three candidate causes, three
+different fixes, and the counts alone cannot separate them:
+
+- **the candle feed** — a spread printing wider than Capital.com's was, so the
+  simulated ask never reaches a level the real ask did;
+- **the TTL or the replay window**;
+- **within-bar ordering** — TTL expiry runs before fills, so an order whose TTL
+  lapsed on a bar it *would* have filled in is lost.
+
+Every resting order now records the closest its fillable side ever came to its
+level, and the third candidate is counted outright. `validate` reports an
+`under_fill` block (miss distribution, how many missed by ≤ 0.5 points, how many
+were retired on a fillable bar, what live went on to do with them) and a
+**verdict pointing at the most likely cause**. The same distribution rides on
+every run under `caveats.under_fill`, because a sweep inherits whatever the
+under-fill is doing. Note these legs are **invisible in mean ΔR** — an entry the
+simulator never took is a trade it never scored — while still changing which
+signals each variant is ranked on.
+
+> The `under_fill` verdict is a **pointer, not a conclusion**. If it reads
+> feed-shaped, the thing that settles it is still the outstanding
+> feed-provenance diff from #169: median and max |Δ| on **high/low** against
+> Capital.com bars over an overlapping day, since high/low decide fill/TP/SL.
+> That needs the broker, so it is an operator step this harness cannot do.
+
+**Defect B is now selectable rather than assumed.** `ratchet_timing` on a
+variant:
+
+- `next_bar` (**default, unchanged**) — the stop moves after this bar's exits
+  resolve, protecting the position only from the next bar. Conservative about
+  the stop, optimistic about the outcome: it skips breakevens live actually took.
+- `same_bar` — after the ratchet, the freshly-moved stops are re-tested against
+  **this** bar's adverse extreme, i.e. a monitor that ratcheted mid-minute and
+  was taken out by the retrace inside the same minute.
+
+It is a second exit pass, not a reordering: the leg whose own TP armed the rule
+still takes that TP, exactly as the broker's resting TP order does live.
+
+Neither is obviously right, so **the gate decides**:
+
+```bash
+docker compose run --rm --no-deps replay python main.py validate \
+  --config runs/live-config.json --ratchet-timing next_bar   # today's model
+docker compose run --rm --no-deps replay python main.py validate \
+  --config runs/live-config.json --ratchet-timing same_bar   # the alternative
+```
+
+Keep whichever brings **mean ΔR** closer to zero while agreement holds, and
+document the loser's residual. The flag overrides the variants themselves, not
+just `defaults` — a baseline that already stated a timing would otherwise win and
+you would be comparing a run against itself. The setting is recorded on every
+result (`settings.ratchet_timing`), printed on the gate output, and changes the
+variant digest: two runs under different exit models are not comparable and must
+not share a fingerprint.
 
 ## 7. Phase 2 — generated signals (#184)
 

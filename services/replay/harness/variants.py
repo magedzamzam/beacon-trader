@@ -132,6 +132,19 @@ class Variant:
     # #149/#160); "close" reproduces a once-per-bar poll. Stated, configurable,
     # and reported — not silently one or the other.
     ratchet_price: str = "extreme"
+    # WHEN a ratchet takes effect within the bar (#185, defect B).
+    #   "next_bar" (default) — the stop moves after this bar's exits are
+    #       resolved, so it protects the position only from the NEXT bar.
+    #       Conservative about the STOP, and optimistic about the OUTCOME: it
+    #       skips breakevens live actually took, which is 21 of the validation
+    #       gate's 72 disagreements and the largest single contributor to the
+    #       residual +0.060R.
+    #   "same_bar" — the stop moves on this bar's favourable extreme and is then
+    #       tested against this bar's adverse extreme: a monitor that ratcheted
+    #       mid-minute and was taken out by the retrace inside the same minute.
+    # Neither is obviously right, so it is a stated variant key to be settled by
+    # re-running the §5 gate both ways — not a constant someone chose once.
+    ratchet_timing: str = "next_bar"
     raw: Dict[str, Any] = field(default_factory=dict)
     _cache: dict = field(default_factory=dict, repr=False, compare=False)
 
@@ -255,8 +268,22 @@ def build_variant(d: dict) -> Variant:
         trading_hours=d.get("trading_hours") or None,
         horizon_bars=int(d.get("horizon_bars") or 1440),
         ratchet_price=str(d.get("ratchet_price") or "extreme"),
+        ratchet_timing=_ratchet_timing(d.get("ratchet_timing")),
         raw=d,
     )
+
+
+RATCHET_NEXT_BAR = "next_bar"
+RATCHET_SAME_BAR = "same_bar"
+RATCHET_TIMINGS = (RATCHET_NEXT_BAR, RATCHET_SAME_BAR)
+
+
+def _ratchet_timing(v) -> str:
+    """An unrecognised value falls back to today's behaviour rather than being
+    accepted silently. A typo that quietly selected the OTHER exit model would
+    make two runs incomparable with nothing on the result to say why."""
+    s = str(v or "").strip().lower()
+    return s if s in RATCHET_TIMINGS else RATCHET_NEXT_BAR
 
 
 def canonical_digest(obj) -> str:

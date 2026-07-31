@@ -389,7 +389,14 @@ def sim_legs_for_validation(res) -> tuple:
         for l in t.legs:
             legs.append({"signal_id": t.signal_id, "account_id": t.account_id,
                          "tp_index": l.tp_index, "direction": t.direction,
-                         "fill_price": l.fill_price, "outcome": l.outcome})
+                         "fill_price": l.fill_price, "outcome": l.outcome,
+                         # #185: how near this order came to filling, and
+                         # whether the TTL retired it on a fillable bar. Carried
+                         # into the gate so "sim expired, live filled" can be
+                         # explained rather than counted.
+                         "order_type": l.order_type, "entry": l.entry,
+                         "closest_approach": l.closest_approach,
+                         "expired_on_fillable_bar": l.expired_on_fillable_bar})
     return legs, trades
 
 

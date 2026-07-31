@@ -100,7 +100,7 @@ from harness import scaffold, store, validate
 from harness import signal_sources as SS
 from harness.models import REPLAY_SCHEMA
 from harness.portfolio import SignalRow
-from harness.variants import build_variant
+from harness.variants import RATCHET_TIMINGS, build_variant
 # Imported for its side effect: importing the module is what REGISTERS
 # `generator:rules` (#184). Nothing else here references it by name.
 from harness import generators as _generators            # noqa: F401
@@ -311,6 +311,19 @@ async def cmd_validate(args) -> int:
     failed gate is a blocking defect, and a validation step that always exits 0
     is decoration."""
     cfg = json.loads(Path(args.config).read_text(encoding="utf-8"))
+    # #185 defect B: the exit model is a modelling CHOICE with a measured cost,
+    # so it has to be settled by running this gate both ways. An override beats
+    # editing the baseline JSON between runs — the baseline is generated from the
+    # live tables precisely so nobody hand-edits it.
+    # Applied to the VARIANTS, not only to `defaults`: `defaults` is merged UNDER
+    # each variant, so a baseline that already stated a timing would silently win
+    # and the operator would compare a run against itself.
+    if getattr(args, "ratchet_timing", None):
+        cfg = {**cfg,
+               "defaults": {**(cfg.get("defaults") or {}),
+                            "ratchet_timing": args.ratchet_timing},
+               "variants": [{**v, "ratchet_timing": args.ratchet_timing}
+                            for v in (cfg.get("variants") or [])]}
     async with store.Session()() as session:
         (spec, series, signals, sources, symbol, tf, frm, to,
          _gen) = await _load(session, cfg)
@@ -326,7 +339,13 @@ async def cmd_validate(args) -> int:
             report[name] = rep = validate.report(
                 sim_legs, truth["legs"], sim_trades, truth["trades"])
             failed = failed or not rep["gate"]["passed"]
+        # The exit model is stated on the OUTPUT: two gate runs that differ on it
+        # produce different numbers, and a comparison whose arms are not labelled
+        # is not a comparison (#185).
+        timings = sorted({build_variant(v).ratchet_timing
+                          for v in (spec.variants or [])}) or ["next_bar"]
         print(json.dumps({"ok": not failed, "coverage": series.coverage(),
+                          "ratchet_timing": timings,
                           "validation": report}, indent=2, default=str))
     return 1 if failed else 0
 
@@ -449,6 +468,14 @@ def build_parser() -> argparse.ArgumentParser:
     v = sub.add_parser("validate", help="reconcile a replay of the LIVE config "
                                         "against broker truth (§5 gate)")
     v.add_argument("--config", required=True)
+    v.add_argument("--ratchet-timing", dest="ratchet_timing", default=None,
+                   choices=list(RATCHET_TIMINGS),
+                   help="override the exit model for this run (#185 defect B). "
+                        "next_bar (default) applies a ratchet from the FOLLOWING "
+                        "bar; same_bar re-tests the moved stop against this "
+                        "bar's adverse extreme. Run the gate BOTH ways and keep "
+                        "whichever brings mean delta R closer to zero while "
+                        "agreement holds — then document the loser's residual.")
 
     c = sub.add_parser("coverage", help="candle coverage over the live signal window")
     c.add_argument("--symbol", default="XAUUSD")
