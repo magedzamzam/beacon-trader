@@ -167,6 +167,20 @@ export const api = {
   reconciliationRefresh: (full = false) => post(`/reconciliation/refresh?full=${full}`, {}),
   reconciliationSetOverride: (claimId, { override_outcome = null, override_note = null } = {}) =>
     post(`/reconciliation/claims/${claimId}/override`, { override_outcome, override_note }),
+  // replay workbench (#183) — READ-ONLY by construction. There is deliberately
+  // no client call that starts a run: a 400k-bar sweep is a CLI act, not
+  // something a browser can queue behind the monitor's tick loop.
+  replayRuns: (limit = 50) => req(`/replay/runs?limit=${limit}`),
+  replayRun: (id) => req(`/replay/runs/${id}`),
+  replayResults: (id, { variant = "", sourceId = "", taken = null, reason = "",
+                        limit = 200, offset = 0 } = {}) => {
+    const p = new URLSearchParams({ limit, offset });
+    if (variant) p.set("variant", variant);
+    if (sourceId !== "" && sourceId != null) p.set("source_id", sourceId);
+    if (taken !== null) p.set("taken", taken);
+    if (reason) p.set("not_taken_reason", reason);
+    return req(`/replay/runs/${id}/results?${p.toString()}`);
+  },
   // brokers
   createBroker: (b) => post("/brokers", b),
   updateBroker: (id, b) => patch(`/brokers/${id}`, b),

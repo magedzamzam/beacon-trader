@@ -10,7 +10,7 @@ import {
   Activity, Radar, Radio, CandlestickChart, MessageSquare, GitBranch, ListChecks,
   Sigma, Brain, GitCompare, BarChart3, Building2, Rss, Coins, Plug, ShieldCheck,
   DollarSign, Clock, Sparkles, LineChart, Bell, Settings, Users, KeyRound,
-  FileCheck, Database, CreditCard,
+  FileCheck, Database, CreditCard, FlaskConical,
 } from "lucide-react";
 
 import Dashboard from "../pages/Dashboard";
@@ -24,6 +24,7 @@ import Analytics from "../pages/Analytics";
 import Analysis from "../pages/Analysis";
 import Reconciliation from "../pages/Reconciliation";
 import Performance from "../pages/Performance";
+import Replay from "../pages/Replay";
 import Brokers from "../pages/Brokers";
 import Sources from "../pages/Sources";
 import Symbols from "../pages/Symbols";
@@ -59,6 +60,10 @@ export const NAV = [
     { id: "analysis", label: "Bayesian Analysis", icon: Brain },
     { id: "reconciliation", label: "Reconciler", icon: GitCompare },
     { id: "performance", label: "Performance", icon: BarChart3 },
+    // Read-only view of the offline replay harness (#183). Nothing here starts
+    // a run — the sweep is a CLI batch job behind the compose `research`
+    // profile, and keeping it there is what stops it competing with `monitor`.
+    { id: "replay", label: "Backtest (Replay)", icon: FlaskConical },
   ]},
   { title: "Settings", items: [
     { label: "Connectivity", icon: Plug, children: [
@@ -94,7 +99,7 @@ export const PAGES = {
   dashboard: Dashboard, positions: Positions, signals: Signals, chart: Chart,
   messages: Messages, activity: Activity_, history: History,
   analytics: Analytics, analysis: Analysis, reconciliation: Reconciliation,
-  performance: Performance,
+  performance: Performance, replay: Replay,
   brokers: Brokers, sources: Sources, symbols: Symbols, integrations: PLACEHOLDERS.integrations,
   risk: Risk, currency: Currency, strategies: Strategies, hours: TradingHours,
   ai: AI, indicators: Indicators, notifications: Notifications,

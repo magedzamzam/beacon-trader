@@ -8,8 +8,9 @@ from beacon_core.logging import get_logger
 from beacon_core.tasks import spawn_bg
 from .routers import (accounts, ai, analysis, analytics, auth, brokers, dashboard,
                       events, health, legs, market, messages,
-                      notifications, performance, reconciliation, risk, signals,
-                      sources, strategies, symbols, ta, trades, trading_hours)
+                      notifications, performance, reconciliation, replay, risk,
+                      signals, sources, strategies, symbols, ta, trades,
+                      trading_hours)
 
 log = get_logger("api")
 
@@ -137,7 +138,7 @@ for r in (auth.router, health.router, dashboard.router, brokers.router,
           messages.router, events.router, ai.router, ta.router,
           analysis.router, trading_hours.router, notifications.router,
           reconciliation.router, risk.router,
-          analytics.router, strategies.router):
+          analytics.router, strategies.router, replay.router):
     app.include_router(r)
 
 

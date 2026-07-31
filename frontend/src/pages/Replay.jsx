@@ -1,0 +1,515 @@
+import { useEffect, useState } from "react";
+import { FlaskConical, ShieldAlert, TriangleAlert } from "lucide-react";
+import { Card, Table, Th, Td, Badge, Empty } from "../components/ui";
+import { ErrorNote, Button } from "../components/form";
+import HelpHint from "../components/HelpHint";
+import { api } from "../lib/api";
+
+/**
+ * Replay workbench (#183) — read the offline backtest harness's output.
+ *
+ * READ-ONLY BY CONSTRUCTION. There is no button here that starts a run, and
+ * there is no API route that could serve one: a 400k-bar portfolio replay is a
+ * CLI act (`services/replay`, compose `research` profile), and keeping it there
+ * is what stops a research job competing with `monitor` for CPU. The empty
+ * state names the command instead.
+ *
+ * THE GUARDRAILS ARE THE PAGE, not a footnote on it. #169 §8 exists because a
+ * variant sweep is a false-discovery machine, and a table that lets the eye read
+ * an ordering without its N is precisely the failure mode it was written to
+ * prevent. So everything below renders WITHOUT interaction, beside the numbers
+ * it qualifies:
+ *   · held-out vs in-sample, visually distinct — in-sample is not an edge
+ *   · variants searched + best-of-N inflation σ
+ *   · verdict-withheld rows are tinted and struck, not footnoted
+ *   · the caveat counts (never filled / blocked / horizon-capped / ambiguous /
+ *     suspect bars) — each is a quantity of "we do not actually know"
+ *   · the §5 validation gate verdict; a run whose gate has not PASSED is marked
+ *   · a persistent promotion banner
+ * A variant report missing any of them is rendered as a warning, not a ranking.
+ */
+const pct = (v) => (v == null ? "—" : (v * 100).toFixed(1) + "%");
+const r2 = (v) => (v == null ? "—" : Number(v).toFixed(3));
+const num = (v) => (v == null ? "—" : Number(v).toLocaleString());
+const dt = (s) => (s ? String(s).replace("T", " ").slice(0, 16) : "—");
+
+// The fields a ranked number is not readable without (§8.6).
+const REQUIRED = ["headline_basis", "n_variants_searched", "n_closed", "caveats"];
+const missingGuardrails = (rep) =>
+  REQUIRED.filter(k => rep?.[k] == null &&
+    !(k === "n_variants_searched" && rep?.guardrails?.n_variants_searched != null));
+
+export default function Replay() {
+  const [runs, setRuns] = useState(null);
+  const [err, setErr] = useState(null);
+  const [runId, setRunId] = useState(null);
+  const [run, setRun] = useState(null);
+  const [runErr, setRunErr] = useState(null);
+  const [variant, setVariant] = useState("");
+
+  useEffect(() => {
+    api.replayRuns(50)
+      .then(d => { setRuns(d); if (d.runs?.length) setRunId(d.runs[0].id); })
+      .catch(e => setErr(e.message));
+  }, []);
+
+  useEffect(() => {
+    if (!runId) return;
+    setRun(null); setRunErr(null); setVariant("");
+    api.replayRun(runId)
+      .then(d => { setRun(d); setVariant(Object.keys(d.variants || {})[0] || ""); })
+      .catch(e => setRunErr(e.message));
+  }, [runId]);
+
+  const rep = run?.variants?.[variant] || null;
+
+  return (
+    <div className="space-y-4">
+      <PromotionBanner />
+      {err && <ErrorNote>{err}</ErrorNote>}
+      {runs && runs.available === false && <NotGranted info={runs} />}
+      {runs && runs.available !== false && !runs.runs.length && <NoRuns cmd={runs.run_command} />}
+      {runs && !!runs.runs?.length && (
+        <RunPicker runs={runs.runs} runId={runId} onPick={setRunId} />
+      )}
+      {runErr && <ErrorNote>{runErr}</ErrorNote>}
+      {runId && !run && !runErr && <Card><Empty>Loading run…</Empty></Card>}
+      {run && (<>
+        <ValidationCard run={run.run} validation={run.validation} />
+        <RankingCard ranking={run.ranking} variants={run.variants}
+          selected={variant} onSelect={setVariant} />
+        {rep && <GuardrailStrip rep={rep} />}
+        {rep && <CaveatsCard caveats={rep.caveats} settings={rep.settings} />}
+        {rep && <BySourceCard bySource={rep.by_source} />}
+        <DeclinedCard runId={run.run.id} variant={variant} />
+      </>)}
+    </div>
+  );
+}
+
+// Persistent, non-dismissable. The one sentence that has to survive every
+// reading of this page (CLAUDE.md §2).
+function PromotionBanner() {
+  return (
+    <div className="card px-4 py-3 flex items-start gap-2 border-l-2 border-l-warn">
+      <ShieldAlert className="w-4 h-4 text-warn shrink-0 mt-0.5" />
+      <div className="text-[11px] text-muted">
+        <b className="text-warn">Replay results are hypothesis-generating, not promotion-grade.</b>{" "}
+        The live frozen-week A/B/C on a frozen config remains the only thing that promotes a
+        config. Nothing on this page changes what trades — the harness has no broker credentials
+        and a SELECT-only database role, and this screen cannot start a run.
+      </div>
+    </div>
+  );
+}
+
+function NotGranted({ info }) {
+  return (
+    <Card>
+      <div className="px-4 py-3 border-b border-edge text-sm font-medium flex items-center gap-2">
+        <FlaskConical className="w-4 h-4 text-beacon" /> Replay results not readable
+      </div>
+      <div className="px-4 py-3 text-[11px] text-muted space-y-2">
+        <div>{info.note}</div>
+        <pre className="num text-[11px] bg-panel2 rounded p-2 whitespace-pre-wrap">{info.grant_sql}</pre>
+        <div className="text-muted">Reported by the database: <span className="num">{info.reason}</span></div>
+      </div>
+    </Card>
+  );
+}
+
+function NoRuns({ cmd }) {
+  return (
+    <Card><Empty>
+      No replay runs stored yet. The harness is a CLI batch job — run one offline:
+      <div className="mt-2"><span className="num text-xs">{cmd}</span></div>
+    </Empty></Card>
+  );
+}
+
+// --- run picker ---------------------------------------------------------------
+// Each row carries the reasons NOT to open it: in-sample-only, all verdicts
+// withheld, gate not run or failed. A picker that shows only a label and a date
+// invites the operator to open the best-sounding run.
+function RunPicker({ runs, runId, onPick }) {
+  return (
+    <Card>
+      <div className="px-4 py-3 border-b border-edge text-sm font-medium flex items-center gap-2">
+        <FlaskConical className="w-4 h-4 text-beacon" /> Replay runs
+        <span className="text-muted font-normal text-xs">· offline sweeps of the signal history</span>
+      </div>
+      <Table minW={980}>
+        <thead><tr className="border-b border-edge">
+          <Th>Run</Th><Th>Window</Th>
+          <Th>Basis<HelpHint term="headline_basis" /></Th>
+          <Th right>Variants<HelpHint term="best_of_n_inflation" /></Th>
+          <Th>Verdicts</Th><Th>Gate</Th><Th>Code</Th>
+        </tr></thead>
+        <tbody>
+          {runs.map(r => (
+            <tr key={r.id} onClick={() => onPick(r.id)}
+              className={`border-b border-edge/60 row-hover cursor-pointer ${r.id === runId ? "bg-beacon/5" : ""}`}>
+              <Td>
+                <span className="num text-xs">#{r.id}</span> {r.label || "(unlabelled)"}
+                <span className="block text-[10px] text-muted">
+                  {r.symbol} {r.timeframe} · {r.signal_source} · {r.status}
+                </span>
+              </Td>
+              <Td><span className="num text-[11px] text-muted">{dt(r.from)} → {dt(r.to)}</span></Td>
+              <Td><BasisBadge basis={r.headline_basis} /></Td>
+              <Td right mono>
+                {num(r.n_variants_searched)}
+                {r.best_of_n_inflation_sigma != null &&
+                  <span className="block text-[10px] text-warn">+{r.best_of_n_inflation_sigma}σ luck</span>}
+              </Td>
+              <Td>
+                {r.n_ranked
+                  ? <Badge tone={r.all_verdicts_withheld ? "warn" : r.n_verdicts_withheld ? "muted" : "beacon"}>
+                      {r.n_verdicts_withheld}/{r.n_ranked} withheld</Badge>
+                  : <span className="text-muted text-xs">—</span>}
+              </Td>
+              <Td><GateBadge v={r.validation} /></Td>
+              <Td><span className="num text-[10px] text-muted">{(r.git_sha || "").slice(0, 7) || "—"}</span></Td>
+            </tr>
+          ))}
+        </tbody>
+      </Table>
+    </Card>
+  );
+}
+
+// held_out and in_sample must not look alike — one is a result, the other is a
+// description of the data the variant was chosen on.
+function BasisBadge({ basis }) {
+  if (basis === "held_out") return <Badge tone="beacon">held-out</Badge>;
+  if (basis === "in_sample") return <Badge tone="warn">in-sample only</Badge>;
+  return <Badge tone="muted">unknown basis</Badge>;
+}
+
+function GateBadge({ v }) {
+  if (!v || !v.ran) return <Badge tone="warn">not validated</Badge>;
+  return v.passed ? <Badge tone="beacon">gate passed</Badge> : <Badge tone="short">gate FAILED</Badge>;
+}
+
+// --- §5 validation gate -------------------------------------------------------
+function ValidationCard({ run, validation }) {
+  const gate = validation?.gate || null;
+  const ran = !!validation;
+  const passed = !!gate?.passed;
+  return (
+    <Card>
+      <div className="px-4 py-3 border-b border-edge text-sm font-medium flex items-center gap-2 flex-wrap">
+        Simulator validation<GateBadge v={run.validation} />
+        <span className="text-muted font-normal text-xs">
+          · run #{run.id} · {run.config_digest ? `config ${run.config_digest.slice(0, 8)}` : "no digest"}
+          {run.candle_digest ? ` · candles ${run.candle_digest.slice(0, 8)}` : ""}
+        </span>
+      </div>
+      <div className={`px-4 py-2 text-[11px] border-b border-edge ${ran && passed ? "text-muted" : "text-warn"}`}>
+        {!ran ? (<>
+          <b>This run's simulator was never reconciled against broker truth.</b> A counterfactual
+          from an unvalidated harness compounds two unknowns — every variant it ranks inherits
+          whatever the simulator gets wrong. Run <span className="num">python main.py validate
+          --config runs/live-config.json</span> before acting on anything below.
+        </>) : passed ? (<>
+          The harness replayed the LIVE config over the LIVE signals and matched broker truth
+          within the stated thresholds (leg-outcome agreement and |Δ R|). That makes the
+          counterfactuals below readable — it does not make them promotion-grade.
+        </>) : (<>
+          <b>The validation gate FAILED.</b> A harness consistently rosier than live is a blocking
+          defect, not a calibration offset. Do not act on a counterfactual from a failed gate.
+        </>)}
+      </div>
+      {ran && !!gate?.failures?.length && (
+        <div className="px-4 py-2 text-[11px] text-short border-b border-edge">
+          {gate.failures.map((f, i) => <div key={i}>· {f}</div>)}
+          {gate.systematic_bias && <div className="mt-1">Systematic bias: <b>{gate.systematic_bias}</b></div>}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// --- variant comparison -------------------------------------------------------
+// The same R-metric conventions as Performance/the live weekly: the harness
+// deliberately emits the same `geometry_ab_rollup` keys so an offline arm reads
+// like a live one, and the UI must not undo that.
+function RankingCard({ ranking, variants, selected, onSelect }) {
+  const rows = ranking || [];
+  if (!rows.length) return <Card><Empty>This run stored no variant ranking.</Empty></Card>;
+  return (
+    <Card>
+      <div className="px-4 py-3 border-b border-edge text-sm font-medium flex items-center gap-2 flex-wrap">
+        Variant comparison<HelpHint term="expectancy" />
+        <span className="text-muted font-normal text-xs">· click a row to open it</span>
+      </div>
+      <div className="px-4 py-2 text-[11px] text-muted border-b border-edge">
+        Ranked on expectancy in R. Rows below the N ≥ 30 floor are <b className="text-warn">tinted and
+        withheld</b> — a variant that wins on 11 trades has not won. Effective N is well below raw N:
+        every trade is the same instrument over overlapping windows.
+      </div>
+      <Table minW={880}>
+        <thead><tr className="border-b border-edge">
+          <Th>Variant</Th>
+          <Th>Basis<HelpHint term="headline_basis" /></Th>
+          <Th right>Expectancy R</Th>
+          <Th right>n closed<HelpHint term="min_n" /></Th>
+          <Th right>Searched<HelpHint term="best_of_n_inflation" /></Th>
+          <Th>Verdict</Th>
+        </tr></thead>
+        <tbody>
+          {rows.map(r => {
+            const held = r.verdict_withheld;
+            return (
+              <tr key={r.variant} onClick={() => onSelect(r.variant)}
+                className={`border-b border-edge/60 row-hover cursor-pointer
+                  ${r.variant === selected ? "bg-beacon/5" : ""} ${held ? "opacity-60" : ""}`}>
+                <Td><span className="num text-xs">{r.variant}</span></Td>
+                <Td><BasisBadge basis={r.basis} /></Td>
+                <Td right mono>
+                  <span className={held ? "line-through text-muted" : r.expectancy_R >= 0 ? "text-long" : "text-short"}>
+                    {r2(r.expectancy_R)}
+                  </span>
+                </Td>
+                <Td right mono>{num(r.n_closed)}</Td>
+                <Td right mono>
+                  {num(r.n_variants_searched)}
+                  {r.best_of_n_inflation_sigma != null &&
+                    <span className="block text-[10px] text-warn">+{r.best_of_n_inflation_sigma}σ</span>}
+                </Td>
+                <Td>{held
+                  ? <Badge tone="warn">withheld · n &lt; 30</Badge>
+                  : <Badge tone="muted">readable</Badge>}</Td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </Table>
+      {Object.keys(variants || {}).length > rows.length && (
+        <div className="px-4 py-2 text-[11px] text-warn border-t border-edge">
+          {Object.keys(variants).length - rows.length} variant(s) produced a report but no ranking row.
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// The selected variant's headline, with every guardrail beside it. Renders a
+// warning instead of a number when a required field is absent.
+function GuardrailStrip({ rep }) {
+  const missing = missingGuardrails(rep);
+  const g = rep.guardrails || {};
+  const arms = rep.headline?.by_arm || [];
+  if (missing.length) {
+    return (
+      <Card><div className="px-4 py-3 text-[11px] text-warn flex items-start gap-2">
+        <TriangleAlert className="w-4 h-4 shrink-0" />
+        <div>This variant's report is missing {missing.join(", ")}, so it is <b>not reportable</b>
+          {" "}(#169 §8.6) and is deliberately not rendered as a ranking.</div>
+      </div></Card>
+    );
+  }
+  return (
+    <Card>
+      <div className="px-4 py-3 border-b border-edge text-sm font-medium flex items-center gap-2 flex-wrap">
+        <span className="num">{rep.variant}</span>
+        <BasisBadge basis={rep.headline_basis} />
+        {rep.verdict_withheld && <Badge tone="warn">verdict withheld · n={rep.n_closed} &lt; {rep.min_trades_for_verdict}</Badge>}
+        <span className="text-muted font-normal text-xs num">
+          · searched {g.n_variants_searched}
+          {g.best_of_n_inflation_sigma != null && ` · best-of-N inflation ≈ ${g.best_of_n_inflation_sigma}σ`}
+        </span>
+      </div>
+      <div className="px-4 py-2 text-[11px] text-muted border-b border-edge">
+        {rep.headline_basis === "held_out"
+          ? "Headline is the HELD-OUT slice — signals after the walk-forward split date."
+          : "No walk-forward split: this headline is IN-SAMPLE and is not reportable as an edge."}
+        {g.regime?.trending_share != null &&
+          ` Window regime: ${pct(g.regime.trending_share)} trending / ${pct(g.regime.ranging_share)} ranging (${g.regime.timeframe} ADX) — a result is not evidence of robustness outside this mix.`}
+      </div>
+      {!arms.length ? <Empty>No filled trades in the headline slice.</Empty> : (
+        <Table minW={980}>
+          <thead><tr className="border-b border-edge">
+            <Th>Arm</Th><Th right>n</Th>
+            <Th right>Win %<HelpHint term="raw_wr" /></Th>
+            <Th right>Expectancy R<HelpHint term="expectancy" /></Th>
+            <Th right>Avg win R</Th><Th right>Avg loss R</Th>
+            <Th right>Payoff<HelpHint term="payoff" /></Th>
+            <Th right>BE legs</Th>
+            <Th right>→TP3</Th><Th right>Net</Th>
+          </tr></thead>
+          <tbody>
+            {arms.map(a => (
+              <tr key={String(a.account_id)} className={`border-b border-edge/60 ${rep.verdict_withheld ? "opacity-60" : ""}`}>
+                <Td>{a.account}{!!a.arms?.length && <span className="block text-[10px] text-muted">{a.arms.join(", ")}</span>}</Td>
+                <Td right mono>{a.n_trades}</Td>
+                <Td right mono>{pct(a.win_rate)}
+                  {a.win_rate_ci && <span className="block text-[10px] text-muted">CI {pct(a.win_rate_ci[0])}–{pct(a.win_rate_ci[1])}</span>}</Td>
+                <Td right mono><span className={a.expectancy_R >= 0 ? "text-long" : "text-short"}>{r2(a.expectancy_R)}</span></Td>
+                <Td right mono>{r2(a.avg_win_R)}</Td>
+                <Td right mono>{r2(a.avg_loss_R)}</Td>
+                <Td right mono>{r2(a.payoff_ratio)}</Td>
+                <Td right mono>{pct(a.breakeven_leg_rate)}</Td>
+                <Td right mono>{pct(a.pct_winners_reach_tp3)}</Td>
+                <Td right mono>{num(a.net_nominal)}</Td>
+              </tr>
+            ))}
+          </tbody>
+        </Table>
+      )}
+    </Card>
+  );
+}
+
+// Each count is a quantity of "we do not actually know". Inline, never a
+// footnote — a reader who cannot see them cannot judge the result.
+const CAVEAT_FIELDS = [
+  ["n_signals_evaluated", "signals evaluated", false],
+  ["n_taken", "taken", false],
+  ["n_filled", "filled", false],
+  ["n_never_filled", "never filled", true],
+  ["n_filtered_out", "filtered out", false],
+  ["n_blocked_by_risk_limits", "blocked · risk caps", true],
+  ["n_blocked_by_breaker", "blocked · breaker", true],
+  ["n_no_candle_coverage", "no candle coverage", true],
+  ["n_horizon_capped", "horizon-capped", true],
+  ["n_same_bar_ambiguous_legs", "same-bar ambiguous legs", true],
+  ["suspect_bars_excluded", "suspect bars excluded", true],
+];
+
+function CaveatsCard({ caveats, settings }) {
+  if (!caveats) return null;
+  return (
+    <Card>
+      <div className="px-4 py-3 border-b border-edge text-sm font-medium">
+        What the simulation could not see
+      </div>
+      <div className="px-4 py-3 grid grid-cols-2 md:grid-cols-4 gap-3">
+        {CAVEAT_FIELDS.map(([k, label, warn]) => {
+          const v = caveats[k];
+          const hot = warn && Number(v) > 0;
+          return (
+            <div key={k} className="rounded bg-panel2 px-3 py-2">
+              <div className="text-[10px] uppercase tracking-wider text-muted">{label}</div>
+              <div className={`num text-sm ${hot ? "text-warn" : ""}`}>{num(v)}</div>
+            </div>
+          );
+        })}
+      </div>
+      <div className="px-4 py-2 text-[11px] text-muted border-t border-edge">
+        {caveats.note}
+        {settings && <> Horizon {settings.horizon_bars} bars · slippage {settings.slippage_points} pts ·
+          sessions {settings.sessions_modelled ? "modelled" : <b className="text-warn">not modelled</b>}
+          {settings.n_session_desized ? ` · ${settings.n_session_desized} session de-sized` : ""}.</>}
+      </div>
+      {!!Object.keys(caveats.not_taken_breakdown || {}).length && (
+        <div className="px-4 py-2 text-[11px] text-muted border-t border-edge flex flex-wrap gap-2">
+          {Object.entries(caveats.not_taken_breakdown).map(([k, v]) => (
+            <Badge key={k} tone="muted">{k}: {v}</Badge>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// Per-source is not an optional extra: the correct exit almost certainly differs
+// by channel (median TP1 ranges 0.15R to 1.00R, #182), so a pooled-only answer
+// averages away the thing being measured.
+function BySourceCard({ bySource }) {
+  const rows = Object.values(bySource || {});
+  if (!rows.length) return null;
+  return (
+    <Card>
+      <div className="px-4 py-3 border-b border-edge text-sm font-medium">
+        Per-source breakdown<HelpHint term="tp1_distance_r" />
+      </div>
+      <Table minW={880}>
+        <thead><tr className="border-b border-edge">
+          <Th>Source</Th><Th right>n closed</Th><Th right>Win %</Th>
+          <Th right>Expectancy R</Th><Th right>Payoff</Th><Th right>Net</Th><Th>Verdict</Th>
+        </tr></thead>
+        <tbody>
+          {rows.map(s => {
+            const arm = (s.rollup?.by_arm || [])[0] || {};
+            return (
+              <tr key={String(s.source_id)}
+                className={`border-b border-edge/60 ${s.verdict_withheld ? "opacity-60" : ""}`}>
+                <Td>{s.source || `source #${s.source_id ?? "—"}`}</Td>
+                <Td right mono>{num(s.n_closed)}</Td>
+                <Td right mono>{pct(arm.win_rate)}</Td>
+                <Td right mono>
+                  <span className={s.verdict_withheld ? "line-through text-muted"
+                    : arm.expectancy_R >= 0 ? "text-long" : "text-short"}>{r2(arm.expectancy_R)}</span>
+                </Td>
+                <Td right mono>{r2(arm.payoff_ratio)}</Td>
+                <Td right mono>{num(arm.net_nominal)}</Td>
+                <Td>{s.verdict_withheld
+                  ? <Badge tone="warn">withheld · n &lt; {s.min_trades_for_verdict}</Badge>
+                  : <Badge tone="muted">readable</Badge>}</Td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </Table>
+    </Card>
+  );
+}
+
+// The declined signals. A variant is defined as much by what it refuses as by
+// what it takes, and this is the only view of what a filter rejected.
+function DeclinedCard({ runId, variant }) {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(null);
+  const [reason, setReason] = useState("");
+
+  useEffect(() => {
+    if (!runId) return;
+    setData(null); setErr(null);
+    api.replayResults(runId, { variant, taken: false, reason, limit: 200 })
+      .then(setData).catch(e => setErr(e.message));
+  }, [runId, variant, reason]);
+
+  const reasons = Object.entries(data?.by_reason || {});
+  return (
+    <Card>
+      <div className="px-4 py-3 border-b border-edge flex items-center justify-between gap-3 flex-wrap">
+        <div className="text-sm font-medium">Declined signals
+          <span className="text-muted font-normal text-xs"> · why this variant did not trade them</span></div>
+        <div className="flex items-center gap-1 flex-wrap">
+          <Button variant={reason === "" ? "primary" : "ghost"} onClick={() => setReason("")}>all</Button>
+          {reasons.map(([k, v]) => (
+            <Button key={k} variant={reason === k ? "primary" : "ghost"} onClick={() => setReason(k)}>
+              {k} ({v})
+            </Button>
+          ))}
+        </div>
+      </div>
+      {err ? <div className="p-4"><ErrorNote>{err}</ErrorNote></div>
+        : !data ? <Empty>Loading…</Empty>
+        : data.available === false ? <Empty>{data.note}</Empty>
+        : !data.rows.length ? <Empty>This variant declined no signals.</Empty> : (
+          <Table minW={720}>
+            <thead><tr className="border-b border-edge">
+              <Th>Signal</Th><Th>Source</Th><Th>Account</Th><Th>Reason</Th>
+            </tr></thead>
+            <tbody>
+              {data.rows.map(r => (
+                <tr key={r.id} className="border-b border-edge/60">
+                  <Td mono>#{r.signal_id}</Td>
+                  <Td mono>{r.source_id ?? "—"}</Td>
+                  <Td mono>{r.account_id ?? "—"}</Td>
+                  <Td><Badge tone="muted">{r.not_taken_reason || "—"}</Badge></Td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+        )}
+      {data?.total > (data?.rows?.length || 0) && (
+        <div className="px-4 py-2 text-[11px] text-muted border-t border-edge">
+          Showing {data.rows.length} of {num(data.total)} — narrow by reason to see the rest.
+        </div>
+      )}
+    </Card>
+  );
+}

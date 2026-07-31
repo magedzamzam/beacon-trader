@@ -22,6 +22,7 @@ own their data fetching (via `lib/api.js` + the `_useData.js` hook) and compose
 | `Analysis.jsx` | `analysis` | Bayesian win-rate table + P(win) scores. |
 | `Reconciliation.jsx` | `reconciliation` | Channel-claimed vs bot-actual, by reason. |
 | `Performance.jsx` | `performance` | P&L / win-rate / profit-factor with date range + per-source credible intervals. |
+| `Replay.jsx` | `replay` | Read-only backtest workbench (#183): run picker → variant comparison → per-source → declined signals. Every #169 §8 guardrail renders without interaction (held-out vs in-sample, variants searched + best-of-N σ, verdict-withheld rows tinted, caveat counts, the validation gate verdict, the promotion banner). Nothing here starts a run — the empty state names the CLI command instead. |
 
 ## Settings
 | Page | View | Purpose |

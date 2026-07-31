@@ -136,6 +136,24 @@ export const GLOSSARY = [
     guard: G_SHADOW,
   },
 
+  // ---- Replay / backtest (#169, #183) ---------------------------------------
+  {
+    id: "headline_basis", term: "Held-out vs in-sample", section: "replay",
+    what: "Which slice of the window a variant's headline number was computed on. HELD-OUT means the run had a walk-forward split date and the figure comes only from signals AFTER it — data the config was not chosen on. IN-SAMPLE means there was no split, so the number was measured on the same data the variant was picked from.",
+    read: "Only a held-out figure is a result. An in-sample figure is a description of the past: any variant that survived selection looks good on the data that selected it, by construction.",
+    not: "In-sample is NOT 'a bit weaker evidence'. It is not evidence of an edge at all, and the number's size tells you nothing about whether the edge exists.",
+    act: "Give the run a holdout date and read the held-out column. If a run has none, the only honest use of it is to generate a hypothesis to test properly.",
+    guard: G_SHADOW,
+  },
+  {
+    id: "best_of_n_inflation", term: "Best-of-N inflation (σ)", section: "replay",
+    what: "How much the WINNER of a variant sweep is expected to be flattered by luck alone, in standard deviations of the per-variant noise: roughly √(2·ln N) for N variants searched. Searching 20 variants buys ~2.4σ of pure luck before any skill is involved.",
+    read: "It is the handicap the top row starts with. Compare the gap between the best and the median variant against it — if the winner's margin is inside this many sigma of noise, the sweep has found nothing but its own search.",
+    not: "It is NOT a correction to subtract. It is a magnitude to be embarrassed by, and it counts the WHOLE grid that was searched — a 4×5×3 parameter sweep is N=60, not the 3 arms shown on screen.",
+    act: "Keep N small and pre-registered, and confirm any winner out-of-sample before it becomes a hypothesis worth a live shadow arm.",
+    guard: G_SHADOW,
+  },
+
   // ---- Analytics estimators -------------------------------------------------
   {
     id: "regime", term: "Regime (trending / ranging / high_vol)", section: "analytics",
