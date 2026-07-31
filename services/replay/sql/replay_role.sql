@@ -19,6 +19,9 @@
 -- `public`), because the harness ends up with zero CREATE next to the trading
 -- tables.
 --
+-- Run it as the DATABASE OWNER. It does NOT require a superuser — nothing here
+-- needs SET ROLE, which is what a managed Postgres will not give you.
+--
 -- Substitute below:
 --   beacon        -> your database name, if different
 --   beacon_app    -> the role in DATABASE_URL, i.e. whoever OWNS the trading
@@ -46,12 +49,24 @@ GRANT SELECT ON ALL TABLES IN SCHEMA public TO beacon_replay;
 ALTER DEFAULT PRIVILEGES FOR ROLE beacon_app IN SCHEMA public
   GRANT SELECT ON TABLES TO beacon_replay;
 
--- 4. its OWN schema, which it owns outright. `create_all` in the harness then
---    works with no further grant, now or ever.
---    NOT named `beacon_replay`: the default search_path is `"$user", public`, so
---    a schema sharing the role's name would shadow `public` and an unqualified
---    read could resolve to the wrong place.
-CREATE SCHEMA replay AUTHORIZATION beacon_replay;
+-- 4. a schema of its own to write into. `create_all` in the harness then works
+--    with no further grant, now or ever, and the tables it makes are owned by
+--    beacon_replay because the creator owns what it creates.
+--
+--    NOT `CREATE SCHEMA replay AUTHORIZATION beacon_replay`. That form makes the
+--    ROLE the schema owner, and creating a schema owned by someone else requires
+--    being able to SET ROLE to them — which a non-superuser cannot do, so on
+--    managed Postgres (RDS, Azure, DO, Supabase, Neon…) it fails with
+--    `ERROR: must be able to SET ROLE "beacon_replay"` (SQLSTATE 42501). This
+--    form needs only CREATE on the database, which the database owner has, and
+--    it is marginally TIGHTER: the harness can create and drop its own tables
+--    but cannot drop the schema.
+--
+--    NOT named `beacon_replay` either: the default search_path is
+--    `"$user", public`, so a schema sharing the role's name would shadow
+--    `public` and an unqualified read could resolve to the wrong place.
+CREATE SCHEMA IF NOT EXISTS replay;
+GRANT USAGE, CREATE ON SCHEMA replay TO beacon_replay;
 
 -- 5. belt and braces. Neither should be needed — nothing above grants write, and
 --    privileges held by PUBLIC apply to every role, so revoking only from
@@ -83,8 +98,8 @@ SELECT (SELECT count(DISTINCT table_name)
        (SELECT count(*) FROM pg_tables
          WHERE schemaname = 'public')                AS total_public_tables;
 
--- (c) Schema privileges. PASS = (f, t, t) — it cannot create in public, can read
---     public, and owns its own schema.
+-- (c) Schema privileges. PASS = (f, t, t) — it CANNOT create next to the trading
+--     tables, can read them, and can create in its own schema.
 SELECT has_schema_privilege('beacon_replay', 'public', 'CREATE') AS create_public,
        has_schema_privilege('beacon_replay', 'public', 'USAGE')  AS usage_public,
        has_schema_privilege('beacon_replay', 'replay', 'CREATE') AS create_replay;
@@ -127,4 +142,21 @@ SELECT pg_get_userbyid(defaclrole) AS granting_role,
 --   -- PASS: ERROR: permission denied for schema public
 --
 --   CREATE TABLE replay.__replay_probe (x int); DROP TABLE replay.__replay_probe;
---   -- PASS: both succeed — this is the schema it owns
+--   -- PASS: both succeed — this is the schema it may write in
+--
+-- ===================== READING THE RESULTS ===================================
+-- `beacon_replay` is also the right connection for ANALYSING a run: it can read
+-- every trading table AND the replay_* tables it created, and it cannot write
+-- any of them. No extra grant needed:
+--
+--   psql "postgresql://beacon_replay:CHANGE_ME@HOST:5432/beacon"
+--   SELECT variant, count(*) FROM replay.replay_results
+--    WHERE run_id = 1 AND taken GROUP BY 1;
+--
+-- If another role (a dashboard, your admin login) also needs to read them, run
+-- this AS beacon_replay after the first run — it owns the tables, so it is the
+-- role that can grant on them:
+--
+--   GRANT USAGE ON SCHEMA replay TO beacon_app;
+--   GRANT SELECT ON ALL TABLES IN SCHEMA replay TO beacon_app;
+--   ALTER DEFAULT PRIVILEGES IN SCHEMA replay GRANT SELECT ON TABLES TO beacon_app;

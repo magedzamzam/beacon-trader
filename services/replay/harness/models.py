@@ -26,16 +26,18 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 NUM = Numeric(18, 6)
 
-# The harness's own schema, OWNED by the replay role. This is what resolves the
-# chicken-and-egg the first cut of `sql/replay_role.sql` walked into: a role with
-# only USAGE on `public` cannot run `create_all` (no CREATE), and the follow-up
-# GRANT could not be written either, because the tables it names do not exist
-# until that create_all has run.
+# The harness's own schema. This is what resolves the chicken-and-egg the first
+# cut of `sql/replay_role.sql` walked into: a role with only USAGE on `public`
+# cannot run `create_all` (no CREATE), and the follow-up GRANT could not be
+# written either, because the tables it names do not exist until that create_all
+# has run.
 #
-# Owning a schema fixes both ends AND tightens the isolation rather than
+# A separate schema fixes both ends AND tightens the isolation rather than
 # loosening it: the alternative — granting CREATE on `public` — would let the
 # harness create objects alongside the trading tables. Here it has zero CREATE
-# in `public`, full rights in `replay`, and needs no follow-up grant ever.
+# in `public`, CREATE in `replay`, and needs no follow-up grant ever. The tables
+# end up owned by the replay role because the creator owns what it creates,
+# without the schema itself having to be (see the SET ROLE note in the SQL).
 #
 # Named `replay`, deliberately NOT `beacon_replay`: the default `search_path` is
 # `"$user", public`, so a schema sharing the role's name would silently shadow

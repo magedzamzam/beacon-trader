@@ -166,7 +166,24 @@ def test_the_role_sql_has_no_grant_on_an_object_that_cannot_exist_yet():
     body = sql.split("=== VERIFY", 1)[0].upper()
     assert "ON REPLAY_RUNS" not in body
     assert "ON SEQUENCE" not in body
-    assert "CREATE SCHEMA REPLAY AUTHORIZATION" in body
+    assert "CREATE SCHEMA IF NOT EXISTS REPLAY" in body
+    assert "GRANT USAGE, CREATE ON SCHEMA REPLAY" in body
+
+
+def test_the_role_sql_needs_no_superuser():
+    """`CREATE SCHEMA … AUTHORIZATION <role>` makes that role the schema owner,
+    and creating a schema owned by someone else requires being able to SET ROLE
+    to them. A non-superuser cannot — which is every managed Postgres — so that
+    form failed with `must be able to SET ROLE "beacon_replay"` (SQLSTATE 42501).
+
+    Nothing in the script may depend on SET ROLE, and the two constructs that
+    would are named here rather than left to a reviewer to notice."""
+    sql = (SERVICE_ROOT / "sql" / "replay_role.sql").read_text(encoding="utf-8")
+    body = sql.split("=== VERIFY", 1)[0]
+    executable = "\n".join(l for l in body.splitlines()
+                           if not l.strip().startswith("--")).upper()
+    assert "AUTHORIZATION" not in executable
+    assert "SET ROLE" not in executable
 
 
 def test_the_role_sql_scopes_default_privileges_to_the_table_owner():
