@@ -66,7 +66,7 @@ EVENT_FIELDS: dict[str, list[str]] = {
     "sl_moved":         ["symbol", "direction", "sl", "detail"],
     "trade_closed":     ["symbol", "direction", "size", "channel", "account", "pl",
                          "open_time", "close_time"],
-    "broker_error":     [],
+    "broker_error":     ["symbol", "account", "detail"],
     "daily_summary":    [],
 }
 

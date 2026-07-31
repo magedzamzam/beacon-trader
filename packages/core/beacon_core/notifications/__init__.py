@@ -10,11 +10,12 @@ from .config import (
     SETTING_KEY, catalog, sanitize_config, public_config,
 )
 from .templates import field_descriptor, sample_ctx
+from .throttle import Throttle
 
 __all__ = [
     "CHANNELS", "EVENT_GROUPS", "EVENT_IDS", "CHANNEL_IDS", "DEFAULT_CONFIG",
     "SETTING_KEY", "catalog", "sanitize_config", "public_config",
-    "field_descriptor", "sample_ctx",
+    "field_descriptor", "sample_ctx", "Throttle",
     "notify", "send_test", "format_message", "render_event", "send_event_to_channel",
 ]
 

@@ -41,6 +41,7 @@ from beacon_core.tasks import spawn_bg
 from beacon_core.timeutil import utcnow, parse_iso_utc
 from beacon_core import notifications as notify
 from beacon_core.notifications.context import build_ctx
+from beacon_core.notifications.throttle import Throttle, suffix as _burst_suffix
 
 log = get_logger("monitor")
 settings = get_settings()
@@ -59,6 +60,24 @@ def _notify(event_id: str, ctx: dict) -> None:
         except Exception as exc:                 # pragma: no cover - defensive
             log.debug("notify %s failed: %s", event_id, exc)
     spawn_bg(_run())
+
+
+# A dropped session fails every trade on every tick until it is restored, so an
+# un-debounced broker_error would arrive once per trade per monitor interval.
+# Collapse a burst into one alert that reports how many it stood for (#180).
+_BROKER_ERR = Throttle()
+_BROKER_ERR_DETAIL_MAX = 300
+
+
+def _broker_error(kind: str, detail: str, *, symbol=None, account_id=None) -> None:
+    """Debounced `broker_error` notification, keyed by failure kind + account +
+    symbol so one storm collapses without masking a different failure."""
+    ok, suppressed = _BROKER_ERR.allow(f"{kind}:{account_id}:{symbol}")
+    if not ok:
+        return
+    _notify("broker_error", {
+        "symbol": symbol,
+        "detail": _burst_suffix(str(detail)[:_BROKER_ERR_DETAIL_MAX], suppressed)})
 
 
 async def _closed_ctx(session, trade) -> dict:
@@ -382,6 +401,8 @@ async def _drive_staged(session, trade, adapter, smap, mid, ttl_min) -> None:
                 session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="reject",
                                   payload={"error": str(exc)[:300]}))
                 log.warning("staged deploy failed (trade %s leg %s): %s", trade.id, leg.id, exc)
+                _broker_error("staged_deploy", f"Staged entry deploy failed: {exc}",
+                              symbol=trade.symbol, account_id=trade.account_id)
             await asyncio.sleep(1.0 / max(settings.broker_rate_per_sec, 0.1))
         tr.state = "armed" if decision.mode == "STOP" else "deployed"
         tr.state_since = utcnow()
@@ -873,6 +894,10 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                     log.info("trade %s leg %s SL -> %s", trade.id, leg.id, new_sl)
                 except Exception as exc:
                     log.warning("SL move failed (leg %s): %s", leg.id, exc)
+                    # The stop the ratchet decided on is NOT at the broker — the
+                    # position is still exposed at the old level. Push it.
+                    _broker_error("sl_move", f"Stop move to {new_sl} rejected: {exc}",
+                                  symbol=trade.symbol, account_id=trade.account_id)
 
         # --- retire resting entries: the trade progressed, or it is fully out ---
         # `progressed`: a TP was hit or a stop ratcheted, so the remaining unfilled
@@ -1083,6 +1108,8 @@ async def _sweep_orphaned_orders() -> None:
                 except Exception as exc:
                     log.warning("orphan sweep: broker unreachable (account %s): %s",
                                 account_id, exc)
+                    _broker_error("unreachable", f"Broker unreachable: {exc}",
+                                  account_id=account_id)
                     continue
                 for leg in legs:
                     if leg.broker_order_ref not in live:

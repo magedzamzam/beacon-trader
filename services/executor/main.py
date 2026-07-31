@@ -46,6 +46,7 @@ from beacon_core.ta.features import compute_timeframe as _ta_compute
 from beacon_core.ta.indicators import (ema as _ema, ema_full as _ema_full,
                                        atr as _atr, adx as _adx_ind)
 from beacon_core import notifications as notify
+from beacon_core.notifications.throttle import Throttle, suffix as _burst_suffix
 
 log = get_logger("executor")
 settings = get_settings()
@@ -62,6 +63,25 @@ def _notify(event_id: str, ctx: dict) -> None:
         except Exception as exc:                 # pragma: no cover - defensive
             log.debug("notify %s failed: %s", event_id, exc)
     spawn_bg(_run())
+
+
+# A broker failure never arrives alone — a bad epic or a closed market rejects
+# every leg of a fanout in the same second. Collapse a burst into one alert that
+# says how many it stood for (#180).
+_BROKER_ERR = Throttle()
+_BROKER_ERR_DETAIL_MAX = 300     # a rejection reason can be an essay
+
+
+def _broker_error(kind: str, detail: str, *, account=None, symbol=None,
+                  account_id=None) -> None:
+    """Debounced `broker_error` notification. `kind` scopes the debounce, so a
+    storm of rejects collapses but a *different* failure still gets through."""
+    ok, suppressed = _BROKER_ERR.allow(f"{kind}:{account_id}:{symbol}")
+    if not ok:
+        return
+    _notify("broker_error", {
+        "symbol": symbol, "account": account,
+        "detail": _burst_suffix(str(detail)[:_BROKER_ERR_DETAIL_MAX], suppressed)})
 
 
 def _review_bg(signal_id, account_id, source_id, plan_dict) -> None:
@@ -916,6 +936,9 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                                                "reason": res.rejection_reason}))
                     log.warning("signal %s acct %s leg %s REJECTED by broker: %s",
                                 sig.id, acct.id, leg.id, res.rejection_reason)
+                    _broker_error(
+                        "reject", f"Order rejected: {res.rejection_reason or 'no reason given'}",
+                        account=acct.name, symbol=sig.symbol, account_id=acct.id)
                 else:
                     if pleg.order_type == "MARKET":
                         leg.broker_position_ref = res.broker_order_ref
@@ -942,6 +965,8 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                 session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="reject",
                                   payload={"error": str(exc)[:300]}))
                 log.warning("leg place failed (trade %s): %s", trade.id, exc)
+                _broker_error("place_failed", f"Order placement failed: {exc}",
+                              account=acct.name, symbol=sig.symbol, account_id=acct.id)
             await asyncio.sleep(1.0 / max(settings.broker_rate_per_sec, 0.1))
 
         # Persist the staged-entry state (#129) so the monitor can drive the DECIDE

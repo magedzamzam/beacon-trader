@@ -99,6 +99,14 @@ def test_size_is_offered_on_every_money_moving_event():
     assert "size" not in T.EVENT_FIELDS["order_cancelled"]
 
 
+def test_broker_error_is_emitted_and_carries_a_reason():
+    """#180 — the alert an operator most needs pushed is now fired by the
+    executor and monitor, so the editor must stop greying it out."""
+    assert T.is_emitted("broker_error") is True
+    assert {f["token"] for f in T.field_descriptor("broker_error")} == \
+        {"symbol", "account", "detail"}
+
+
 def test_non_emitted_event_has_no_fields():
     assert T.field_descriptor("daily_summary") == []
     assert T.sample_ctx("daily_summary") == {}

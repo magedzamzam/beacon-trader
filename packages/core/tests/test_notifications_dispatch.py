@@ -114,6 +114,22 @@ def test_send_telegram_escapes_and_uses_html():
     assert "@Gold_Signals_VIP*" in body["text"]         # _ and * pass through literally (no 400)
 
 
+def test_broker_error_with_an_oversized_reason_delivers_balanced_html():
+    """#180 fires broker_error carrying a raw broker rejection reason, which can
+    be arbitrarily long — exactly the shape that used to be char-sliced into
+    malformed HTML and silently dropped (#76). Lock in the trim-then-escape path."""
+    subj, text = D.format_message("broker_error", {
+        "symbol": "XAUUSD", "account": "Capital Demo",
+        "detail": "Order rejected: <risk & margin> " + "why " * 3000})
+    body = S.build_telegram_body(subj, text)
+    assert len(body) <= S._TELEGRAM_LIMIT
+    assert body.count("<pre>") == 1 and body.count("</pre>") == 1
+    assert body.count("<b>") == 1 and body.count("</b>") == 1
+    assert body.endswith("</pre>")                       # not cut mid-tag
+    assert "&lt;risk &amp; margin&gt;" in body           # whole entities, escaped
+    assert "…(truncated)" in body
+
+
 def test_notify_routes_enabled_and_gates_rest():
     sent = []
 
