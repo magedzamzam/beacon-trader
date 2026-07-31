@@ -198,10 +198,17 @@ docker compose run --rm --no-deps replay python main.py init
 # 3. do the candles even cover the live signal window?
 docker compose run --rm --no-deps replay python main.py coverage --since 2026-07-05T00:00:00Z
 
-# 4. does the harness reproduce reality? (exits non-zero if not)
+# 4. generate the validation baseline FROM the live tables. Hand-transcribing
+#    execution_strategies + account_source_risk + risk_limits into JSON is how
+#    you end up validating the transcription instead of the simulator.
+#    --equity is required: it lives at the broker, not in the ledger.
+docker compose run --rm --no-deps replay python main.py scaffold --equity 10000
+#    ...then read the `_needs_review` list it prints, and fix what it names.
+
+# 5. does the harness reproduce reality? (exits non-zero if not)
 docker compose run --rm --no-deps replay python main.py validate --config runs/live-config.json
 
-# 5. only then, sweep
+# 6. only then, sweep
 docker compose run --rm --no-deps replay python main.py run --config runs/example-exit-ladder.json
 ```
 
@@ -217,6 +224,33 @@ that are not in `docker-compose.yml` but may be doing something.
 
 `check --config` validates a run file offline (no DB). `run --dry-run` prints
 the report without writing.
+
+### There is no UI
+
+Deliberately. The harness has no API endpoints and no frontend page: it is a
+batch job behind a `research` profile, and giving the trading API a route that
+triggers it would make a 400k-bar scan startable from a browser. Results are
+read with SQL, as `beacon_replay` — which can read every trading table plus the
+`replay.*` results, and write none of them:
+
+```sql
+-- did a variant beat the baseline, and on how many trades?
+SELECT variant,
+       count(*) FILTER (WHERE ever_filled)                      AS n,
+       round(avg(r_multiple) FILTER (WHERE ever_filled), 3)     AS avg_R,
+       count(*) FILTER (WHERE NOT taken)                        AS declined
+  FROM replay.replay_results WHERE run_id = 1 GROUP BY 1 ORDER BY 3 DESC;
+
+-- why were the declined ones declined?
+SELECT variant, not_taken_reason, count(*)
+  FROM replay.replay_results WHERE run_id = 1 AND NOT taken GROUP BY 1,2;
+
+-- the full report, guardrails included
+SELECT jsonb_pretty(summary::jsonb) FROM replay.replay_runs WHERE id = 1;
+```
+
+`run` also prints the ranking to stdout, so a sweep is readable without touching
+the database at all.
 
 ## 9. Results
 

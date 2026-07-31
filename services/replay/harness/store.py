@@ -28,11 +28,14 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import (AsyncSession, async_sessionmaker,
                                     create_async_engine)
 
-from beacon_core.db.models import (Account, Candle, Leg, Signal, Source,
+from beacon_core.db.models import (Account, AccountSourceRisk, Candle,
+                                   ExecutionStrategy, Leg, Signal, Source,
                                    SymbolMap, Trade)
 from beacon_core.parsing.models import ParsedSignal
+from beacon_core.settings_store import get_setting
 
 from . import bars as B
+from . import scaffold
 from .models import REPLAY_SCHEMA, ReplayBase, ReplayResult, ReplayRun
 from .portfolio import SignalRow
 from .variants import canonical_digest
@@ -245,7 +248,41 @@ async def load_live_truth(session, *, symbol: str = "XAUUSD", frm=None, to=None)
 async def load_accounts(session) -> List[dict]:
     rows = (await session.execute(select(Account))).scalars().all()
     return [{"id": a.id, "name": a.name, "currency": a.currency,
+             "enabled": bool(a.enabled),
              "risk_config": dict(a.risk_config or {})} for a in rows]
+
+
+async def load_live_config(session, *, symbol: str = "XAUUSD", equity,
+                           frm=None, to=None, holdout_from=None) -> dict:
+    """Read the live execution config and emit it as a run config (§5).
+
+    Everything here is a SELECT on a trading table. The assembly is
+    `scaffold.build_run_config`, kept pure so what the JSON says about the live
+    config is unit-testable without a database."""
+    accounts = [a for a in await load_accounts(session) if a["enabled"]]
+    sources = [{"id": s.id, "name": s.name,
+                "account_map": list(s.account_map or []),
+                "strategy": dict(s.strategy or {})}
+               for s in (await session.execute(
+                   select(Source).where(Source.archived == False))  # noqa: E712
+               ).scalars().all()]
+    strategies = [{"id": s.id, "account_id": s.account_id, "source_id": s.source_id,
+                   "entry_policy": dict(s.entry_policy or {}),
+                   "entry_filters": dict(s.entry_filters or {}),
+                   "exit_policy": dict(s.exit_policy or {}),
+                   "enabled": bool(s.enabled), "label": s.label}
+                  for s in (await session.execute(
+                      select(ExecutionStrategy))).scalars().all()]
+    asr = [{"account_id": r.account_id, "source_id": r.source_id,
+            "risk_config": dict(r.risk_config or {}), "enabled": bool(r.enabled)}
+           for r in (await session.execute(
+               select(AccountSourceRisk))).scalars().all()]
+    limits = await get_setting(session, "risk_limits", None)
+    smap = await load_symbol_map(session, symbol)
+    return scaffold.build_run_config(
+        accounts=accounts, sources=sources, strategies=strategies,
+        account_source_risk=asr, risk_limits=limits, symbol_map=smap,
+        equity=equity, symbol=symbol, frm=frm, to=to, holdout_from=holdout_from)
 
 
 async def load_symbol_map(session, symbol: str = "XAUUSD") -> Optional[dict]:

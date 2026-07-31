@@ -7,7 +7,8 @@ not be running. It is invoked explicitly, and in this order:
     docker compose build replay                               # code is COPYed in
     docker compose run --rm --no-deps replay python main.py init
     docker compose run --rm --no-deps replay python main.py coverage
-    docker compose run --rm --no-deps replay python main.py validate --config runs/live.json
+    docker compose run --rm --no-deps replay python main.py scaffold --equity 10000
+    docker compose run --rm --no-deps replay python main.py validate --config runs/live-config.json
     docker compose run --rm --no-deps replay python main.py run --config runs/exit.json
 
 `--no-deps` every time: the service declares no `depends_on`, so there is
@@ -55,7 +56,7 @@ from pathlib import Path
 from sqlalchemy import text
 
 from harness import runner as R
-from harness import store, validate
+from harness import scaffold, store, validate
 from harness.models import REPLAY_SCHEMA
 from harness.variants import build_variant
 
@@ -136,6 +137,31 @@ async def cmd_init(args) -> int:
                       "note": "The role can create in its own schema and write "
                               "nowhere else. Safe to run again — create_all "
                               "skips what already exists."}, indent=2))
+    return 0
+
+
+async def cmd_scaffold(args) -> int:
+    """Write a run config that reproduces the LIVE setup — the §5 baseline.
+
+    Hand-transcribing `execution_strategies`, `account_source_risk`, the
+    `risk_limits` setting and the symbol map into JSON is exactly the work that
+    produces a config which is *nearly* live, and a gate run against a
+    nearly-live config measures the transcription rather than the simulator."""
+    equity = json.loads(args.equity) if args.equity.strip().startswith("{") \
+        else float(args.equity)
+    async with store.Session()() as session:
+        cfg = await store.load_live_config(
+            session, symbol=args.symbol, equity=equity, frm=args.since,
+            holdout_from=args.holdout_from)
+    out = Path(args.out)
+    if out.exists() and not args.force:
+        print(json.dumps({"ok": False, "error": f"{out} exists; pass --force to "
+                                                "overwrite"}, indent=2))
+        return 2
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(cfg, indent=2, default=str) + "\n", encoding="utf-8")
+    print(json.dumps({"ok": True, "written": str(out),
+                      **scaffold.summarise(cfg)}, indent=2, default=str))
     return 0
 
 
@@ -252,6 +278,19 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("init", help="create the replay_* tables and prove the grant "
                                 "works (cheap; run this first)")
 
+    s = sub.add_parser("scaffold", help="write a run config reproducing the LIVE "
+                                        "setup — the validation baseline")
+    s.add_argument("--out", default="runs/live-config.json")
+    s.add_argument("--equity", required=True,
+                   help='account equity: one number for all accounts, or a JSON '
+                        'map \'{"1": 10000, "2": 10000}\'. Read from the broker, '
+                        'not the ledger — sizing is only comparable to live if '
+                        'the budget is.')
+    s.add_argument("--symbol", default="XAUUSD")
+    s.add_argument("--since", default=None, help="signal window start (ISO-8601)")
+    s.add_argument("--holdout-from", dest="holdout_from", default=None)
+    s.add_argument("--force", action="store_true", help="overwrite --out")
+
     r = sub.add_parser("run", help="sweep N config variants over the signal history")
     r.add_argument("--config", required=True)
     r.add_argument("--dry-run", action="store_true",
@@ -275,8 +314,8 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     if args.cmd == "check":
         return cmd_check(args)
-    fn = {"init": cmd_init, "run": cmd_run, "validate": cmd_validate,
-          "coverage": cmd_coverage}[args.cmd]
+    fn = {"init": cmd_init, "scaffold": cmd_scaffold, "run": cmd_run,
+          "validate": cmd_validate, "coverage": cmd_coverage}[args.cmd]
     return asyncio.run(fn(args))
 
 

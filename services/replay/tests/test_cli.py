@@ -21,7 +21,8 @@ def test_every_subcommand_is_wired_to_a_handler():
     import main
     p = main.build_parser()
     sub = next(a for a in p._actions if a.choices and "run" in a.choices)
-    assert set(sub.choices) == {"init", "run", "validate", "coverage", "check"}
+    assert set(sub.choices) == {"init", "scaffold", "run", "validate",
+                                "coverage", "check"}
 
 
 def test_check_validates_the_example_config_without_a_database(capsys):
