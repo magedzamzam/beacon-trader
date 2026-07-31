@@ -3,8 +3,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from beacon_core.analysis import bayes as B
+from beacon_core.analysis import excursion as EX
+from beacon_core.analysis import excursion_store as EXS
 from beacon_core.analysis import feature_vector as FV
-from beacon_core.analysis.report import execution_tax_report
+from beacon_core.analysis.report import execution_tax_report, excursion_report
 from beacon_core.execution import bayes_gate as BG
 from beacon_core.db.models import (SignalFeature, SignalAnalytics, AiAssessment,
                                    Trade, SignalClaim)
@@ -17,25 +19,9 @@ router = APIRouter(prefix="/analysis", tags=["analysis"],
                    dependencies=[Depends(require_token)])
 
 
-async def _model(db: AsyncSession, min_n: int, frm=None, to=None, *,
-                 label: str = B.LABEL_BOT_REALIZED, account_id: int | None = None):
-    """Build the Bayesian model over the UNIFIED per-signal feature vector (#62)
-    under a selectable label (#63):
-      - bot_realized  (default): trade.realized_pl > 0 — did WE make money?
-      - signal_quality: the channel's own claims (TP1+ vs SL) — was the SETUP good,
-        independent of our execution? Ambiguous/no-claim signals are excluded.
-    Optional [frm, to) window (#58) on Trade.created_at. Point-in-time: reads
-    persisted per-signal rows, never a fresh recompute."""
-    q = select(Trade).where(Trade.status == "closed")
-    if account_id is not None:                  # #83: per-account A/B slice
-        q = q.where(Trade.account_id == account_id)
-    if frm is not None:
-        q = q.where(Trade.created_at >= frm)
-    if to is not None:
-        q = q.where(Trade.created_at < to)
-    trades = (await db.execute(q)).scalars().all()
-
-    # Bulk-load every layer once, keyed by signal_id (avoids N queries).
+async def _feature_layers(db: AsyncSession):
+    """Bulk-load every per-signal feature layer once, keyed by signal_id (avoids
+    N queries). Shared by the trade-anchored and signal-anchored labels."""
     sf_by = {s.signal_id: s for s in (await db.execute(select(SignalFeature))).scalars().all()}
     sa_by = {s.signal_id: s for s in (await db.execute(select(SignalAnalytics))).scalars().all()}
     ai_sig, ai_exec = {}, {}
@@ -45,6 +31,58 @@ async def _model(db: AsyncSession, min_n: int, frm=None, to=None, *,
             ai_sig[r.signal_id] = r          # keep the latest (ordered by id)
         elif r.kind == "execution_review":
             ai_exec[r.signal_id] = r
+    return sf_by, sa_by, ai_sig, ai_exec
+
+
+async def _excursion_model(db: AsyncSession, min_n: int, frm=None, to=None):
+    """The excursion label (#182), anchored on SIGNALS rather than trades.
+
+    `bot_realized` and `signal_quality` can only see a signal we executed; the
+    excursion label is defined wherever the candles cover the signal — including
+    the ones we skipped, filtered, risk-blocked or never filled. That is a large
+    N increase, and it is the only way to evaluate what a filter REJECTED.
+    Account-independent by construction, so there is no per-account slice.
+    Reads the persisted `signal_excursions` rows — never a replay on a request."""
+    rows = await EXS.labels_by_signal(db, frm=frm, to=to)
+    if not rows:
+        return {"ready": False, "n": 0}
+    sf_by, sa_by, ai_sig, ai_exec = await _feature_layers(db)
+    examples = []
+    for sid, row in rows.items():
+        if sid not in sf_by and sid not in sa_by:   # nothing captured -> skip
+            continue
+        win = EX.excursion_label(row)
+        if win is None:                             # no reconstruction -> excluded
+            continue
+        examples.append((FV.from_rows(sf_by.get(sid), sa_by.get(sid),
+                                      ai_sig.get(sid), ai_exec.get(sid)), win))
+    return B.build_model(examples, min_n=min_n)
+
+
+async def _model(db: AsyncSession, min_n: int, frm=None, to=None, *,
+                 label: str = B.LABEL_BOT_REALIZED, account_id: int | None = None):
+    """Build the Bayesian model over the UNIFIED per-signal feature vector (#62)
+    under a selectable label (#63, #182):
+      - bot_realized  (default): trade.realized_pl > 0 — did WE make money?
+      - signal_quality: the channel's own claims (TP1+ vs SL) — was the SETUP good,
+        independent of our execution? Ambiguous/no-claim signals are excluded.
+      - signal_excursion: did the market OFFER 1R before the original stop —
+        independent of BOTH our exit and the channel's self-reporting.
+    Optional [frm, to) window (#58) on Trade.created_at. Point-in-time: reads
+    persisted per-signal rows, never a fresh recompute."""
+    if label == B.LABEL_SIGNAL_EXCURSION:
+        return await _excursion_model(db, min_n, frm, to)
+
+    q = select(Trade).where(Trade.status == "closed")
+    if account_id is not None:                  # #83: per-account A/B slice
+        q = q.where(Trade.account_id == account_id)
+    if frm is not None:
+        q = q.where(Trade.created_at >= frm)
+    if to is not None:
+        q = q.where(Trade.created_at < to)
+    trades = (await db.execute(q)).scalars().all()
+
+    sf_by, sa_by, ai_sig, ai_exec = await _feature_layers(db)
 
     claims_by: dict = {}
     if label == B.LABEL_SIGNAL_QUALITY:
@@ -86,9 +124,11 @@ async def bayes(min_n: int = 5, limit: int = 100, date_from: str = None,
     the bot-realized label to one account for the per-account A/B (#83); the
     signal-quality label and the feature capture are account-independent."""
     frm, to = parse_iso_utc(date_from), parse_iso_utc(date_to)
-    # Two labels (#63): bot_realized (top-level, back-compat) + signal_quality.
+    # Three labels: bot_realized (top-level, back-compat) + signal_quality (#63)
+    # + signal_excursion (#182, exit-independent, covers unfilled signals).
     model = await _model(db, min_n, frm, to, label=B.LABEL_BOT_REALIZED, account_id=account_id)
     sq_model = await _model(db, min_n, frm, to, label=B.LABEL_SIGNAL_QUALITY, account_id=account_id)
+    ex_model = await _model(db, min_n, frm, to, label=B.LABEL_SIGNAL_EXCURSION)
     tax = await execution_tax_report(db, frm, to, account_id=account_id)
 
     def _label_block(m):
@@ -102,7 +142,8 @@ async def bayes(min_n: int = 5, limit: int = 100, date_from: str = None,
         return {"ready": False, "n": 0,
                 "message": "No closed trades with captured features yet.",
                 "labels": {B.LABEL_BOT_REALIZED: _label_block(model),
-                           B.LABEL_SIGNAL_QUALITY: _label_block(sq_model)},
+                           B.LABEL_SIGNAL_QUALITY: _label_block(sq_model),
+                           B.LABEL_SIGNAL_EXCURSION: _label_block(ex_model)},
                 "execution_tax": tax}
 
     recent = []
@@ -121,9 +162,12 @@ async def bayes(min_n: int = 5, limit: int = 100, date_from: str = None,
             "min_n": model["min_n"],
             "conditions": [_round_cond(c) for c in model["conditions"][:limit]],
             "recent": recent,
-            # #63: both labels side-by-side + the per-channel execution tax.
+            # #63/#182: all three labels side-by-side + the per-channel execution
+            # tax. A feature that separates under the excursion label but not
+            # under bot_realized is evidence the EXIT is destroying a real edge.
             "labels": {B.LABEL_BOT_REALIZED: _label_block(model),
-                       B.LABEL_SIGNAL_QUALITY: _label_block(sq_model)},
+                       B.LABEL_SIGNAL_QUALITY: _label_block(sq_model),
+                       B.LABEL_SIGNAL_EXCURSION: _label_block(ex_model)},
             "execution_tax": tax}
 
 
@@ -220,6 +264,42 @@ async def bayes_gate_report(min_n: int = 5, date_from: str = None, date_to: str 
                             db: AsyncSession = Depends(get_db)):
     return await _bayes_gate_report(db, min_n, parse_iso_utc(date_from),
                                     parse_iso_utc(date_to), account_id=account_id)
+
+
+@router.get("/excursion")
+async def excursion_ladder(date_from: str = None, date_to: str = None,
+                           basis: str = EXS.BASIS_SIGNAL,
+                           db: AsyncSession = Depends(get_db)):
+    """Per-channel R-ladder from the reconstructed excursions (#182): how often
+    price reached X*R in the called direction before the ORIGINAL stop, beside
+    where each channel actually puts its own TP1 (in R).
+
+    Read this before any per-channel win rate: median TP1 ranges ~0.15R to 1.00R
+    across sources, so a binary TP1-vs-SL rate compares them on unequal terms."""
+    if basis not in (EXS.BASIS_SIGNAL, EXS.BASIS_FILL):
+        raise HTTPException(400, "basis must be 'signal' or 'fill'")
+    return await excursion_report(db, parse_iso_utc(date_from),
+                                  parse_iso_utc(date_to), basis=basis)
+
+
+@router.post("/excursion/recompute")
+async def excursion_recompute(body: dict = None, db: AsyncSession = Depends(get_db)):
+    """Replay the candle store and (re)persist every signal's excursion.
+
+    Offline/manual: it reads the full 1m history, so it is a deliberate act, not
+    something a page polls. Idempotent — re-running with a different
+    `horizon_bars` updates each row in place. Returns the run summary the label
+    must be read with: resolved vs horizon-capped, same-bar-ambiguous count,
+    suspect candles excluded, coverage window, and the SL agreement rate against
+    broker-recorded leg outcomes."""
+    body = body or {}
+    return await EXS.recompute(
+        db,
+        symbol=body.get("symbol") or "XAUUSD",
+        timeframe=body.get("timeframe") or "1m",
+        horizon_bars=int(body.get("horizon_bars") or EX.DEFAULT_HORIZON_BARS),
+        frm=parse_iso_utc(body.get("date_from")),
+        to=parse_iso_utc(body.get("date_to")))
 
 
 @router.get("/bayes/score/{signal_id}")

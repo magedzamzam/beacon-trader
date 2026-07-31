@@ -528,6 +528,79 @@ class StagedTranche(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
+class Candle(Base):
+    """1-minute bid AND ask OHLC bars (#169's prerequisite, loaded by the
+    operator from CSV). Declared here so the analysis layer can read it through
+    the ORM; the live table already exists with additional CHECK constraints
+    (`*_ask >= *_bid`, high/low bounds) that create_all neither creates nor
+    diffs — it only creates a table that is missing (CLAUDE.md §6).
+
+    Full bid/ask is what makes exact fill semantics possible: a BUY enters at the
+    ask and exits on the bid, a SELL the mirror, so TP/SL resolution reads the
+    correct side instead of approximating with a mid price and a spread column.
+    `quality='suspect'` marks crossed quotes and outlier bars — analysis filters
+    to 'ok' and REPORTS the excluded count (#169: never auto-repair a crossed
+    bar, there is no way to tell from the row which side is wrong)."""
+    __tablename__ = "candles"
+    __table_args__ = (UniqueConstraint("symbol", "timeframe", "ts", name="uq_candle_ts"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(16))        # internal symbol (XAUUSD), not the broker epic
+    timeframe: Mapped[str] = mapped_column(String(8))      # "1m"
+    ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True))   # bar OPEN, UTC
+    open_bid: Mapped[Decimal] = mapped_column(NUM)
+    open_ask: Mapped[Decimal] = mapped_column(NUM)
+    high_bid: Mapped[Decimal] = mapped_column(NUM)
+    high_ask: Mapped[Decimal] = mapped_column(NUM)
+    low_bid: Mapped[Decimal] = mapped_column(NUM)
+    low_ask: Mapped[Decimal] = mapped_column(NUM)
+    close_bid: Mapped[Decimal] = mapped_column(NUM)
+    close_ask: Mapped[Decimal] = mapped_column(NUM)
+    volume: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)   # tick-count proxy
+    spread_nominal: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)  # CLOSE spread; advisory only
+    source: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    quality: Mapped[str] = mapped_column(String(16), default="ok")       # ok | suspect
+    ingested_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class SignalExcursion(Base):
+    """Exit-independent excursion label per signal (#182): how far price actually
+    travelled in the called direction before the ORIGINAL stop, reconstructed
+    from candles.
+
+    Persisted rather than recomputed per report because the replay is expensive
+    and the answer is immutable once the candles are loaded. One row per
+    (signal, basis): `signal` = the channel's stated entry, which labels ALL
+    signals including the ones we skipped or never filled; `fill` = our actual
+    fill, and the gap between the two is the execution/slippage cost.
+
+    Shadow — nothing here gates or alters a trade. NEW table -> auto-created by
+    create_all (CLAUDE.md §6)."""
+    __tablename__ = "signal_excursions"
+    __table_args__ = (UniqueConstraint("signal_id", "basis", name="uq_signal_excursion"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    signal_id: Mapped[int] = mapped_column(ForeignKey("signals.id"), index=True)
+    basis: Mapped[str] = mapped_column(String(8))            # signal | fill
+    trade_id: Mapped[int | None] = mapped_column(ForeignKey("trades.id"), nullable=True)
+    symbol: Mapped[str] = mapped_column(String(16))
+    direction: Mapped[str] = mapped_column(String(4))
+    entry: Mapped[Decimal] = mapped_column(NUM)
+    sl: Mapped[Decimal] = mapped_column(NUM)                 # the IMMUTABLE original stop
+    tp1: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)
+    r: Mapped[Decimal] = mapped_column(NUM)                  # price distance of 1R
+    tp1_r: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)   # TP1 distance in R
+    mfe_r: Mapped[Decimal] = mapped_column(NUM)              # before the original stop
+    mae_r: Mapped[Decimal] = mapped_column(NUM)              # before TP1
+    race: Mapped[str] = mapped_column(String(8))             # tp1 | sl | horizon
+    bars_to_tp1: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    bars_to_sl: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ladder: Mapped[dict] = mapped_column(JSON, default=dict)  # {"0.5": true, …}
+    same_bar_ambiguous: Mapped[bool] = mapped_column(Boolean, default=False)
+    horizon_capped: Mapped[bool] = mapped_column(Boolean, default=False)
+    horizon_bars: Mapped[int] = mapped_column(Integer, default=1440)
+    n_bars: Mapped[int] = mapped_column(Integer, default=0)
+    computed_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 class NotificationDelivery(Base):
     """One dispatch attempt and what each routed channel did with it (#181).
 

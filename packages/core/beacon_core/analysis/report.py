@@ -754,6 +754,124 @@ async def structure_magnet_outcome_report(session, frm=None, to=None) -> dict:
     }
 
 
+# --- Per-channel excursion / R-ladder (#182) ----------------------------------
+def _median(vals):
+    vals = sorted(v for v in vals if v is not None)
+    if not vals:
+        return None
+    m = len(vals) // 2
+    return vals[m] if len(vals) % 2 else (vals[m - 1] + vals[m]) / 2.0
+
+
+def excursion_rollup(rows, significance_n: int = SIGNIFICANCE_N,
+                     ladder=(0.25, 0.5, 1.0, 1.5, 2.0, 3.0)) -> dict:
+    """Per-channel R-ladder from the reconstructed excursions (#182). Pure — DB-free
+    so the reduction is unit-testable on a bare box (repo convention).
+
+    `rows`: iterable of {channel, tp1_r, mfe_r, mae_r, race, ladder, horizon_capped}.
+
+    THE TABLE THIS EXISTS FOR pairs two columns that must be read together:
+    `median_tp1_r` — how far a channel puts its own first target, measured in that
+    signal's own risk — and `reach[X]` — how often price actually travelled X*R
+    before the original stop. A channel whose ladder says it reaches 0.5R often but
+    1.0R rarely, while its own TP1 sits at 1.0R, is telling you to take profit
+    earlier ON THAT SOURCE. That is a per-(account, source) exit config change
+    justified by a measure that does not depend on how we exited.
+
+    It also retro-actively qualifies every per-channel win rate reported so far:
+    median TP1 ranges 0.15R to 1.00R across sources, a 6.7x difference in how far
+    price must move to "win", so a binary TP1-vs-SL rate compares channels on
+    unequal terms. Shadow — nothing gates on this."""
+    watch_n = max(1, (significance_n + 1) // 2)
+    keys = [f"{float(x):g}" if float(x) % 1 else f"{float(x):.1f}" for x in ladder]
+    buckets = defaultdict(lambda: {"tp1_r": [], "mfe_r": [], "mae_r": [],
+                                   "tp1_first": 0, "sl_first": 0, "horizon": 0,
+                                   "reach": defaultdict(int), "n": 0})
+    for r in rows:
+        mfe = r.get("mfe_r")
+        if mfe is None:
+            continue
+        b = buckets[r.get("channel") or "Unattributed"]
+        b["n"] += 1
+        b["mfe_r"].append(float(mfe))
+        if r.get("mae_r") is not None:
+            b["mae_r"].append(float(r["mae_r"]))
+        if r.get("tp1_r") is not None:
+            b["tp1_r"].append(float(r["tp1_r"]))
+        race = r.get("race")
+        b["tp1_first" if race == "tp1" else "sl_first" if race == "sl" else "horizon"] += 1
+        rung = r.get("ladder") or {}
+        for k in keys:
+            if rung.get(k):
+                b["reach"][k] += 1
+
+    channels = []
+    for chan, b in buckets.items():
+        n = b["n"]
+        state = ("significant" if n >= significance_n
+                 else "watch" if n >= watch_n else "gathering")
+        channels.append({
+            "channel": chan, "n": n, "state": state,
+            "median_tp1_r": round(_median(b["tp1_r"]), 4) if b["tp1_r"] else None,
+            "median_mfe_r": round(_median(b["mfe_r"]), 4),
+            "median_mae_r": round(_median(b["mae_r"]), 4) if b["mae_r"] else None,
+            "tp1_before_sl": round(b["tp1_first"] / n, 4),
+            "sl_first": round(b["sl_first"] / n, 4),
+            "unresolved": round(b["horizon"] / n, 4),
+            "reach": {k: round(b["reach"][k] / n, 4) for k in keys},
+        })
+    order = {"significant": 0, "watch": 1, "gathering": 2}
+    channels.sort(key=lambda c: (order[c["state"]], -c["n"]))
+    total = sum(c["n"] for c in channels)
+    return {
+        "significance_n": significance_n, "watch_n": watch_n,
+        "ladder": keys, "n_labelled": total, "n_channels": len(channels),
+        "channels": channels,
+        "note": ("Per-channel R-ladder (#182): P(price reached X*R in the called "
+                 "direction before the ORIGINAL stop), reconstructed from 1m bid/ask "
+                 "candles — exit-independent. Read `reach` against `median_tp1_r`: a "
+                 "channel that rarely reaches its own TP1 distance wants an earlier "
+                 "target, not a verdict on its signals. TP1 distance varies ~6.7x "
+                 "across sources, so it also qualifies every binary win rate reported "
+                 "so far. Not significant below n>=%d (§4). Shadow — nothing gates on "
+                 "this." % significance_n),
+    }
+
+
+async def excursion_report(session, frm=None, to=None,
+                           basis: str = "signal",
+                           significance_n: int = SIGNIFICANCE_N) -> dict:
+    """The per-channel R-ladder off the persisted `signal_excursions` join.
+    SIGNAL-time [frm, to) anchor, matching the other channel reports so the
+    tables can't drift. Read-only / shadow.
+
+    Defaults to the `signal` basis — the channel's stated entry — because that is
+    the one that covers signals we skipped or never filled, which is the whole
+    point of an exit-independent label."""
+    from sqlalchemy import select
+    from ..db.models import Signal, SignalExcursion, Source
+
+    q = (select(Source.name, SignalExcursion.tp1_r, SignalExcursion.mfe_r,
+                SignalExcursion.mae_r, SignalExcursion.race,
+                SignalExcursion.ladder, SignalExcursion.horizon_capped)
+         .select_from(SignalExcursion)
+         .join(Signal, Signal.id == SignalExcursion.signal_id)
+         .outerjoin(Source, Source.id == Signal.source_id)
+         .where(SignalExcursion.basis == basis))
+    if frm is not None:
+        q = q.where(Signal.created_at >= frm)
+    if to is not None:
+        q = q.where(Signal.created_at < to)
+    rows = (await session.execute(q)).all()
+    out = excursion_rollup(
+        [{"channel": name, "tp1_r": tp1_r, "mfe_r": mfe, "mae_r": mae,
+          "race": race, "ladder": ladder, "horizon_capped": capped}
+         for name, tp1_r, mfe, mae, race, ladder, capped in rows],
+        significance_n=significance_n)
+    out["basis"] = basis
+    return out
+
+
 # --- Shadow strategies: Monte Carlo geometry null + Turtle breakout -----------
 # The bucket edges for the Monte Carlo calibration curve. A null that is well
 # calibrated should land close to the diagonal; systematic deviation means the

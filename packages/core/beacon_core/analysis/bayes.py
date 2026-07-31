@@ -19,7 +19,12 @@ _EPS = 3e-12
 # our bot's execution outcome. The gap between them per channel is the execution tax.
 LABEL_BOT_REALIZED = "bot_realized"       # trade.realized_pl > 0 (execution outcome)
 LABEL_SIGNAL_QUALITY = "signal_quality"   # channel reached TP1+ vs SL (setup outcome)
-LABELS = (LABEL_BOT_REALIZED, LABEL_SIGNAL_QUALITY)
+# #182: did the market OFFER 1R in the called direction before the original stop,
+# reconstructed from candles. Independent of both our exit and the channel's own
+# reporting, and defined for signals we never filled — so it is the only label
+# that can score what a filter rejected. See analysis/excursion.py.
+LABEL_SIGNAL_EXCURSION = "signal_excursion"
+LABELS = (LABEL_BOT_REALIZED, LABEL_SIGNAL_QUALITY, LABEL_SIGNAL_EXCURSION)
 
 
 def time_link_confidence(gap_hours: float, max_hours: int) -> float:
