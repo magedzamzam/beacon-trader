@@ -115,12 +115,65 @@ def test_equity_is_always_named_as_needing_review():
     assert "equity" in review
 
 
-def test_a_non_usd_account_gets_an_fx_warning():
+def test_a_non_usd_account_gets_an_fx_note_that_says_it_cancels():
     """`AEDd` is the intended account currency (CLAUDE.md §1), so fx_factor=1 is
-    wrong for this install — and being wrong by a constant ratio on every lot is
-    exactly the failure a gate would misreport as a fill-logic bug."""
+    not this install's real rate — but it CANCELS out of planned_risk and P&L
+    (lot ∝ fx; P&L ∝ lot/fx), so the note must not send someone hunting a rate
+    that changes no result. Asserted because the first wording did exactly
+    that."""
     review = " ".join(_cfg()["_generated"]["_needs_review"])
     assert "fx_factor" in review
+    assert "CANCELS" in review
+
+
+def test_fx_factor_really_does_cancel_out_of_the_money():
+    """The claim above, checked against the shipped `size_legs` rather than
+    asserted from the docstring — if sizing ever stops being fx-symmetric, the
+    note becomes wrong and this fails."""
+    from decimal import Decimal as D
+    from beacon_core.execution.planner import PlannedLeg
+    from beacon_core.risk.sizing import InstrumentSpec, RiskConfig, size_legs
+
+    def money(fx):
+        leg = PlannedLeg(side="BUY", entry=D("4000"), tp=D("4010"), sl=D("3990"),
+                         tp_index=1, order_type="LIMIT")
+        size_legs([leg], equity=D("10000"),
+                  risk=RiskConfig(basis="capital_percent", value=D("1")),
+                  instrument=InstrumentSpec(value_per_point=D("1"),
+                                            min_lot=D("0.001"), lot_step=D("0.001")),
+                  fx_factor=D(str(fx)))
+        pl = ((D("4010") - D("4000")) * leg.lot * D("1")) / D(str(fx))
+        return leg.risk_cash, pl
+
+    a_risk, a_pl = money("1")
+    b_risk, b_pl = money("0.2723")
+    assert abs(a_risk - b_risk) < D("0.01")
+    assert abs(a_pl - b_pl) < D("0.01")
+
+
+def test_an_enabled_cluster_budgeter_is_flagged_as_unsimulated():
+    """Shadow-first live, but if it has been ENFORCED the executor de-sizes
+    correlated arrivals and the harness does not — so the sim over-sizes exactly
+    the concentrated signals. Silence would read as agreement."""
+    limits = dict(LIMITS, cluster_risk={"enabled": True})
+    review = " ".join(_cfg(risk_limits=limits)["_generated"]["_needs_review"])
+    assert "cluster_risk" in review and "NOT simulated" in review
+    # …and stays quiet while it is only shadowing
+    shadow = dict(LIMITS, cluster_risk={"enabled": False})
+    assert not any("cluster_risk" in r for r in
+                   _cfg(risk_limits=shadow)["_generated"]["_needs_review"])
+
+
+def test_the_summary_states_session_modelling_positively():
+    """It was only inferable from the ABSENCE of a line in `not_modelled`, and a
+    reader should never have to notice that something did not appear."""
+    off = scaffold.summarise(_cfg())
+    assert off["sessions_modelled"] is False
+    on = scaffold.summarise(_cfg(trading_hours={"sessions": [
+        {"id": "london", "label": "London", "tz": "Europe/London",
+         "start": "08:00", "end": "17:00", "enabled": True, "risk_mult": 1.0}]}))
+    assert on["sessions_modelled"] is True
+    assert on["session_windows"] == ["London"]
 
 
 def test_a_missing_risk_limits_setting_is_flagged_not_defaulted_quietly():

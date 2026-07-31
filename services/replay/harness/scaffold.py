@@ -94,10 +94,30 @@ def build_run_config(*, accounts, sources, strategies, account_source_risk,
                     "set it to the real demo equity or sizing is not comparable"]
     if any(str(a.get("currency") or "").upper() not in ("USD", "")
            for a in accounts):
+        # Deliberately NOT alarming, because the arithmetic says it should not
+        # be. `size_legs` sets lot ∝ fx and stores risk_cash = lot·d·vpp / fx,
+        # and `settle` computes pl = move·lot·vpp / fx — so fx CANCELS out of
+        # both planned_risk and P&L. Verified: fx=1 and fx=0.2723 give identical
+        # money to within lot-step rounding. The earlier wording here ("every
+        # lot is wrong by that ratio") was true of the lot and badly misleading
+        # about the consequence, and would have sent someone hunting an FX rate
+        # that changes no result.
         needs_review.append(
-            "accounts[].fx_factor — left at 1, but an account whose currency is "
-            "not the instrument's needs the real account->instrument factor, or "
-            "every lot is wrong by that ratio")
+            "accounts[].fx_factor — left at 1. It CANCELS out of planned_risk "
+            "and P&L (lot is proportional to fx; P&L to lot/fx), so arm "
+            "comparisons are unaffected. It changes the reported LOT, and at "
+            "small per-TP allocations whether a leg is dropped below min_lot. "
+            "Set it for lot-level fidelity; ignore it for ranking variants.")
+    if ((risk_limits or {}).get("cluster_risk") or {}).get("enabled"):
+        # Shadow-first live (#106), but if it has been ENFORCED the executor
+        # de-sizes correlated arrivals and the harness does not — so the sim
+        # over-sizes exactly the clustered signals, which are the concentrated
+        # ones. Silence here would read as agreement.
+        needs_review.append(
+            "risk_limits.cluster_risk is ENABLED live but is NOT simulated — "
+            "the correlation-cluster budgeter de-sizes concurrent same-symbol/"
+            "same-direction arrivals. Expect the harness to over-size precisely "
+            "the clustered signals, and read any edge on those with that in mind.")
     if not risk_limits:
         needs_review.append(
             "risk_limits — no `risk_limits` setting found; the harness will "
@@ -173,6 +193,7 @@ def summarise(cfg: dict) -> dict:
     what still needs a human."""
     gen = cfg.get("_generated") or {}
     v = (cfg.get("variants") or [{}])[0]
+    windows = ((v.get("trading_hours") or {}).get("sessions")) or []
     return {
         "accounts": [{"id": a["id"], "name": a["name"], "equity": a["equity"],
                       "currency": a["currency"]} for a in v.get("accounts", [])],
@@ -184,6 +205,11 @@ def summarise(cfg: dict) -> dict:
                        for s in v.get("strategies", [])],
         "risk_limits_keys": sorted((v.get("risk_limits") or {}).keys()),
         "instrument": v.get("instrument"),
+        # Stated positively. It was only inferable from the ABSENCE of a line in
+        # `not_modelled`, and a reader should never have to notice that
+        # something did not appear.
+        "sessions_modelled": bool(windows),
+        "session_windows": [s.get("label") or s.get("id") for s in windows],
         "needs_review": gen.get("_needs_review"),
         "not_modelled": gen.get("_not_modelled"),
     }
