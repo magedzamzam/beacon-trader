@@ -152,6 +152,46 @@ def test_regime_composition_classifies_a_long_enough_series():
     assert 0.0 <= out["trending_share"] <= 1.0
 
 
+def test_return_pct_is_reported_beside_the_r_metrics():
+    """"Config A gives X%, config B gives Y%" is the question an operator asks.
+    Answering only in R invites them to do the conversion in their head."""
+    v, s, res = _run(1)
+    rep = metrics.variant_report(res, variant=v, series=s)
+    acct = rep["returns"]["by_account"]["1"]
+    assert acct["starting_equity"] == 10000
+    assert acct["return_pct"] is not None
+    expected = 100.0 * acct["net_nominal"] / acct["starting_equity"]
+    assert abs(acct["return_pct"] - expected) < 1e-6
+    assert rep["returns"]["total_return_pct"] is not None
+
+
+def test_return_pct_follows_the_headline_basis():
+    """With a holdout, `returns` is the HELD-OUT return; `returns_pooled` is the
+    whole window. Quoting an in-sample % as the result is the failure §8 exists
+    to prevent, so the two are named apart."""
+    v, s, res = _run(1)
+    rep = metrics.variant_report(res, variant=v, series=s,
+                                 holdout_from=T0 + dt.timedelta(days=1))
+    assert rep["returns"]["by_account"] == {}          # nothing in the holdout
+    assert rep["returns_pooled"]["by_account"]["1"]["n_trades"] == 1
+
+
+def test_a_never_filled_trade_is_not_a_zero_percent_trade():
+    v, s, res = _run(1, mids=[4020] * 12,
+                     entry_policy={"entry_style": "limit", "ttl_minutes": 3})
+    rep = metrics.variant_report(res, variant=v, series=s)
+    assert rep["returns"]["by_account"] == {}
+    assert rep["returns"]["total_net_nominal"] == 0.0
+
+
+def test_the_return_is_not_annualised():
+    """Scaling four weeks of one instrument up to a year turns a small sample
+    into a confident-looking number."""
+    v, s, res = _run(1)
+    note = metrics.variant_report(res, variant=v, series=s)["returns"]["note"]
+    assert "NOT" in note and "annualised" in note
+
+
 def test_the_promotion_caveat_is_not_optional():
     v, s, res = _run(1)
     rep = metrics.variant_report(res, variant=v, series=s)

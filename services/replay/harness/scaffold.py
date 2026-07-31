@@ -32,18 +32,25 @@ from typing import Optional
 # because they are the honest reasons a validation run can disagree with reality
 # for a cause that is not a bug in the fill logic.
 UNMODELLED = [
-    "session risk multiplier (trading_hours.sessions[].risk_mult) — needs a clock",
     "counter-trend de-size (execution/trend_filter) — needs broker bars at entry",
     "correlation-cluster budgeter (risk/cluster) — shadow live, not simulated",
     "AI pre-trade review/gate — needs a provider call",
+    "news blackout (trading_hours econ calendar) — needs the event feed at entry",
     "confirm-404 rejects (#150), orphaned armed STOPs (#161), fill_price=0 (#159)"
     " — broker faults with no candle signature",
 ]
 
+# Named separately because it is conditional: sessions ARE modelled when the
+# `trading_hours` setting is readable, and are not when it is absent. A static
+# list would be wrong half the time.
+UNMODELLED_NO_SESSIONS = (
+    "session risk multiplier + `session_in` rules (#81) — no `trading_hours` "
+    "setting found, so the London/NY overlap de-size is NOT applied")
+
 
 def build_run_config(*, accounts, sources, strategies, account_source_risk,
                      risk_limits, symbol_map, equity, symbol="XAUUSD",
-                     frm=None, to=None, holdout_from=None,
+                     frm=None, to=None, holdout_from=None, trading_hours=None,
                      label="live config (validation baseline)") -> dict:
     """Assemble the run config. Every argument is a plain list/dict of rows, so
     this is testable without a database."""
@@ -76,6 +83,12 @@ def build_run_config(*, accounts, sources, strategies, account_source_risk,
         "horizon_bars": 1440,
         "ratchet_price": "extreme",
     }
+    # Only the `sessions` list matters to the harness; the rest of the
+    # trading_hours setting (holidays, the econ calendar) drives blackouts the
+    # simulator does not model, and copying it in would imply otherwise.
+    windows = (trading_hours or {}).get("sessions")
+    if windows:
+        variant["trading_hours"] = {"sessions": list(windows)}
 
     needs_review = ["accounts[].equity — read from the broker, not the ledger; "
                     "set it to the real demo equity or sizing is not comparable"]
@@ -108,7 +121,9 @@ def build_run_config(*, accounts, sources, strategies, account_source_risk,
                         "Also the baseline arm of any sweep — a counterfactual "
                         "is whatever you change from this."),
             "_needs_review": needs_review,
-            "_not_modelled": UNMODELLED,
+            "_not_modelled": (UNMODELLED if windows
+                              else [UNMODELLED_NO_SESSIONS] + UNMODELLED),
+            "sessions_modelled": bool(windows),
             "n_accounts": len(acct_rows),
             "n_strategies": len(variant["strategies"]),
             "n_source_risk_overrides": len(by_pair),

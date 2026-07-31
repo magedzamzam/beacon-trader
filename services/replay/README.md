@@ -132,6 +132,26 @@ still share nothing, so the sweep parallelises exactly as intended.
   be claimed beyond the regimes actually tested.
 * **Costs modelled**: real spread from `*_ask − *_bid` per bar, slippage, the
   caps, the breaker.
+* **Return is a PERIOD return**, not annualised. `returns.return_pct` is simple
+  return on starting equity over whatever window the run covered; rank on R
+  (scale-free), quote the percentage. With a holdout, `returns` is the held-out
+  figure and `returns_pooled` is the whole window — named apart so an in-sample
+  percentage cannot be quoted as the result.
+
+### Session windows (#81)
+
+A variant carrying a `trading_hours: {"sessions": [...]}` block models both live
+session mechanisms, through the shipped `trading_hours.sessions` functions: the
+risk **multiplier** (the London/NY overlap de-size) and `ctx['sessions']`, which
+`session_in` filter rules match against. Session and filter factors multiply and
+apply to the *risk config*, so the per-signal cap and the min-lot check both see
+the de-sized plan — exactly the order the executor uses.
+
+Without the block neither is modelled, which is the default: turning it on by
+guessing `DEFAULT_SESSIONS` would silently change every run config written
+before it shipped. `scaffold` reads the real setting, so the validation baseline
+gets it automatically, and every result states `sessions_modelled` so a variant
+that modelled them is never silently compared against one that did not.
 
 ## 6. The validation gate (§5) — run this before believing anything
 

@@ -85,6 +85,50 @@ def rollup(trades: Sequence, *, accounts_by_id: dict,
     return geometry_ab_rollup(t_rows, l_rows, source_id=source_id)
 
 
+def returns_by_arm(trades: Sequence, accounts) -> dict:
+    """Period return as a PERCENTAGE of starting equity, per account.
+
+    R-multiples stay the primary comparator — scale-free, and they dissolve the
+    equity-parity confound between arms — but "what would this have made" is the
+    question an operator actually asks, and answering only in R invites the
+    reader to do the conversion in their head, badly.
+
+    Equity is held CONSTANT across a run (see `variants.DEFAULT_EQUITY`), so
+    this is simple return on starting capital with no compounding. It is a
+    PERIOD return over whatever window the run covered and is deliberately NOT
+    annualised: scaling four weeks of one instrument up to a year turns a small
+    sample into a confident-looking number, which is the exact failure §8
+    exists to prevent."""
+    equity = {a.id: float(a.equity or 0) for a in accounts}
+    net: dict = {}
+    n: dict = {}
+    for t in trades:
+        if not t.ever_filled:
+            continue
+        net[t.account_id] = net.get(t.account_id, 0.0) + float(t.realized_pl)
+        n[t.account_id] = n.get(t.account_id, 0) + 1
+    out, total_net, total_eq = {}, 0.0, 0.0
+    for acct_id in sorted(net, key=lambda a: (a is None, a)):
+        pl = net[acct_id]
+        eq = equity.get(acct_id) or 0.0
+        out[str(acct_id)] = {
+            "account_id": acct_id, "n_trades": n.get(acct_id, 0),
+            "starting_equity": eq, "net_nominal": round(pl, 2),
+            "return_pct": round(100.0 * pl / eq, 4) if eq else None}
+        total_net += pl
+        total_eq += eq
+    return {
+        "by_account": out,
+        "total_net_nominal": round(total_net, 2),
+        "total_return_pct": (round(100.0 * total_net / total_eq, 4)
+                             if total_eq else None),
+        "note": ("Period return on STARTING equity — not compounded, and NOT "
+                 "annualised. Rank on R (scale-free); quote this. Excludes "
+                 "trades that never filled: an entry that did not fill is not a "
+                 "0% trade."),
+    }
+
+
 def _split(trades: Sequence, holdout_from: Optional[dt.datetime]) -> tuple:
     """(in_sample, held_out) by signal time. With no split date everything is
     in-sample and the report says so — the harness never silently reports an
@@ -201,6 +245,8 @@ def variant_report(res: VariantResult, *, variant, series: B.BarSeries,
         "variant_digest": variant.digest(),
         "headline_basis": "held_out" if holdout_from is not None else "in_sample",
         "headline": rollup(headline_set, accounts_by_id=accounts_by_id),
+        "returns": returns_by_arm(headline_set, variant.accounts),
+        "returns_pooled": returns_by_arm(trades, variant.accounts),
         "pooled": rollup(trades, accounts_by_id=accounts_by_id),
         "in_sample": rollup(ins, accounts_by_id=accounts_by_id),
         "held_out": (rollup(out, accounts_by_id=accounts_by_id)
@@ -213,7 +259,13 @@ def variant_report(res: VariantResult, *, variant, series: B.BarSeries,
         "coverage": res.coverage,
         "settings": {"horizon_bars": variant.horizon_bars,
                      "slippage_points": variant.slippage_points,
-                     "ratchet_price": variant.ratchet_price},
+                     "ratchet_price": variant.ratchet_price,
+                     # Whether the session risk multiplier and `session_in`
+                     # rules were live for this run. Stated on the RESULT, so a
+                     # variant that did not model them cannot be compared to one
+                     # that did without the difference being visible (#81).
+                     "sessions_modelled": bool(variant.session_windows),
+                     "n_session_desized": res.counts["session_desized"]},
     }
 
 

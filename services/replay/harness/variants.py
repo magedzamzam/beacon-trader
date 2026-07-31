@@ -47,6 +47,7 @@ from beacon_core.execution import strategy as ST
 from beacon_core.execution.planner import DEFAULT_PLANNER
 from beacon_core.execution.guard import DEFAULT_RISK_LIMITS
 from beacon_core.risk.sizing import InstrumentSpec, RiskConfig, resolve_risk_config
+from beacon_core.trading_hours import sessions as TH
 
 # Equity is held CONSTANT across a run rather than compounded. Two reasons, both
 # about comparability: R-multiples are the headline metric and compounding makes
@@ -113,6 +114,18 @@ class Variant:
         default_factory=lambda: InstrumentSpec(value_per_point=Decimal("1")))
     min_stop_distance: Optional[Decimal] = None
     costs: Dict[str, Any] = field(default_factory=dict)
+    # Session windows (#81), in the shape of the `trading_hours` SETTING.
+    # Present  -> the session risk multiplier AND `session_in` filter rules are
+    #             MODELLED, using the shipped `trading_hours.sessions` functions.
+    # Absent   -> neither is, and the report says so rather than leaving it to be
+    #             discovered from a divergence.
+    #
+    # Absent is the DEFAULT on purpose. Defaulting to DEFAULT_SESSIONS would be
+    # guessing this install's config, and would silently change the results of
+    # every run config written before this shipped — the one thing a
+    # reproducibility claim cannot survive. `scaffold` reads the real setting, so
+    # the validation baseline gets it without anyone needing to know it exists.
+    trading_hours: Optional[Dict[str, Any]] = None
     horizon_bars: int = 1440
     # Which price a ratchet trigger reads inside a bar. "extreme" is the closest
     # match to a monitor polling many times a minute (and to the MFE latching in
@@ -165,6 +178,31 @@ class Variant:
         except (TypeError, ValueError):
             return 0.0
 
+    @property
+    def session_windows(self) -> Optional[list]:
+        """The configured session list, or None when sessions are not modelled."""
+        th = self.trading_hours
+        if not isinstance(th, dict):
+            return None
+        return th.get("sessions") or None
+
+    def session_context(self, when) -> tuple:
+        """`(active_session_labels, risk_multiplier)` at `when`.
+
+        Both come from `trading_hours.sessions` — the SAME pure functions the
+        executor reaches through `th_service` — so a replayed London/NY overlap
+        de-sizes by exactly the factor live would apply. `([], 1.0)` when
+        sessions are not configured for this variant, which is also the
+        fail-open the executor takes when the lookup errors."""
+        windows = self.session_windows
+        if not windows or when is None:
+            return [], 1.0
+        try:
+            st = TH.status(windows, when)
+            return list(st.get("active") or []), float(st.get("risk_multiplier", 1.0))
+        except Exception:
+            return [], 1.0                       # fail-open, exactly as live
+
     def digest(self) -> str:
         """Content hash of the variant as authored. Two runs with the same digest
         MUST produce identical results; a changed digest is the honest reason a
@@ -214,6 +252,7 @@ def build_variant(d: dict) -> Variant:
             lot_step=_dec(inst.get("lot_step", "0.01"), "0.01")),
         min_stop_distance=None if msd in (None, "") else _dec(msd),
         costs=d.get("costs") or {},
+        trading_hours=d.get("trading_hours") or None,
         horizon_bars=int(d.get("horizon_bars") or 1440),
         ratchet_price=str(d.get("ratchet_price") or "extreme"),
         raw=d,

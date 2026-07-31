@@ -278,11 +278,16 @@ async def load_live_config(session, *, symbol: str = "XAUUSD", equity,
            for r in (await session.execute(
                select(AccountSourceRisk))).scalars().all()]
     limits = await get_setting(session, "risk_limits", None)
+    # The session windows (#81). Read raw rather than through
+    # `th_service.load_config`, which sanitises AND would pull in the econ
+    # calendar the harness does not model — copying that in would imply it does.
+    hours = await get_setting(session, "trading_hours", None)
     smap = await load_symbol_map(session, symbol)
     return scaffold.build_run_config(
         accounts=accounts, sources=sources, strategies=strategies,
         account_source_risk=asr, risk_limits=limits, symbol_map=smap,
-        equity=equity, symbol=symbol, frm=frm, to=to, holdout_from=holdout_from)
+        trading_hours=hours, equity=equity, symbol=symbol, frm=frm, to=to,
+        holdout_from=holdout_from)
 
 
 async def load_symbol_map(session, symbol: str = "XAUUSD") -> Optional[dict]:

@@ -181,17 +181,35 @@ class PortfolioSim:
             # --- filtration pillar. Fail-open on an evaluator error, exactly as
             # the executor does (#164): a filtration rule must never be able to
             # delete a signal by being wrong about its own inputs.
+            # Session windows (#81) are computed FIRST, because the `session_in`
+            # filter rule matches against them. Two distinct live mechanisms,
+            # both from the shipped `trading_hours.sessions` functions: the risk
+            # MULTIPLIER (the London/NY overlap de-size) and `ctx['sessions']`.
+            # ([], 1.0) when the variant does not configure sessions.
+            active, session_factor = v.session_context(s.at)
+
+            filter_factor = 1.0
             if cfg.filter_rules:
                 try:
-                    d = ST.evaluate_filter_rules(cfg.filter_rules, filter_ctx(mc))
+                    d = ST.evaluate_filter_rules(
+                        cfg.filter_rules, filter_ctx(mc, sessions=active))
                 except Exception:
                     d = None
                 if d is not None and d.skip:
                     self._reject(res, s, account_id, "filtration_skip",
                                  detail={"rules": list(d.reasons)})
                     continue
-                if d is not None and d.factor != 1.0:
-                    cfg = _scaled(cfg, d.factor)
+                if d is not None:
+                    filter_factor = d.factor
+
+            # Combined the way the executor combines them, and applied to the
+            # RISK CONFIG rather than to the lot afterwards — so the per-signal
+            # cap and the min-lot check both see the de-sized plan.
+            size_factor = session_factor * filter_factor
+            if size_factor != 1.0:
+                cfg = _scaled(cfg, size_factor)
+            if session_factor != 1.0:
+                res.counts["session_desized"] += 1
 
             trade, why = sim.plan_trade(
                 signal=s.parsed, signal_id=s.id, source_id=s.source_id,
