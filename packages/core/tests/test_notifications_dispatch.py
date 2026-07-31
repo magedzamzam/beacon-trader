@@ -2,8 +2,33 @@
 stack, so this runs in CI (deps installed), not on a bare dev box."""
 import asyncio
 
+from beacon_core.db.models import NotificationDelivery
+from beacon_core.notifications import deliveries as DL
 from beacon_core.notifications import dispatch as D
 from beacon_core.notifications import senders as S
+
+
+class _RecordingSession:
+    """Just enough session for the delivery log (#181): collect what was added.
+    `execute` asserts, because a handful of writes must never trigger a trim."""
+
+    def __init__(self):
+        self.added = []
+
+    def add(self, obj):
+        self.added.append(obj)
+
+    async def commit(self):
+        pass
+
+    async def rollback(self):                    # pragma: no cover - failure path
+        pass
+
+    async def execute(self, *a, **k):            # pragma: no cover - guard
+        raise AssertionError("unexpected trim")
+
+    def rows(self):
+        return [o for o in self.added if isinstance(o, NotificationDelivery)]
 
 
 def test_format_message_headline_first():
@@ -161,6 +186,91 @@ def test_notify_routes_enabled_and_gates_rest():
         D.get_setting = orig_get
         S.SENDERS.clear()
         S.SENDERS.update(orig_senders)
+
+
+def test_notify_records_every_dispatch_and_what_each_channel_did():
+    """#181 — the per-channel outcome used to be logged and thrown away, so
+    "did my last alert reach Telegram?" had no answer. It lands as a row now."""
+    async def fake(cfg, subject, text):
+        pass
+
+    async def fake_get_setting(session, key, default=None):
+        return {
+            "channels": {"telegram": {"enabled": True, "bot_token_enc": "t", "chat_id": "1"},
+                         "sms": {"enabled": False}},
+            "routing": {"tp_hit": ["telegram", "sms"]},     # new_signal routed nowhere
+        }
+
+    orig_get, orig_senders = D.get_setting, dict(S.SENDERS)
+    D.get_setting = fake_get_setting
+    S.SENDERS["telegram"] = fake
+    DL._writes_since_trim = 0
+    try:
+        sess = _RecordingSession()
+        asyncio.run(D.notify(sess, "tp_hit", {"symbol": "XAUUSD", "pl": "12.5"}))
+        row, = sess.rows()
+        assert row.event_id == "tp_hit"
+        assert row.results == {"telegram": "ok", "sms": "disabled"}
+        assert row.ok is True                       # at least one channel delivered
+        assert "XAUUSD" in row.subject
+
+        # an event routed nowhere still lands a row — "nothing was routed" is
+        # the answer to half the "why didn't I get an alert?" questions.
+        sess2 = _RecordingSession()
+        asyncio.run(D.notify(sess2, "new_signal", {"symbol": "XAUUSD"}))
+        row2, = sess2.rows()
+        assert row2.results == {} and row2.ok is False
+    finally:
+        D.get_setting = orig_get
+        S.SENDERS.clear()
+        S.SENDERS.update(orig_senders)
+        DL._writes_since_trim = 0
+
+
+def test_delivery_log_write_never_breaks_dispatch():
+    """Telemetry must never be the reason a notification (or a trade) misbehaves:
+    a session that throws on every call leaves the dispatch result intact."""
+    class _Broken:
+        def add(self, obj):
+            raise RuntimeError("db is down")
+
+        async def commit(self):
+            raise RuntimeError("db is down")
+
+        async def rollback(self):
+            raise RuntimeError("still down")
+
+    async def fake(cfg, subject, text):
+        pass
+
+    async def fake_get_setting(session, key, default=None):
+        return {"channels": {"telegram": {"enabled": True, "bot_token_enc": "t", "chat_id": "1"}},
+                "routing": {"tp_hit": ["telegram"]}}
+
+    orig_get, orig_senders = D.get_setting, dict(S.SENDERS)
+    D.get_setting = fake_get_setting
+    S.SENDERS["telegram"] = fake
+    try:
+        res = asyncio.run(D.notify(_Broken(), "tp_hit", {"symbol": "XAUUSD"}))
+    finally:
+        D.get_setting = orig_get
+        S.SENDERS.clear()
+        S.SENDERS.update(orig_senders)
+    assert res["results"] == {"telegram": "ok"}     # the send still happened
+
+
+def test_delivery_to_dict_shape():
+    import datetime as dt
+    row = NotificationDelivery(
+        id=7, event_id="sl_hit", subject="🔴 SELL XAUUSD — Stop-loss hit",
+        results={"telegram": "error: Telegram API 400"}, ok=False,
+        created_at=dt.datetime(2026, 7, 31, 9, 30, tzinfo=dt.timezone.utc))
+    d = DL.to_dict(row)
+    assert d["event"] == "sl_hit"
+    assert d["label"] == "Stop-loss hit"            # resolved from the catalog
+    assert d["ok"] is False
+    assert d["results"]["telegram"].startswith("error:")
+    assert d["ts"].startswith("2026-07-31T09:30")
 
 
 def test_send_test_unbuilt_channel():

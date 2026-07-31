@@ -10,6 +10,7 @@ from ..crypto import decrypt
 from ..logging import get_logger
 from ..settings_store import get_setting
 from . import config as C
+from . import deliveries as DL
 from . import templates as T
 from .senders import SENDERS
 
@@ -130,6 +131,9 @@ async def notify(session, event_id: str, ctx: Optional[dict] = None) -> dict:
 
     targets = stored.get("routing", {}).get(event_id) or []
     if not targets:
+        # Still logged: "nothing was routed" is the answer to half the "why
+        # didn't I get an alert?" questions this log exists to answer (#181).
+        await DL.record(session, event_id, None, {})
         return {"event": event_id, "results": {}}
 
     subject, text = format_message(event_id, ctx, stored.get("templates"))
@@ -151,6 +155,7 @@ async def notify(session, event_id: str, ctx: Optional[dict] = None) -> dict:
             results[ch_id] = f"error: {exc}"
     if any(v == "ok" for v in results.values()):
         log.info("notify %s -> %s", event_id, results)
+    await DL.record(session, event_id, subject, results)
     return {"event": event_id, "results": results}
 
 
@@ -181,9 +186,11 @@ async def send_event_to_channel(session, event_id: str, ctx: Optional[dict],
     subject, text = format_message(event_id, ctx, stored.get("templates"))
     try:
         await sender(cfg, subject, text)
-        return "ok"
+        status = "ok"
     except Exception as exc:
-        return f"error: {exc}"
+        status = f"error: {exc}"
+    await DL.record(session, event_id, subject, {channel_id: status})
+    return status
 
 
 async def send_test(session, channel_id: str) -> dict:

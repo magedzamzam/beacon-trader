@@ -526,3 +526,21 @@ class StagedTranche(Base):
     reason: Mapped[str | None] = mapped_column(String(96), nullable=True)  # last decision reason
     state_since: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)  # per-tranche TTL clock
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class NotificationDelivery(Base):
+    """One dispatch attempt and what each routed channel did with it (#181).
+
+    `dispatch.notify()` already computes this map and used to only log it, so
+    "did my last SL-hit alert actually reach Telegram?" had no answer outside a
+    box nobody is tailing. TELEMETRY, NOT A LEDGER: rows are trimmed to a bounded
+    tail, writing one is best-effort and off the trading path, and nothing reads
+    it back to make a decision. NEW table -> auto-created by create_all (no
+    ALTER; CLAUDE.md §6)."""
+    __tablename__ = "notification_deliveries"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_id: Mapped[str] = mapped_column(String(32), index=True)
+    subject: Mapped[str | None] = mapped_column(String(200), nullable=True)  # truncated headline
+    results: Mapped[dict] = mapped_column(JSON, default=dict)   # {channel: ok|disabled|no_sender|error: …}
+    ok: Mapped[bool] = mapped_column(Boolean, default=False)    # at least one channel delivered
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)

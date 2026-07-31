@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { Bell, Mail, Send, MessageCircle, Smartphone, Webhook, BellRing, MessageSquare } from "lucide-react";
-import { Card, Empty } from "../components/ui";
+import { Card, Empty, Table, Th, Td } from "../components/ui";
 import { Button, Field, Input, NumberInput, Select, Toggle, ErrorNote } from "../components/form";
 import { api } from "../lib/api";
 
@@ -435,6 +435,8 @@ export default function Notifications() {
         <Button onClick={save}>Save notifications</Button>
       </div>
 
+      <Deliveries />
+
       {/* ---- Still-planned capabilities ---- */}
       <Card>
         <div className="px-4 py-3 border-b border-edge text-sm font-medium">Planned capabilities</div>
@@ -451,5 +453,88 @@ export default function Notifications() {
         </ul>
       </Card>
     </div>
+  );
+}
+
+// A dispatch status is "ok", "disabled", "no_sender", or "error: <reason>".
+const _statusDot = (s) =>
+  s === "ok" ? "bg-long" : String(s).startsWith("error") ? "bg-short" : "bg-muted";
+const _statusText = (s) =>
+  s === "ok" ? "text-long" : String(s).startsWith("error") ? "text-short" : "text-muted";
+const _clock = (ts) => {
+  const d = new Date(ts);
+  return isNaN(d) ? "—" : d.toLocaleString(undefined,
+    { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+};
+
+/**
+ * Recent deliveries — the per-channel outcome dispatch already computes and used
+ * to only log. Answers "did my last SL-hit alert actually reach Telegram?"
+ * without tailing a box, and gives the #76 class of silent drop a permanent
+ * visible tripwire. Read-only telemetry over a bounded tail (last 500 rows).
+ */
+function Deliveries() {
+  const [rows, setRows] = useState(null);
+  const [err, setErr] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    const load = () => api.notificationDeliveries(50)
+      .then(d => { if (alive) { setRows(d.deliveries || []); setErr(null); } })
+      .catch(e => alive && setErr(e.message));
+    load();
+    const t = setInterval(load, 15000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
+
+  return (
+    <Card>
+      <div className="px-4 py-3 border-b border-edge flex items-center justify-between">
+        <div>
+          <div className="text-sm font-medium">Recent deliveries</div>
+          <div className="text-[11px] text-muted mt-0.5">
+            What each routed channel did with the last 50 dispatches. Refreshes every 15s.
+          </div>
+        </div>
+        <Button variant="ghost" onClick={() => api.notificationDeliveries(50)
+          .then(d => setRows(d.deliveries || [])).catch(e => setErr(e.message))}>Refresh</Button>
+      </div>
+      {err && <div className="px-4 pt-3"><ErrorNote>{err}</ErrorNote></div>}
+      {rows === null ? <Empty>Loading…</Empty>
+        : rows.length === 0 ? <Empty>Nothing dispatched yet.</Empty>
+        : (
+          <Table minW={560}>
+            <thead><tr><Th>Time</Th><Th>Event</Th><Th>Channels</Th></tr></thead>
+            <tbody>
+              {rows.map(r => {
+                const chans = Object.entries(r.results || {});
+                return (
+                  <tr key={r.id}>
+                    <Td mono>{_clock(r.ts)}</Td>
+                    <Td>
+                      <div>{r.label}</div>
+                      {r.subject && <div className="text-[11px] text-muted truncate max-w-[22rem]">{r.subject}</div>}
+                    </Td>
+                    <Td>
+                      {chans.length === 0
+                        ? <span className="text-xs text-muted">not routed</span>
+                        : (
+                          <div className="flex flex-wrap gap-x-4 gap-y-1">
+                            {chans.map(([ch, status]) => (
+                              <span key={ch} className="inline-flex items-center gap-1.5 text-xs" title={String(status)}>
+                                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${_statusDot(status)}`} />
+                                <span className="text-muted">{ch}</span>
+                                <span className={`${_statusText(status)} truncate max-w-[14rem]`}>{status}</span>
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                    </Td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </Table>
+        )}
+    </Card>
   );
 }

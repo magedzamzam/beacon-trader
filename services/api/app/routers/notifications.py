@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from beacon_core import notifications as notif
 from beacon_core.crypto import encrypt, has_key
 from beacon_core.db.models import Signal, Trade
+from beacon_core.notifications import deliveries as delivery_log
 from beacon_core.notifications.context import build_ctx
 from beacon_core.settings_store import get_setting, set_setting
 from ..deps import get_db
@@ -79,6 +80,13 @@ async def put_config(body: dict, db: AsyncSession = Depends(get_db)):
     out = notif.public_config(clean)
     out["has_secret_key"] = has_key()
     return out
+
+
+@router.get("/deliveries")
+async def get_deliveries(limit: int = 50, db: AsyncSession = Depends(get_db)):
+    """Recent dispatch outcomes, newest first (#181) — the per-channel result
+    map notify() computes. Read-only telemetry over a bounded tail."""
+    return {"deliveries": await delivery_log.recent(db, limit)}
 
 
 @router.post("/test/{channel_id}")
