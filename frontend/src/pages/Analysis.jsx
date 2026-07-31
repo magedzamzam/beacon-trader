@@ -23,11 +23,21 @@ export default function Analysis({ account = "" }) {
   const range = useRange("all");
 
   const [gate, setGate] = useState(null);
+  const [ladder, setLadder] = useState(null);
+  const [ladderErr, setLadderErr] = useState(null);
+  const [basis, setBasis] = useState("signal");
   const load = () => { setData(null); setErr(null); setGate(null);
     api.bayesAnalysis(minN, range.range, account).then(setData).catch(e => setErr(e.message));
     api.bayesGateReport(minN, range.range, account).then(setGate).catch(() => setGate(null)); };
   // refetch on range OR account change (#83 per-account A/B); "Apply" refetches on min-n
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [range.fromIso, range.toIso, account]);
+  // The excursion ladder (#182) is account-INDEPENDENT by construction, so it
+  // follows the date range and the basis toggle but ignores the account filter.
+  useEffect(() => { setLadder(null); setLadderErr(null);
+    api.excursionLadder(range.range, basis)
+      .then(d => { setLadder(d); setLadderErr(null); })
+      .catch(e => setLadderErr(e.message || "failed to load"));
+    /* eslint-disable-next-line */ }, [range.fromIso, range.toIso, basis]);
 
   const base = data?.base_rate;
   return (
@@ -35,6 +45,7 @@ export default function Analysis({ account = "" }) {
       <RangeFilter state={range} variant="coarse" />
       {err && <ErrorNote>{err}</ErrorNote>}
       {!err && data && <ExecutionTaxCard tax={data.execution_tax} />}
+      {!err && <ExcursionLadderCard data={ladder} error={ladderErr} basis={basis} onBasis={setBasis} />}
       {!err && gate && <BayesGateCard gate={gate} />}
       {!err && !data && <Card><Empty>Loading…</Empty></Card>}
       {!err && data && !data.ready && (
@@ -155,6 +166,102 @@ function BayesGateCard({ gate }) {
             })}
           </tbody>
         </Table>
+      )}
+    </Card>
+  );
+}
+
+// Per-channel R-ladder (#182) — the exit-independent table. Every other label on
+// this page is contaminated: bot-realized bakes in our exit, signal-quality
+// depends on channels reporting themselves, and BOTH are confounded by how far
+// each channel puts TP1. This one asks only how far price actually travelled
+// before the ORIGINAL stop, replayed from the 1m bid/ask candles.
+const STATE_TONE = { significant: "beacon", watch: "warn", gathering: "muted" };
+const rVal = (v) => (v == null ? "—" : Number(v).toFixed(2) + "R");
+
+// The ladder rung that covers a channel's own TP1 — the rate in THAT column is
+// how often its target was actually reachable. This pairing is the whole point
+// of the table, so the cell is marked rather than left for the reader to find.
+const tp1Rung = (rungs, tp1r) =>
+  (tp1r == null ? null : rungs.find(k => parseFloat(k) >= Number(tp1r)) || null);
+
+function ExcursionLadderCard({ data, error, basis, onBasis }) {
+  const rungs = data?.ladder || [];
+  const rows = data?.channels || [];
+  return (
+    <Card>
+      <div className="px-4 py-3 border-b border-edge flex items-center justify-between gap-3 flex-wrap">
+        <div className="text-sm font-medium flex items-center gap-2 flex-wrap">
+          Per-channel R-ladder<HelpHint term="r_ladder" />
+          <Badge tone="muted">shadow · exit-independent</Badge>
+          {data && <span className="text-muted font-normal text-xs num">
+            · {data.n_labelled} signals · {data.n_channels} channels</span>}
+        </div>
+        <div className="flex items-center gap-1 text-xs">
+          {[["signal", "signal entry"], ["fill", "our fill"]].map(([k, label]) => (
+            <Button key={k} variant={basis === k ? "primary" : "ghost"} onClick={() => onBasis(k)}>
+              {label}
+            </Button>
+          ))}
+        </div>
+      </div>
+      <div className="px-4 py-2 text-[11px] text-muted border-b border-edge">
+        How often price reached X×R in the called direction <b>before the original stop</b>, reconstructed
+        from the 1m bid/ask candles — independent of both our exit and the channel's own claims.
+        The <span className="text-beacon">highlighted</span> rung is the one covering that channel's own
+        median TP1: <b>that</b> number is how often its target was actually reachable. A reach curve that
+        falls off before the channel's own TP1 says <i>take profit earlier on this source</i>.
+        {basis === "signal"
+          ? " Basis: the channel's stated entry — covers signals we skipped or never filled."
+          : " Basis: our actual fill — the gap to the signal basis is the execution cost."}
+      </div>
+      {error ? <div className="p-4"><ErrorNote>{error}</ErrorNote></div>
+        : !data ? <Empty>Loading…</Empty>
+        : !rows.length ? (
+          <Empty>No reconstructed excursions yet. Run <span className="num text-xs">POST
+            /analysis/excursion/recompute</span> once — it replays the candle store offline and
+            persists a row per signal.</Empty>
+        ) : (
+          <Table minW={1080}>
+            <thead><tr className="border-b border-edge">
+              <Th>Channel</Th><Th right>n</Th>
+              <Th right>TP1<HelpHint term="tp1_distance_r" /></Th>
+              {rungs.map(k => <Th key={k} right>{k}R</Th>)}
+              <Th right>TP1 first</Th><Th right>Unres.</Th>
+              <Th right>MFE</Th><Th right>MAE</Th>
+            </tr></thead>
+            <tbody>
+              {rows.map((r, i) => {
+                const mark = tp1Rung(rungs, r.median_tp1_r);
+                return (
+                  <tr key={i} className="border-b border-edge/60 row-hover">
+                    <Td>{r.channel} <Badge tone={STATE_TONE[r.state] || "muted"}>{r.state}</Badge></Td>
+                    <Td right mono>{r.n}</Td>
+                    <Td right mono>{rVal(r.median_tp1_r)}</Td>
+                    {rungs.map(k => (
+                      <Td key={k} right mono>
+                        {k === mark
+                          ? <span className="bg-beacon/15 text-beacon rounded px-1.5 py-0.5">{pct((r.reach || {})[k])}</span>
+                          : <span className="text-muted">{pct((r.reach || {})[k])}</span>}
+                      </Td>
+                    ))}
+                    <Td right mono>{pct(r.tp1_before_sl)}</Td>
+                    <Td right mono><span className={r.unresolved > 0.1 ? "text-warn" : "text-muted"}>
+                      {pct(r.unresolved)}</span></Td>
+                    <Td right mono>{rVal(r.median_mfe_r)}</Td>
+                    <Td right mono><span className="text-muted">{rVal(r.median_mae_r)}</span></Td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </Table>
+        )}
+      {data && !!rows.length && (
+        <div className="px-4 py-2 text-[11px] text-muted border-t border-edge">
+          <b>Unres.</b> = hit neither TP1 nor the stop inside the replay horizon; the ladder is capped
+          by that horizon, so widening it can only raise these rates. A bar touching both TP1 and the
+          stop is scored conservatively as the stop. Not significant below n ≥ {data.significance_n}.
+        </div>
       )}
     </Card>
   );

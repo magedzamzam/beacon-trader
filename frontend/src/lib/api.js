@@ -90,6 +90,14 @@ export const api = {
     if (accountId) p.set("account_id", accountId);
     return req(`/analysis/bayes-gate/report?${p.toString()}`);
   },
+  // per-channel R-ladder from reconstructed excursions (#182) — exit-independent.
+  // No account_id: the label is account-independent by construction.
+  excursionLadder: ({ from, to } = {}, basis = "signal") => {
+    const p = new URLSearchParams({ basis });
+    if (from) p.set("date_from", from);
+    if (to) p.set("date_to", to);
+    return req(`/analysis/excursion?${p.toString()}`);
+  },
   // execution strategies (#84): per-(account, source) Entry / Filtration / Exit
   strategies: (accountId = "", sourceId = "") => {
     const p = new URLSearchParams();

@@ -120,6 +120,22 @@ export const GLOSSARY = [
     guard: G_N30,
   },
 
+  {
+    id: "tp1_distance_r", term: "TP1 distance (R)", section: "labels",
+    what: "How far a channel puts its OWN first target, measured in that signal's own risk — R = |entry − SL|. A TP1 at 0.15R needs price to move a seventh of the risk; at 1.00R it needs the full amount.",
+    read: "It is the reason two channels' win rates are not comparable. Measured across 828 signals it ranges 0.15R (TFXC) to 1.00R (Quartz) — a 6.7× difference in how far price must travel to book a 'win'.",
+    not: "It is NOT a quality measure. A near TP1 does not make a channel good, it makes its win rate high. Never rank or de-trust channels on raw win rate without this column beside it.",
+    act: "Read it against the R-ladder: if a channel rarely reaches the rung its own TP1 sits on, move that source's target in — a per-(account, source) exit change.",
+  },
+  {
+    id: "r_ladder", term: "R-ladder (reach X·R)", section: "labels",
+    what: "How often price actually travelled X times the risk in the called direction BEFORE the original stop was hit, replayed from the 1-minute bid/ask candles.",
+    read: "The only label here that depends on neither our exit nor the channel's self-reporting. It is defined for every signal with candle coverage — including ones we skipped, filtered or never filled — so it is also the only way to score what a filter rejected.",
+    not: "It is NOT what we earned. It is what the market OFFERED. A bar that touches both TP1 and stop is scored conservatively as the stop, and the horizon caps it — widening the horizon can only raise these rates.",
+    act: "Where a channel's reach curve falls off before its own TP1, take profit earlier on that source. A feature that separates here but NOT under bot-realized means the EXIT is destroying a real edge.",
+    guard: G_SHADOW,
+  },
+
   // ---- Analytics estimators -------------------------------------------------
   {
     id: "regime", term: "Regime (trending / ranging / high_vol)", section: "analytics",
