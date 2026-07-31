@@ -170,8 +170,21 @@ def gate(outcome_agreement: Optional[float], r_dist: dict) -> dict:
     }
 
 
-def report(sim_legs, live_legs, sim_trades, live_trades) -> dict:
+def report(sim_legs, live_legs, sim_trades, live_trades, *,
+           include_rows: bool = False) -> dict:
+    """The gate report. `include_rows` keeps the per-leg detail — thousands of
+    entries on a real run, and useless on a terminal — but the SUMMARY it sits
+    inside (agreement rate, matched/unmatched counts, the fill-error
+    distribution) is the entire diagnosis and is never dropped.
+
+    Trimmed HERE rather than at the call site, because the call site got it
+    wrong: `rep.pop("legs", {}).pop("rows", None)` removed the whole legs block
+    and then popped `rows` from the orphan, so `validate` printed a pass/fail
+    verdict with no agreement rate and no error distribution behind it. A gate
+    whose workings cannot be seen is a coin toss with a log line."""
     legs = compare(sim_legs, live_legs)
+    if not include_rows:
+        legs.pop("rows", None)
     r = compare_r(sim_trades, live_trades)
     return {"legs": legs, "r": r,
             "gate": gate(legs["outcome"]["agreement_rate"], r),

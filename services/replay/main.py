@@ -224,9 +224,8 @@ async def cmd_validate(args) -> int:
         failed = False
         for name, res in sorted(out["results"].items()):
             sim_legs, sim_trades = store.sim_legs_for_validation(res)
-            rep = validate.report(sim_legs, truth["legs"], sim_trades, truth["trades"])
-            rep.pop("legs", {}).pop("rows", None)     # keep the summary readable
-            report[name] = rep
+            report[name] = rep = validate.report(
+                sim_legs, truth["legs"], sim_trades, truth["trades"])
             failed = failed or not rep["gate"]["passed"]
         print(json.dumps({"ok": not failed, "coverage": series.coverage(),
                           "validation": report}, indent=2, default=str))
