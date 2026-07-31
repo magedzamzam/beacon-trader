@@ -2,11 +2,18 @@
 
 A BATCH JOB, not a daemon. There is no loop, no queue consumer and no HTTP
 server, because the safest way to be incapable of disturbing live trading is to
-not be running. It is invoked explicitly:
+not be running. It is invoked explicitly, and in this order:
 
-    docker compose run --rm replay python main.py run --config runs/exit.json
-    docker compose run --rm replay python main.py validate --config runs/live.json
+    docker compose run --rm replay python main.py init        # once, after the SQL
     docker compose run --rm replay python main.py coverage
+    docker compose run --rm replay python main.py validate --config runs/live.json
+    docker compose run --rm replay python main.py run --config runs/exit.json
+
+`init` creates the two `replay.*` tables. It exists so the first proof that the
+DB grant works costs two seconds rather than a completed sweep — every other
+thing this service does to the database is a SELECT, so it is the only write
+worth rehearsing. `run` performs the same init BEFORE it simulates anything, for
+the same reason.
 
 `docker compose stop replay` is a no-op on api/executor/monitor/telegram by
 construction: nothing depends on this service, it holds no broker credentials,
@@ -40,8 +47,11 @@ import json
 import sys
 from pathlib import Path
 
+from sqlalchemy import text
+
 from harness import runner as R
 from harness import store, validate
+from harness.models import REPLAY_SCHEMA
 from harness.variants import build_variant
 
 # `main.py` is the ONLY module that touches the database, and it imports nothing
@@ -102,8 +112,35 @@ async def _load(session, cfg: dict):
     return spec, series, signals, sources, symbol, timeframe, frm, to
 
 
+async def cmd_init(args) -> int:
+    """Create `replay.replay_runs` / `replay.replay_results`, and say what is
+    there afterwards.
+
+    Its real job is to be the CHEAP way to prove the grant works. Everything else
+    the harness does to the database is a SELECT; this is the only write, so
+    without a standalone command the first proof that the role can create its
+    tables would be a sweep that has already burned an hour."""
+    await store.init_replay_tables()
+    async with store.Session()() as session:
+        rows = (await session.execute(text(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = :s ORDER BY table_name"
+        ), {"s": REPLAY_SCHEMA})).scalars().all()
+    print(json.dumps({"ok": True, "schema": REPLAY_SCHEMA,
+                      "tables": list(rows),
+                      "note": "The role can create in its own schema and write "
+                              "nowhere else. Safe to run again — create_all "
+                              "skips what already exists."}, indent=2))
+    return 0
+
+
 async def cmd_run(args) -> int:
     cfg = json.loads(Path(args.config).read_text(encoding="utf-8"))
+    # BEFORE the sweep, not after. A missing grant or a missing schema is a
+    # two-second failure; discovering it once 800 signals x N variants have
+    # already been simulated costs an afternoon and teaches nothing.
+    if not args.dry_run:
+        await store.init_replay_tables()
     async with store.Session()() as session:
         spec, series, signals, sources, symbol, tf, frm, to = await _load(session, cfg)
         if not len(series):
@@ -118,7 +155,6 @@ async def cmd_run(args) -> int:
             print(json.dumps(summary, indent=2, default=str))
             return 0
 
-        await store.init_replay_tables()
         cdig = await store.candle_digest(session, symbol=symbol, timeframe=tf)
         run = await store.create_run(
             session, label=spec.label, signal_source=spec.signal_source,
@@ -208,6 +244,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="replay", description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    sub.add_parser("init", help="create the replay_* tables and prove the grant "
+                                "works (cheap; run this first)")
+
     r = sub.add_parser("run", help="sweep N config variants over the signal history")
     r.add_argument("--config", required=True)
     r.add_argument("--dry-run", action="store_true",
@@ -231,7 +270,8 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     if args.cmd == "check":
         return cmd_check(args)
-    fn = {"run": cmd_run, "validate": cmd_validate, "coverage": cmd_coverage}[args.cmd]
+    fn = {"init": cmd_init, "run": cmd_run, "validate": cmd_validate,
+          "coverage": cmd_coverage}[args.cmd]
     return asyncio.run(fn(args))
 
 

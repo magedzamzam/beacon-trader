@@ -186,15 +186,22 @@ producer, and shadow forward-R, and only then a weekend config act on one arm.
 psql -f services/replay/sql/replay_role.sql
 # REPLAY_DATABASE_URL=postgresql+asyncpg://beacon_replay:...@host:5432/beacon
 
-# 1. do the candles even cover the live signal window?
+# 1. create the two replay.* tables. Two seconds, and it is the ONLY write this
+#    service ever makes - so it is the cheap proof that the grant works.
+docker compose run --rm replay python main.py init
+
+# 2. do the candles even cover the live signal window?
 docker compose run --rm replay python main.py coverage --since 2026-07-05T00:00:00Z
 
-# 2. does the harness reproduce reality? (exits non-zero if not)
+# 3. does the harness reproduce reality? (exits non-zero if not)
 docker compose run --rm replay python main.py validate --config runs/live-config.json
 
-# 3. only then, sweep
+# 4. only then, sweep
 docker compose run --rm replay python main.py run --config runs/example-exit-ladder.json
 ```
+
+`run` performs the same init before it simulates anything, so a grant problem
+fails in seconds rather than after a completed sweep.
 
 `check --config` validates a run file offline (no DB). `run --dry-run` prints
 the report without writing.
