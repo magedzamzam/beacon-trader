@@ -117,14 +117,16 @@ Pure-Python core; no DB/Redis/broker needed.
 ```bash
 pip install -e packages/core          # or: PYTHONPATH=packages/core
 pip install -r services/api/requirements.txt      # fastapi+pydantic, for services/api/tests
-pytest packages/core/tests services/executor/tests services/api/tests -q
+pytest packages/core/tests services/executor/tests services/api/tests services/replay/tests -q
 ```
 
-Three targets: `packages/core/tests` (the engine), `services/executor/tests` (the real
-execution guard), and `services/api/tests` (#165 — write-side validation for the
+Four targets: `packages/core/tests` (the engine), `services/executor/tests` (the real
+execution guard), `services/api/tests` (#165 — write-side validation for the
 Entry/Filtration/Exit pillars: what config is allowed to reach the DB, and therefore the
-executor and monitor). The API tests are pure — no DB, no TestClient — and import the real
-routers via `services/api/tests/conftest.py`.
+executor and monitor), and `services/replay/tests` (#169 — the offline replay harness,
+including the import-graph test that proves no order-placing symbol is reachable from it).
+The API tests are pure — no DB, no TestClient — and import the real routers via
+`services/api/tests/conftest.py`; the replay tests are pure for the same reason.
 
 CI (`.github/workflows/tests.yml`) runs this on every push/PR. **Add a test with any change to
 sizing, guards, SL rules, the planner, or the analysis layer** — and to the strategy config
@@ -144,9 +146,17 @@ packages/core/beacon_core/
   analysis/     bayes · estimators · sidecar (shadow) · structure/magnets · reconcile
   trading_hours/ sessions · news blackout · holidays
   db/models.py  the ledger (broker is source of truth)
-services/       api · telegram · collector · executor · monitor
+services/       api · telegram · collector · executor · monitor · replay
 frontend/       React + Vite (Configuration tabs, Positions, Signals, Performance)
 ```
+
+`services/replay` (#169) is RESEARCH, not trading — the `beacon_research` half of the #60
+ADR. It replays the signal history through the pure engines above under alternative
+configs. The one-way rule is absolute: replay may import `beacon_core`; **`beacon_core`
+and the trading services must never import replay.** It has no broker credentials, a
+SELECT-only DB role, writes only `replay_*`, and is behind a compose `research` profile so
+`docker compose up -d` never starts it. Its results are hypothesis-generating only — see
+`services/replay/README.md` and §2 above.
 
 **Key invariants**
 - The executor consumes a **durable queue** (`bus.enqueue` / `consume_queue`), *not* pub/sub.
@@ -169,6 +179,11 @@ frontend/       React + Vite (Configuration tabs, Positions, Signals, Performanc
 
 ## 7. Data & analysis
 
+- **Candles are NOT in the daily dump.** The 1m bid/ask `candles` table added ~83 MB and
+  broke the integrity loop, so `pg_backup.ps1` excludes it. Anything that needs bars
+  (`analysis/excursion_store.py`, `services/replay`) must read them from the live/replica
+  DB. Bars with `quality != 'ok'` (crossed quotes, outlier wicks) are EXCLUDED and the
+  count is reported — never auto-repaired (#169).
 - Daily Postgres dumps: `../beacon-data-dump/beacon_YYYYMMDD.sql` (**read-only**, INSERT-format).
   Load them with a **quote-aware statement splitter** — a line-based regex under-loads
   multi-line `raw_text` and silently drops rows.

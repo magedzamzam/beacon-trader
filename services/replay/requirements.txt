@@ -1,0 +1,2 @@
+sqlalchemy[asyncio]>=2.0.30
+asyncpg>=0.30.0

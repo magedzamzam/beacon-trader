@@ -1,0 +1,151 @@
+{
+  "label": "exit ladder: BE@TP1 vs BE@TP2 vs runner, per-channel",
+  "symbol": "XAUUSD",
+  "timeframe": "1m",
+  "from": "2026-07-05T00:00:00Z",
+  "holdout_from": "2026-07-24T00:00:00Z",
+  "signal_source": "historical",
+  "workers": 0,
+
+  "_comment": [
+    "`defaults` is merged UNDER each variant so a sweep expresses only what",
+    "DIFFERS between arms. Everything here mirrors a live table: `strategies`",
+    "is execution_strategies (same scope cascade), `risk` is Risk & Limits,",
+    "`risk_limits` is the risk_limits setting. Fill `accounts[].equity` with the",
+    "real demo equity — sizing is only comparable to live if the budget is.",
+    "`instrument` is auto-filled from symbol_maps when omitted."
+  ],
+
+  "defaults": {
+    "accounts": [
+      {"id": 1, "name": "A", "equity": 10000, "currency": "AEDd", "fx_factor": 1}
+    ],
+    "risk": {
+      "default": {"basis": "capital_percent", "value": 1.0, "allocation": "even"}
+    },
+    "risk_limits": {
+      "enabled": true,
+      "trading_halted": false,
+      "daily_loss_limit": 500,
+      "per_signal_max_pct_of_daily": 0.5,
+      "max_open_risk_per_account": 10000,
+      "max_open_risk_per_symbol": 10000,
+      "max_signal_risk_pct": 2.0,
+      "daily_soft_loss_limit": 0,
+      "breaker_cooldown_minutes": 0
+    },
+    "costs": {"slippage_points": 0.0},
+    "horizon_bars": 1440,
+    "ratchet_price": "extreme"
+  },
+
+  "variants": [
+    {
+      "name": "be_at_tp1",
+      "strategies": [
+        {
+          "account_id": null, "source_id": null, "label": "BE@TP1",
+          "entry_policy": {"entry_style": "limit", "ttl_minutes": 60},
+          "exit_policy": {
+            "cancel_pending_on_stop": true,
+            "sl_rules": [
+              {"trigger": {"type": "tp_hit", "index": 1},
+               "action": {"type": "move_sl_to", "target": "entry"}},
+              {"trigger": {"type": "tp_hit", "index": 2},
+               "action": {"type": "move_sl_to", "target": "previous_tp"}},
+              {"trigger": {"type": "tp_hit", "index": 3},
+               "action": {"type": "move_sl_to", "target": "previous_tp"}}
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "be_at_tp2",
+      "strategies": [
+        {
+          "account_id": null, "source_id": null, "label": "BE@TP2",
+          "entry_policy": {"entry_style": "limit", "ttl_minutes": 60},
+          "exit_policy": {
+            "cancel_pending_on_stop": true,
+            "sl_rules": [
+              {"trigger": {"type": "tp_hit", "index": 2},
+               "action": {"type": "move_sl_to", "target": "entry"}},
+              {"trigger": {"type": "tp_hit", "index": 3},
+               "action": {"type": "move_sl_to", "target": "previous_tp"}}
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "be_lock_0_6r",
+      "strategies": [
+        {
+          "account_id": null, "source_id": null, "label": "BE@0.6R",
+          "entry_policy": {"entry_style": "limit", "ttl_minutes": 60},
+          "exit_policy": {
+            "cancel_pending_on_stop": true,
+            "sl_rules": [
+              {"trigger": {"type": "be_lock_at_r", "r": 0.6},
+               "action": {"type": "move_sl_to", "target": "entry"}},
+              {"trigger": {"type": "tp_hit", "index": 2},
+               "action": {"type": "move_sl_to", "target": "previous_tp"}}
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "per_channel_mixed",
+      "_comment": [
+        "The per-(account, source) requirement (§6): BE@TP2 for source 7,",
+        "BE@TP1 for everything else, in ONE run. The (null, null) row is the",
+        "base layer; the (1, 7) row overrides only the pillar it sets and",
+        "inherits the rest — the SAME cascade execution_strategies uses live."
+      ],
+      "strategies": [
+        {
+          "account_id": null, "source_id": null, "label": "BE@TP1",
+          "entry_policy": {"entry_style": "limit", "ttl_minutes": 60},
+          "exit_policy": {
+            "cancel_pending_on_stop": true,
+            "sl_rules": [
+              {"trigger": {"type": "tp_hit", "index": 1},
+               "action": {"type": "move_sl_to", "target": "entry"}}
+            ]
+          }
+        },
+        {
+          "account_id": 1, "source_id": 7, "label": "BE@TP2 (src 7)",
+          "exit_policy": {
+            "sl_rules": [
+              {"trigger": {"type": "tp_hit", "index": 2},
+               "action": {"type": "move_sl_to", "target": "entry"}}
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "staged_entry",
+      "strategies": [
+        {
+          "account_id": null, "source_id": null, "label": "staged",
+          "entry_policy": {
+            "entry_style": "staged", "ttl_minutes": 60,
+            "staged": {"enabled": true, "toe_in_tps": 1, "runner_tps": 1,
+                       "min_stop_atr": 0.3, "reclaim_break_atr": 0.35}
+          },
+          "exit_policy": {
+            "cancel_pending_on_stop": true,
+            "sl_rules": [
+              {"trigger": {"type": "tp_hit", "index": 1},
+               "action": {"type": "move_sl_to", "target": "entry"}}
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

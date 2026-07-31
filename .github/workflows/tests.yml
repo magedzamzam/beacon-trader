@@ -42,4 +42,10 @@ jobs:
         # services/api/tests   -> write-side validation for the Entry/Filtration/Exit
         #                        pillars: what config is allowed to reach the DB and
         #                        therefore the executor and monitor (#165)
-        run: pytest packages/core/tests services/executor/tests services/api/tests -q
+        # services/replay/tests -> the offline replay harness (#169). Includes the
+        #                        import-graph test proving no order-placing symbol is
+        #                        reachable from it — the isolation the operator asked
+        #                        for is enforced in CI, not described in a docstring.
+        run: >
+          pytest packages/core/tests services/executor/tests services/api/tests
+          services/replay/tests -q

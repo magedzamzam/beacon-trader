@@ -65,8 +65,11 @@ have an **AI layer validate signals, executions, and outcomes**. Phase 1 targets
 | `executor` | Consumes validated signals; plans the fanout, sizes each leg, optional AI pre-trade review/gate, places orders |
 | `monitor`  | Reconciles vs broker; detects TP/SL closes; applies SL-move rules; TTLs; AI outcome analysis on close |
 | `frontend` | React + Vite + nginx; dark/light trading terminal UI (Messages, Activity, AI pages) |
+| `replay`   | **Research, not trading** (#169). Offline signal replay + backtest harness: re-runs the signal history through the same pure engines under alternative configs. Behind a `research` compose profile, so it never starts with the stack; no broker credentials, SELECT-only DB role, writes only `replay_*`. See `services/replay/README.md` |
 
 PostgreSQL is **external/managed** — you provide `DATABASE_URL` at install.
+`replay` additionally needs `REPLAY_DATABASE_URL`, a **separate SELECT-only role**
+(`services/replay/sql/replay_role.sql`) — it deliberately cannot use the trading DSN.
 
 The broker gateway is a clean adapter interface (`beacon_core.brokers.base`).
 Capital.com ships in the box; adding a broker is one class + a registry entry.
@@ -205,6 +208,7 @@ packages/core/beacon_core/   shared library (baked into each image)
   {config,bus,tasks,timeutil,crypto,settings_store,logging,health}.py   infra
   tests/         pure-Python unit tests (run on a bare box)
 services/     api · telegram · executor · monitor  (each: Dockerfile + code)
+              replay/   offline replay + backtest harness (research; #169)
 frontend/     React + Vite + nginx  (Dashboard · Analytics · Brokers · …)
 scripts/      init_db.py
 ```

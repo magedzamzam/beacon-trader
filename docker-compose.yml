@@ -56,6 +56,38 @@ services:
       redis:
         condition: service_healthy
 
+  # Offline replay + backtest harness (#169). RESEARCH, not trading.
+  #
+  # Deliberately different from every service above, and each difference is the
+  # isolation the operator asked for:
+  #   * `profiles: [research]` — `docker compose up -d` does NOT start it. It is
+  #     run explicitly:  docker compose run --rm replay python main.py run --config ...
+  #     A service that is not running cannot disturb one that is, and
+  #     `docker compose stop replay` is trivially a no-op on trading.
+  #   * an explicit `environment:` block instead of `env_file: .env` — the
+  #     Capital.com credentials are not in this container's environment at all.
+  #   * REPLAY_DATABASE_URL, a SELECT-only role (services/replay/sql/replay_role.sql).
+  #     It is NOT given DATABASE_URL.
+  #   * no `depends_on: redis` — it never touches the bus, the durable queue or
+  #     CH_SIGNAL_VALID.
+  #   * cpu/memory ceilings, because `monitor` manages OPEN POSITIONS on a tick
+  #     loop against the same box and must win every scheduling contest.
+  replay:
+    profiles: ["research"]
+    build:
+      context: .
+      dockerfile: services/replay/Dockerfile
+    restart: "no"
+    environment:
+      REPLAY_DATABASE_URL: ${REPLAY_DATABASE_URL}
+    volumes:
+      - ./services/replay/runs:/app/runs
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+
   frontend:
     build:
       context: ./frontend
