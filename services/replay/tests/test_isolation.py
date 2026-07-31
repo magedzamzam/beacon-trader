@@ -111,11 +111,72 @@ def test_the_runtime_import_graph_of_the_entrypoint_holds_no_broker_module():
 
 
 def test_create_all_cannot_emit_ddl_for_a_trading_table():
-    from harness.models import REPLAY_TABLES, ReplayBase
-    assert set(ReplayBase.metadata.tables) == set(REPLAY_TABLES)
+    from harness.models import QUALIFIED_TABLES, ReplayBase
+    assert set(ReplayBase.metadata.tables) == set(QUALIFIED_TABLES)
     for forbidden in ("trades", "legs", "signals", "position_activities",
                       "execution_strategies", "settings", "candles"):
         assert forbidden not in ReplayBase.metadata.tables
+        assert f"public.{forbidden}" not in ReplayBase.metadata.tables
+
+
+def test_every_replay_table_lives_in_the_replay_schema():
+    """The harness owns `replay` and has NO create privilege in `public`. A model
+    that forgot its `__table_args__` schema would try to create a table next to
+    the trading ones — which is both an isolation hole and a hard failure at
+    deploy, since the role cannot create there."""
+    from harness.models import REPLAY_SCHEMA, ReplayBase
+    for name, table in ReplayBase.metadata.tables.items():
+        assert table.schema == REPLAY_SCHEMA, f"{name} is not in {REPLAY_SCHEMA}"
+
+
+def test_the_replay_schema_is_not_named_after_the_role():
+    """The default `search_path` is `"$user", public`. A schema named
+    `beacon_replay` would shadow `public` for that role, so an unqualified read
+    of `signals` could resolve somewhere other than the trading table."""
+    from harness.models import REPLAY_SCHEMA
+    assert REPLAY_SCHEMA == "replay"
+
+
+def test_the_role_sql_grants_no_write_on_the_trading_schema():
+    """The grant script is the isolation. Reviewing it by eye is how the first
+    version shipped a GRANT that could not run, so the invariants are asserted."""
+    sql = (SERVICE_ROOT / "sql" / "replay_role.sql").read_text(encoding="utf-8")
+    body = sql.split("=== VERIFY", 1)[0]
+    statements = [s.strip() for s in body.split(";")
+                  if s.strip() and not s.strip().startswith("--")]
+    for stmt in statements:
+        head = "\n".join(l for l in stmt.splitlines()
+                         if not l.strip().startswith("--")).upper()
+        if head.startswith("GRANT") and " ON SCHEMA PUBLIC" in head:
+            assert "CREATE" not in head.split(" ON SCHEMA PUBLIC")[0], \
+                "the replay role must never get CREATE on public"
+        if head.startswith("GRANT") and "IN SCHEMA PUBLIC" in head:
+            for verb in ("INSERT", "UPDATE", "DELETE", "TRUNCATE"):
+                assert verb not in head.split("ON ALL TABLES")[0], \
+                    f"the replay role must never get {verb} on public"
+
+
+def test_the_role_sql_has_no_grant_on_an_object_that_cannot_exist_yet():
+    """The first cut of this script ended with `GRANT … ON replay_runs,
+    replay_results` and a grant on their sequences — statements that CANNOT run,
+    because nothing has created those objects at that point and the role had no
+    privilege to create them. Owning a schema removed the need entirely; this
+    keeps it removed."""
+    sql = (SERVICE_ROOT / "sql" / "replay_role.sql").read_text(encoding="utf-8")
+    body = sql.split("=== VERIFY", 1)[0].upper()
+    assert "ON REPLAY_RUNS" not in body
+    assert "ON SEQUENCE" not in body
+    assert "CREATE SCHEMA REPLAY AUTHORIZATION" in body
+
+
+def test_the_role_sql_scopes_default_privileges_to_the_table_owner():
+    """`ALTER DEFAULT PRIVILEGES` without `FOR ROLE` follows whoever RAN it, not
+    whoever creates the tables. Omitting it scopes the rule to the superuser
+    while `create_all` runs as the app role — so the next table added to
+    models.py would be invisible to the harness for no discoverable reason."""
+    sql = (SERVICE_ROOT / "sql" / "replay_role.sql").read_text(encoding="utf-8")
+    body = sql.split("=== VERIFY", 1)[0].upper()
+    assert "ALTER DEFAULT PRIVILEGES FOR ROLE" in body
 
 
 def test_the_replay_base_is_not_the_trading_base():

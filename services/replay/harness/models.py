@@ -26,6 +26,22 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 NUM = Numeric(18, 6)
 
+# The harness's own schema, OWNED by the replay role. This is what resolves the
+# chicken-and-egg the first cut of `sql/replay_role.sql` walked into: a role with
+# only USAGE on `public` cannot run `create_all` (no CREATE), and the follow-up
+# GRANT could not be written either, because the tables it names do not exist
+# until that create_all has run.
+#
+# Owning a schema fixes both ends AND tightens the isolation rather than
+# loosening it: the alternative — granting CREATE on `public` — would let the
+# harness create objects alongside the trading tables. Here it has zero CREATE
+# in `public`, full rights in `replay`, and needs no follow-up grant ever.
+#
+# Named `replay`, deliberately NOT `beacon_replay`: the default `search_path` is
+# `"$user", public`, so a schema sharing the role's name would silently shadow
+# `public` and an unqualified read of `signals` could resolve to the wrong place.
+REPLAY_SCHEMA = "replay"
+
 
 class ReplayBase(DeclarativeBase):
     pass
@@ -41,6 +57,7 @@ class ReplayRun(ReplayBase):
     backtests is upward-biased by construction — a result read without its N is
     misleading, so N is a column, not a caveat someone might forget (§8.2)."""
     __tablename__ = "replay_runs"
+    __table_args__ = {"schema": REPLAY_SCHEMA}
     id: Mapped[int] = mapped_column(primary_key=True)
     label: Mapped[str | None] = mapped_column(String(96), nullable=True)
     signal_source: Mapped[str] = mapped_column(String(64), default="historical")
@@ -83,9 +100,11 @@ class ReplayResult(ReplayBase):
         UniqueConstraint("run_id", "variant", "signal_id", "account_id",
                          name="uq_replay_result"),
         Index("ix_replay_results_run_variant", "run_id", "variant"),
+        {"schema": REPLAY_SCHEMA},
     )
     id: Mapped[int] = mapped_column(primary_key=True)
-    run_id: Mapped[int] = mapped_column(ForeignKey("replay_runs.id"), index=True)
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey(f"{REPLAY_SCHEMA}.replay_runs.id"), index=True)
     variant: Mapped[str] = mapped_column(String(96))
     signal_id: Mapped[int] = mapped_column(Integer, index=True)
     source_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
@@ -113,6 +132,10 @@ class ReplayResult(ReplayBase):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
-# Every table this service is allowed to write. Asserted by the isolation test,
-# so a future model added to the wrong Base fails CI rather than production.
+# Every table this service is allowed to write, unqualified. Asserted by the
+# isolation test, so a future model added to the wrong Base — or to the wrong
+# schema — fails CI rather than production.
 REPLAY_TABLES = ("replay_runs", "replay_results")
+
+# The same set as `create_all` sees them: schema-qualified.
+QUALIFIED_TABLES = tuple(f"{REPLAY_SCHEMA}.{t}" for t in REPLAY_TABLES)

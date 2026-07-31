@@ -6,7 +6,8 @@ ISOLATION, in code as well as in grants:
     container is given a SELECT-only role (see `sql/replay_role.sql`); the code
     never sees the trading DSN, so a bug cannot promote itself to a write.
   * `create_all` runs on `ReplayBase.metadata` only, which contains exactly two
-    tables and has never been told a trading table exists.
+    tables — both in the `replay` SCHEMA the role owns — and has never been told
+    a trading table exists. The role holds no CREATE in `public` whatsoever.
   * No queue participation: nothing here touches `bus`, `consume_queue` or
     `CH_SIGNAL_VALID`. The executor's durable queue is not a place a research
     job belongs, and dropping a message off it would be indistinguishable from
@@ -32,7 +33,7 @@ from beacon_core.db.models import (Account, Candle, Leg, Signal, Source,
 from beacon_core.parsing.models import ParsedSignal
 
 from . import bars as B
-from .models import ReplayBase, ReplayResult, ReplayRun
+from .models import REPLAY_SCHEMA, ReplayBase, ReplayResult, ReplayRun
 from .portfolio import SignalRow
 from .variants import canonical_digest
 
@@ -73,9 +74,26 @@ def Session() -> async_sessionmaker:
 
 
 async def init_replay_tables() -> None:
-    """Create `replay_runs` / `replay_results` if absent. Only ever emits DDL for
-    this service's own metadata — see the module docstring."""
+    """Create `replay.replay_runs` / `replay.replay_results` if absent. Only ever
+    emits DDL for this service's own metadata — see the module docstring.
+
+    The SCHEMA is not created here. Creating one needs a database-level privilege
+    the replay role deliberately does not hold; the operator grants it once with
+    `CREATE SCHEMA replay AUTHORIZATION beacon_replay`, and from then on the role
+    OWNS the schema and needs no further grant. Checked explicitly so a missing
+    grant says what to run, instead of surfacing as a bare `permission denied for
+    schema replay` from three frames inside SQLAlchemy."""
     async with engine().begin() as conn:
+        exists = (await conn.exec_driver_sql(
+            "SELECT 1 FROM information_schema.schemata "
+            f"WHERE schema_name = '{REPLAY_SCHEMA}'")).scalar()
+        if not exists:
+            raise RuntimeError(
+                f"schema '{REPLAY_SCHEMA}' does not exist. The replay role owns "
+                "its own schema so it never needs CREATE in public. Run this "
+                "once, as a superuser:\n\n"
+                f"    CREATE SCHEMA {REPLAY_SCHEMA} AUTHORIZATION beacon_replay;\n\n"
+                "See services/replay/sql/replay_role.sql.")
         await conn.run_sync(ReplayBase.metadata.create_all)
 
 

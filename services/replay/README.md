@@ -22,7 +22,7 @@ Non-negotiable, and enforced by construction rather than by convention
 | No broker credentials | explicit `environment:` block in compose, **not** `env_file: .env` |
 | No order-placing code reachable | import-graph test over the entrypoint, statically (AST) and at runtime (`sys.modules`) |
 | Read-only DB | `REPLAY_DATABASE_URL` → a SELECT-only role (`sql/replay_role.sql`). It is **not** given `DATABASE_URL`, and a missing value is a startup error, never a fallback |
-| Writes only its own tables | `ReplayBase` is a separate declarative base; `create_all` here has never heard of `trades` |
+| Writes only its own tables | `ReplayBase` is a separate declarative base; `create_all` here has never heard of `trades`. Its tables live in a `replay` schema the role **owns**, and it holds no `CREATE` in `public` at all |
 | No queue participation | nothing imports `bus`, `consume_queue` or `CH_SIGNAL_VALID` |
 | Resource-bounded | cpu/memory limits in compose + `nice -n 19`, because `monitor` manages open positions on a tick loop |
 
@@ -178,7 +178,10 @@ producer, and shadow forward-R, and only then a weekend config act on one arm.
 ## 8. Running it
 
 ```bash
-# 0. once: create the SELECT-only role and put its DSN in .env
+# 0. once: create the SELECT-only role + its own schema, then put the DSN in .env.
+#    Edit the placeholders first (password, database name, and `beacon_app` ->
+#    whoever OWNS the trading tables). The file ends with a VERIFY section and a
+#    decisive "try to write and be refused" test — run both before deploying.
 psql -f services/replay/sql/replay_role.sql
 # REPLAY_DATABASE_URL=postgresql+asyncpg://beacon_replay:...@host:5432/beacon
 
@@ -197,9 +200,12 @@ the report without writing.
 
 ## 9. Results
 
-`replay_runs` (one per execution: selector, window, `n_variants`, `git_sha`,
-`config_digest`, `candle_digest`, the full summary) and `replay_results` (one
-row per simulated trade **and** per declined signal, with leg outcome labels).
+`replay.replay_runs` (one per execution: selector, window, `n_variants`,
+`git_sha`, `config_digest`, `candle_digest`, the full summary) and
+`replay.replay_results` (one row per simulated trade **and** per declined
+signal, with leg outcome labels). Both in the `replay` schema the role owns —
+so `create_all` needs no privilege in `public`, and there is never a follow-up
+grant to remember.
 Trade-grained on purpose — trade-level P&L is the only trustworthy basis
 (CLAUDE.md §2.5).
 
