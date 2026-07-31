@@ -11,10 +11,10 @@ from harness import validate
 
 
 def _legs(n, *, outcome="tp_hit", live_outcome=None, fill=4000.0,
-          live_fill=4000.0):
-    sim = [{"signal_id": i, "account_id": 1, "tp_index": 1,
+          live_fill=4000.0, direction="BUY"):
+    sim = [{"signal_id": i, "account_id": 1, "tp_index": 1, "direction": direction,
             "fill_price": fill, "outcome": outcome} for i in range(n)]
-    live = [{"signal_id": i, "account_id": 1, "tp_index": 1,
+    live = [{"signal_id": i, "account_id": 1, "tp_index": 1, "direction": direction,
              "fill_price": live_fill, "outcome": live_outcome or outcome}
             for i in range(n)]
     return sim, live
@@ -114,6 +114,33 @@ def test_no_comparable_data_fails_rather_than_passing_vacuously():
     rep = validate.report([], [], [], [])
     assert rep["gate"]["passed"] is False
     assert rep["gate"]["failures"]
+
+
+def test_a_pooled_fill_delta_hides_a_systematic_entry_advantage():
+    """The defect this metric was split to fix. A harness that fills 0.5 better
+    on every trade averages to ZERO in the raw (sim - live) figure, because a
+    BUY filling lower and a SELL filling higher are opposite signs and cancel."""
+    buy_s, buy_l = _legs(10, fill=3999.5, live_fill=4000.0, direction="BUY")
+    sell_s, sell_l = _legs(10, fill=4000.5, live_fill=4000.0, direction="SELL")
+    for i, row in enumerate(sell_s):
+        row["signal_id"] = sell_l[i]["signal_id"] = 100 + i
+    out = validate.compare(buy_s + sell_s, buy_l + sell_l)
+    assert out["fill"]["mean"] == 0.0                 # cancels — reads as clean
+    assert out["fill_adverse"]["mean"] == -0.5        # and is caught here
+
+
+def test_positive_adverse_delta_means_the_simulation_got_the_worse_fill():
+    buy_s, buy_l = _legs(5, fill=4000.5, live_fill=4000.0, direction="BUY")
+    assert validate.compare(buy_s, buy_l)["fill_adverse"]["mean"] == 0.5
+    sell_s, sell_l = _legs(5, fill=3999.5, live_fill=4000.0, direction="SELL")
+    assert validate.compare(sell_s, sell_l)["fill_adverse"]["mean"] == 0.5
+
+
+def test_an_unknown_direction_is_excluded_rather_than_signed_by_guess():
+    sim, live = _legs(5, fill=4000.5, live_fill=4000.0, direction=None)
+    out = validate.compare(sim, live)
+    assert out["fill"]["n"] == 5          # the raw difference is still measurable
+    assert out["fill_adverse"]["n"] == 0  # the signed one is not invented
 
 
 def test_the_unmodelled_execution_failures_are_named_in_the_report():

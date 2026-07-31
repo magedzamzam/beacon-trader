@@ -222,7 +222,8 @@ async def load_live_truth(session, *, symbol: str = "XAUUSD", frm=None, to=None)
     trustworthy, leg-level is not (CLAUDE.md §2.5), so the leg rows carry outcome
     LABELS only and no money."""
     q = (select(Trade.signal_id, Trade.account_id, Trade.realized_pl,
-                Trade.planned_risk, Leg.tp_index, Leg.fill_price, Leg.outcome)
+                Trade.planned_risk, Trade.direction, Leg.tp_index,
+                Leg.fill_price, Leg.outcome)
          .join(Leg, Leg.trade_id == Trade.id)
          .where(Trade.symbol == symbol))
     if frm is not None:
@@ -230,9 +231,13 @@ async def load_live_truth(session, *, symbol: str = "XAUUSD", frm=None, to=None)
     if to is not None:
         q = q.where(Trade.created_at < to)
     legs, trades, seen = [], [], set()
-    for sid, aid, pl, risk, tp_index, fill, outcome in (
+    for sid, aid, pl, risk, direction, tp_index, fill, outcome in (
             await session.execute(q.order_by(Trade.signal_id, Leg.id))).all():
+        # `direction` rides along so the fill difference can be re-signed into
+        # "who got the worse entry" — pooled across BUY and SELL it is not a
+        # bias, and a systematic entry advantage would average to nothing.
         legs.append({"signal_id": sid, "account_id": aid, "tp_index": tp_index,
+                     "direction": direction,
                      "fill_price": None if fill is None else float(fill),
                      "outcome": outcome})
         if (sid, aid) in seen:
@@ -383,8 +388,8 @@ def sim_legs_for_validation(res) -> tuple:
                        "r": (float(t.realized_pl) / abs(risk)) if risk else None})
         for l in t.legs:
             legs.append({"signal_id": t.signal_id, "account_id": t.account_id,
-                         "tp_index": l.tp_index, "fill_price": l.fill_price,
-                         "outcome": l.outcome})
+                         "tp_index": l.tp_index, "direction": t.direction,
+                         "fill_price": l.fill_price, "outcome": l.outcome})
     return legs, trades
 
 

@@ -78,16 +78,26 @@ def compare(sim_legs: Sequence[dict], live_legs: Sequence[dict]) -> dict:
         (x is None, x) for x in k))
 
     fill_deltas: List[float] = []
+    adverse_deltas: List[float] = []
     outcome_n = outcome_ok = 0
     label_mismatch = 0
     rows: List[dict] = []
     for k in matched:
         s, lv = sim_by[k], live_by[k]
         sf, lf = _pos(s.get("fill_price")), _pos(lv.get("fill_price"))
-        d_fill = None
+        d_fill = d_adv = None
         if sf is not None and lf is not None:
             d_fill = sf - lf
             fill_deltas.append(d_fill)
+            # Raw (sim - live) pools BUY and SELL and is therefore NOT a bias:
+            # paying 0.3 more on a BUY and receiving 0.3 more on a SELL are
+            # opposite outcomes that cancel in the mean, so a harness with a
+            # systematic entry advantage can average to zero. Re-sign it so
+            # POSITIVE always means the simulation got the WORSE fill.
+            d_adv = _adverse_delta(s.get("direction") or lv.get("direction"),
+                                   sf, lf)
+            if d_adv is not None:
+                adverse_deltas.append(d_adv)
         agree = None
         if lf is not None:                       # only filled legs have an outcome
             agree = _same_outcome(s.get("outcome"), lv.get("outcome"))
@@ -98,7 +108,8 @@ def compare(sim_legs: Sequence[dict], live_legs: Sequence[dict]) -> dict:
                     label_mismatch += 1
         rows.append({"signal_id": k[0], "account_id": k[1], "tp_index": k[2],
                      "sim_outcome": s.get("outcome"), "live_outcome": lv.get("outcome"),
-                     "outcome_agrees": agree, "delta_fill": d_fill})
+                     "outcome_agrees": agree, "delta_fill": d_fill,
+                     "delta_fill_adverse": d_adv})
 
     return {
         "n_matched_legs": len(matched),
@@ -108,7 +119,14 @@ def compare(sim_legs: Sequence[dict], live_legs: Sequence[dict]) -> dict:
             "agreement_rate": round(outcome_ok / outcome_n, 4) if outcome_n else None,
             "n_stop_family_relabels": label_mismatch,
         },
-        "fill": _dist(fill_deltas, "delta_fill (sim - live), instrument points"),
+        "fill": _dist(fill_deltas, "delta_fill (sim - live), instrument points "
+                                   "— pooled across BUY and SELL, so the MEAN "
+                                   "is not a bias; read fill_adverse for that"),
+        "fill_adverse": _dist(
+            adverse_deltas,
+            "delta_fill re-signed so POSITIVE = the simulation got the WORSE "
+            "entry. A negative mean is the harness giving itself better fills "
+            "than live got, which flatters every variant it ranks."),
         "rows": rows,
     }
 
@@ -213,6 +231,22 @@ def _num(v) -> Optional[float]:
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+def _adverse_delta(direction, sim_fill: float, live_fill: float) -> Optional[float]:
+    """Fill difference re-signed so POSITIVE always means the simulation got the
+    WORSE entry, whichever way the trade was going.
+
+    A BUY pays: a higher fill is worse. A SELL receives: a higher fill is
+    better. Pooling the raw difference across both lets a systematic entry
+    advantage average to zero, which is the one thing this measurement exists to
+    catch. None when the direction is unknown — guessing it would invent a sign."""
+    d = str(direction or "").upper()
+    if d == "BUY":
+        return sim_fill - live_fill
+    if d == "SELL":
+        return live_fill - sim_fill
+    return None
 
 
 def _pos(v) -> Optional[float]:
