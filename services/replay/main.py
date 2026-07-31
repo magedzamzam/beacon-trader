@@ -55,6 +55,7 @@ from pathlib import Path
 
 from sqlalchemy import text
 
+from harness import bars as B
 from harness import runner as R
 from harness import scaffold, store, validate
 from harness.models import REPLAY_SCHEMA
@@ -152,7 +153,7 @@ async def cmd_scaffold(args) -> int:
     async with store.Session()() as session:
         cfg = await store.load_live_config(
             session, symbol=args.symbol, equity=equity, frm=args.since,
-            holdout_from=args.holdout_from)
+            to=args.to, holdout_from=args.holdout_from)
     out = Path(args.out)
     if out.exists() and not args.force:
         print(json.dumps({"ok": False, "error": f"{out} exists; pass --force to "
@@ -242,6 +243,13 @@ async def cmd_coverage(args) -> int:
         frm = _dt(args.since)
         over = sum(1 for b in series.bars if frm is None or b.ts >= frm)
         signals = await store.load_signals(session, symbol=args.symbol, frm=frm)
+        last_bar = series.last_ts
+        # Signals the candle store does not reach are EXCLUSIONS, and they are
+        # counted here rather than discovered as `no_candle_coverage` rows after
+        # a run. The tail matters more than it looks: the feed lags live, so the
+        # newest signals — the ones an operator is most curious about — are
+        # exactly the ones most likely to be uncovered.
+        uncovered = [s for s in signals if last_bar and s.at > last_bar]
         print(json.dumps({
             "candles": series.coverage(),
             "bars_over_live_window": over,
@@ -249,10 +257,19 @@ async def cmd_coverage(args) -> int:
             "n_signals_in_window": len(signals),
             "first_signal": min((s.at for s in signals), default=None),
             "last_signal": max((s.at for s in signals), default=None),
+            "n_signals_after_last_candle": len(uncovered),
+            "n_signals_evaluable": len(signals) - len(uncovered),
+            "candle_lag_behind_last_signal": (
+                str(max((s.at for s in signals), default=last_bar) - last_bar)
+                if last_bar and signals else None),
+            "gaps": B.daily_gaps(series.bars, frm=frm),
             "note": ("bars_over_live_window == 0 means the validation gate has "
                      "nothing to validate against. suspect_excluded is the "
                      "crossed-quote/outlier count that every result must carry "
-                     "as a caveat."),
+                     "as a caveat. Signals after the last candle are EXCLUDED, "
+                     "not scored — bound the run with `to` (or scaffold --to) to "
+                     "keep them out of the comparison rather than counting as "
+                     "trades the harness failed to reproduce."),
         }, indent=2, default=str))
     return 0
 
@@ -288,6 +305,12 @@ def build_parser() -> argparse.ArgumentParser:
                         'the budget is.')
     s.add_argument("--symbol", default="XAUUSD")
     s.add_argument("--since", default=None, help="signal window start (ISO-8601)")
+    s.add_argument("--to", default=None,
+                   help="signal window END (ISO-8601). Set it to the LAST CANDLE "
+                        "when the feed lags live: signals past the candle store "
+                        "cannot be replayed, and leaving them in makes the "
+                        "validation gate count them as trades the harness failed "
+                        "to reproduce. `coverage` prints the boundary.")
     s.add_argument("--holdout-from", dest="holdout_from", default=None)
     s.add_argument("--force", action="store_true", help="overwrite --out")
 

@@ -170,6 +170,56 @@ class BarSeries:
                 "suspect_excluded": self.suspect_excluded}
 
 
+# --- gap audit ----------------------------------------------------------------
+# A trading day materially below the median is a HOLE, not a quiet session.
+THIN_DAY_FRACTION = 0.5
+_ONE_DAY = dt.timedelta(days=1)
+
+
+def daily_gaps(bars: Sequence[Bar], *, frm=None,
+               thin_fraction: float = THIN_DAY_FRACTION) -> dict:
+    """Per-day bar counts, and the weekdays that are missing or thin (#169 §3).
+
+    Aggregate density cannot see this. A window can be 70% populated — exactly
+    what a five-day-a-week instrument should be — while one Tuesday is absent
+    entirely, and every signal on that Tuesday would then replay against a price
+    series that simply stops, resolving by horizon rather than by the market.
+    The issue is explicit that gaps must be KNOWN rather than silently treated
+    as flat price, so they are counted rather than inferred from a total.
+
+    Weekends are absent by design and are excluded from the median and from the
+    missing list. A weekday with NO bars is missing; one below `thin_fraction`
+    of the weekday median is thin. Pure."""
+    per_day: dict = {}
+    for b in bars:
+        if frm is not None and b.ts < frm:
+            continue
+        per_day[b.ts.date()] = per_day.get(b.ts.date(), 0) + 1
+    if not per_day:
+        return {"n_days": 0, "median_weekday_bars": None,
+                "missing_weekdays": [], "thin_weekdays": []}
+
+    counts = sorted(n for d, n in per_day.items() if d.weekday() < 5)
+    median = counts[len(counts) // 2] if counts else 0
+
+    missing, thin = [], []
+    day, end = min(per_day), max(per_day)
+    while day <= end:
+        if day.weekday() < 5:                          # Mon-Fri
+            n = per_day.get(day, 0)
+            if n == 0:
+                missing.append(day.isoformat())
+            elif median and n < thin_fraction * median:
+                thin.append({"date": day.isoformat(), "n_bars": n})
+        day = day + _ONE_DAY
+    return {"n_days": len(per_day), "median_weekday_bars": median or None,
+            "missing_weekdays": missing, "thin_weekdays": thin,
+            "note": ("Weekends are absent by design and excluded. A MISSING or "
+                     "THIN weekday is a hole: signals on it replay against a "
+                     "price series that stops, so they resolve by horizon "
+                     "rather than by the market.")}
+
+
 # --- resampling (for the TA context the filtration pillar reads) --------------
 _TF_MINUTES = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240,
                "1d": 1440}
