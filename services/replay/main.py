@@ -4,10 +4,15 @@ A BATCH JOB, not a daemon. There is no loop, no queue consumer and no HTTP
 server, because the safest way to be incapable of disturbing live trading is to
 not be running. It is invoked explicitly, and in this order:
 
-    docker compose run --rm replay python main.py init        # once, after the SQL
-    docker compose run --rm replay python main.py coverage
-    docker compose run --rm replay python main.py validate --config runs/live.json
-    docker compose run --rm replay python main.py run --config runs/exit.json
+    docker compose build replay                               # code is COPYed in
+    docker compose run --rm --no-deps replay python main.py init
+    docker compose run --rm --no-deps replay python main.py coverage
+    docker compose run --rm --no-deps replay python main.py validate --config runs/live.json
+    docker compose run --rm --no-deps replay python main.py run --config runs/exit.json
+
+`--no-deps` every time: the service declares no `depends_on`, so there is
+nothing to start — but `run` is a command that CAN start other containers, and
+this one must never be the reason a trading service changes state.
 
 `init` creates the two `replay.*` tables. It exists so the first proof that the
 DB grant works costs two seconds rather than a completed sweep — every other

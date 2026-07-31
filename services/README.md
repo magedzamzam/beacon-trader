@@ -24,8 +24,13 @@ above is the isolation the operator asked for, and each is enforced by a test in
 * **A batch job, not a daemon.** No loop, no `/healthz`, no queue consumer. It
   runs behind a compose `research` profile — `docker compose up -d` does not
   start it — and is invoked explicitly:
-  `docker compose run --rm replay python main.py run --config runs/…json`.
+  `docker compose run --rm --no-deps replay python main.py run --config runs/…json`.
   So "stopping replay leaves trading unaffected" is true by construction.
+  Always `--no-deps`, and never `--remove-orphans`: `run` is a command that can
+  start containers and `--remove-orphans` is one that can delete them, and
+  neither should ever be triggered by a research job.
+* **Rebuild after any change.** The code is `COPY`d into the image, exactly as
+  for the four above (CLAUDE.md §6) — `docker compose build replay`.
 * **No broker credentials.** An explicit `environment:` block instead of
   `env_file: .env`, and an import-graph test proving no order-placing symbol is
   reachable from its entrypoint.

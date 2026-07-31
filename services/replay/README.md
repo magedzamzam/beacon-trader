@@ -186,22 +186,34 @@ producer, and shadow forward-R, and only then a weekend config act on one arm.
 psql -f services/replay/sql/replay_role.sql
 # REPLAY_DATABASE_URL=postgresql+asyncpg://beacon_replay:...@host:5432/beacon
 
-# 1. create the two replay.* tables. Two seconds, and it is the ONLY write this
+# 1. the code is COPYed into the image, so ANY change needs a rebuild
+#    (CLAUDE.md 6). A stale image is the one failure mode that looks like a
+#    code bug and is not.
+git pull && docker compose build replay
+
+# 2. create the two replay.* tables. Two seconds, and it is the ONLY write this
 #    service ever makes - so it is the cheap proof that the grant works.
-docker compose run --rm replay python main.py init
+docker compose run --rm --no-deps replay python main.py init
 
-# 2. do the candles even cover the live signal window?
-docker compose run --rm replay python main.py coverage --since 2026-07-05T00:00:00Z
+# 3. do the candles even cover the live signal window?
+docker compose run --rm --no-deps replay python main.py coverage --since 2026-07-05T00:00:00Z
 
-# 3. does the harness reproduce reality? (exits non-zero if not)
-docker compose run --rm replay python main.py validate --config runs/live-config.json
+# 4. does the harness reproduce reality? (exits non-zero if not)
+docker compose run --rm --no-deps replay python main.py validate --config runs/live-config.json
 
-# 4. only then, sweep
-docker compose run --rm replay python main.py run --config runs/example-exit-ladder.json
+# 5. only then, sweep
+docker compose run --rm --no-deps replay python main.py run --config runs/example-exit-ladder.json
 ```
 
 `run` performs the same init before it simulates anything, so a grant problem
 fails in seconds rather than after a completed sweep.
+
+**Always `--no-deps`.** The service declares no `depends_on`, so there is
+nothing for compose to start — but `docker compose run` is a command that CAN
+start other containers, and this one must never be the reason a trading service
+changes state. `--no-deps` removes the question. Likewise never pass
+`--remove-orphans`: that acts on the whole project and would delete containers
+that are not in `docker-compose.yml` but may be doing something.
 
 `check --config` validates a run file offline (no DB). `run --dry-run` prints
 the report without writing.
