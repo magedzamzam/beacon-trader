@@ -598,6 +598,12 @@ class SignalExcursion(Base):
     horizon_capped: Mapped[bool] = mapped_column(Boolean, default=False)
     horizon_bars: Mapped[int] = mapped_column(Integer, default=1440)
     n_bars: Mapped[int] = mapped_column(Integer, default=0)
+    # When the replay window opened, and how precisely we know that. Leg rows
+    # carry a fill PRICE but no fill TIME, so the fill basis times itself off the
+    # `events` audit trail — filled | staged_deployed | placed | trade (fallback),
+    # see excursion_store.FILL_EVENT_KINDS. 'signal' on the signal basis.
+    entry_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    clock_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
     computed_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

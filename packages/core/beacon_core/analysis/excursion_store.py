@@ -13,7 +13,8 @@ Two bases, because they answer different questions:
              we skipped, filtered, risk-blocked or never filled. That is the only
              way to score what a filter REJECTED, and it takes the labelled set
              from ~519 filled trades to the full signal history.
-  `fill`   — our actual fill. The gap to the signal basis is the execution cost.
+  `fill`   — our actual fill, timed off the `events` audit trail rather than the
+             trade row. The gap to the signal basis is the execution cost.
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ from typing import Optional
 
 from sqlalchemy import func, select
 
-from ..db.models import Candle, Leg, Signal, SignalExcursion, Trade
+from ..db.models import Candle, Event, Leg, Signal, SignalExcursion, Trade
 from ..logging import get_logger
 from .excursion import DEFAULT_HORIZON_BARS, LADDER, excursion
 
@@ -79,13 +80,64 @@ def _window(ts: list, bars: list, start, horizon_bars: int) -> list:
     return bars[i:i + horizon_bars]
 
 
+# The entry clock, in descending order of precision. Leg rows carry a fill PRICE
+# but no fill TIME, so the instant comes from the `events` audit trail:
+#
+#   filled           the monitor saw a working order become a position — the only
+#                    record of when a resting LIMIT actually got hit. Bounded by
+#                    one monitor tick, which is inside the 1m bar either way.
+#   staged_deployed  a staged MARKET tranche; it opens on the spot, so the deploy
+#                    instant IS the fill instant (#129).
+#   placed           the executor's MARKET leg; placement and fill are the same
+#                    call, and legs are placed one at a time with a rate-limit
+#                    sleep between them, so this beats a shared trade timestamp.
+#
+# Ordered most- to least-precise; the first kind present for a leg wins.
+FILL_EVENT_KINDS = ("filled", "staged_deployed", "placed")
+CLOCK_TRADE = "trade"          # last resort: the trade row's creation time
+
+
+def pick_fill_entry(legs, events):
+    """The (trade_id, entry_price, entry_at, clock_source) our money actually
+    entered on, for ONE signal. Pure — the DB half is `_fill_basis`.
+
+    `legs`: [{leg_id, trade_id, fill_price, trade_created_at}] ·
+    `events`: {(leg_id, kind): ts}
+
+    A leg with no usable fill price is skipped — a stored 0 is an UNKNOWN fill,
+    not a fill at zero (#159). Of the rest we take the EARLIEST clock rather than
+    the lowest leg id: a fanout's legs fill at different times, and the excursion
+    window has to open when the first of them put money on the table."""
+    best = None
+    for leg in legs or []:
+        price = leg.get("fill_price")
+        if not price:
+            continue
+        at, source = None, CLOCK_TRADE
+        for kind in FILL_EVENT_KINDS:
+            ts = events.get((leg.get("leg_id"), kind))
+            if ts is not None:
+                at, source = ts, kind
+                break
+        if at is None:
+            at = leg.get("trade_created_at")
+        if at is None:
+            continue
+        key = (at, leg.get("leg_id") or 0)
+        if best is None or key < best[0]:
+            best = (key, (leg.get("trade_id"), float(price), at, source))
+    return None if best is None else best[1]
+
+
 async def _fill_basis(session, signal_ids: list) -> dict:
-    """{signal_id: (trade_id, entry_price, started_at)} for the actually-filled
-    trades. Entry is the earliest leg that has a real fill price; a stored 0 is an
-    UNKNOWN fill, not a fill at zero (#159), so it is skipped rather than trusted.
-    The clock starts at trade creation — the leg rows carry no fill TIME, and a
-    placement-time start is the conservative direction (it can only add adverse
-    travel before the entry, never remove it)."""
+    """{signal_id: (trade_id, entry_price, entry_at, clock_source)} for the
+    actually-filled trades, timed off the `events` audit trail (see
+    FILL_EVENT_KINDS).
+
+    This matters most where it used to be worst: a resting LIMIT entry can fill
+    hours after the trade row was created, and replaying from trade creation
+    credited the signal with every tick that printed while the order was still
+    unfilled — inventing excursion we were never in the market for."""
     if not signal_ids:
         return {}
     rows = (await session.execute(
@@ -93,11 +145,28 @@ async def _fill_basis(session, signal_ids: list) -> dict:
         .join(Leg, Leg.trade_id == Trade.id)
         .where(Trade.signal_id.in_(signal_ids))
         .order_by(Trade.signal_id, Trade.id, Leg.id))).all()
+    if not rows:
+        return {}
+
+    leg_ids = [r[4] for r in rows]
+    events: dict = {}
+    for leg_id, kind, ts in (await session.execute(
+            select(Event.leg_id, Event.kind, Event.ts)
+            .where(Event.leg_id.in_(leg_ids),
+                   Event.kind.in_(FILL_EVENT_KINDS))
+            .order_by(Event.ts))).all():
+        events.setdefault((leg_id, kind), ts)     # earliest wins (ordered by ts)
+
+    by_signal: dict = {}
+    for sid, tid, created, fill, leg_id in rows:
+        by_signal.setdefault(sid, []).append(
+            {"leg_id": leg_id, "trade_id": tid, "fill_price": fill,
+             "trade_created_at": created})
     out: dict = {}
-    for sid, tid, created, fill, _leg_id in rows:
-        if sid in out or not fill:
-            continue                      # first usable fill per signal wins
-        out[sid] = (tid, float(fill), created)
+    for sid, legs in by_signal.items():
+        picked = pick_fill_entry(legs, events)
+        if picked is not None:
+            out[sid] = picked
     return out
 
 
@@ -161,6 +230,9 @@ async def recompute(session, *, symbol: str = "XAUUSD", timeframe: str = "1m",
     counts = {"signals": len(signals), "no_coverage": 0, "no_geometry": 0,
               "resolved": 0, "horizon_capped": 0, "same_bar_ambiguous": 0,
               "written": 0, "fill_basis": 0}
+    # Where each fill-basis clock came from — the mix is the honest statement of
+    # how precisely the fill window is timed (see FILL_EVENT_KINDS).
+    clocks = {k: 0 for k in FILL_EVENT_KINDS + (CLOCK_TRADE,)}
     agree = {"n": 0, "agreed": 0}
 
     for s in signals:
@@ -174,11 +246,12 @@ async def recompute(session, *, symbol: str = "XAUUSD", timeframe: str = "1m",
         for basis in (BASIS_SIGNAL, BASIS_FILL):
             if basis == BASIS_SIGNAL:
                 entry, start, trade_id = entry_sig, s.created_at, None
+                clock = BASIS_SIGNAL
             else:
                 fb = fills.get(s.id)
                 if fb is None:
                     continue
-                trade_id, entry, start = fb
+                trade_id, entry, start, clock = fb
             win = _window(ts, bars, start, horizon_bars)
             if not win:
                 if basis == BASIS_SIGNAL:
@@ -199,9 +272,10 @@ async def recompute(session, *, symbol: str = "XAUUSD", timeframe: str = "1m",
                     agree["agreed"] += 1 if res["race"] == "sl" else 0
             else:
                 counts["fill_basis"] += 1
+                clocks[clock] = clocks.get(clock, 0) + 1
 
             _upsert(session, existing, s, basis, trade_id, entry, sl, tp1, res,
-                    horizon_bars)
+                    horizon_bars, start, clock)
             counts["written"] += 1
 
     await session.commit()
@@ -212,13 +286,23 @@ async def recompute(session, *, symbol: str = "XAUUSD", timeframe: str = "1m",
                  "raced to the stop. Materially below 1.0 means the reconstruction "
                  "is wrong, not the data — do not act on the label until it holds."),
     }
+    counts["fill_clock"] = {
+        **clocks,
+        "note": ("Where each fill-basis excursion window started. 'filled' is the "
+                 "monitor seeing a working order become a position — the exact "
+                 "instant a resting LIMIT was hit. 'trade' is the fallback: no fill "
+                 "event on any leg, so the window opens at trade creation and may "
+                 "include travel from before we were in. A large 'trade' share is a "
+                 "caveat on the fill basis; the signal basis is unaffected."),
+    }
     return {"ok": True, "symbol": symbol, "timeframe": timeframe,
             "horizon_bars": horizon_bars, "ladder": list(ladder),
             "coverage": coverage, **counts}
 
 
 def _upsert(session, existing: dict, signal, basis: str, trade_id, entry: float,
-            sl: float, tp1, res: dict, horizon_bars: int) -> None:
+            sl: float, tp1, res: dict, horizon_bars: int,
+            entry_at=None, clock_source: str = None) -> None:
     """Write (or refresh) one row. Recomputing must be idempotent — a wider
     horizon or a corrected candle range should update in place, not accumulate a
     second answer for the same signal."""
@@ -233,7 +317,7 @@ def _upsert(session, existing: dict, signal, basis: str, trade_id, entry: float,
         race=res["race"], bars_to_tp1=res["bars_to_tp1"], bars_to_sl=res["bars_to_sl"],
         ladder=res["ladder"], same_bar_ambiguous=res["same_bar_ambiguous"],
         horizon_capped=res["horizon_capped"], horizon_bars=horizon_bars,
-        n_bars=res["n_bars"])
+        n_bars=res["n_bars"], entry_at=entry_at, clock_source=clock_source)
     row = existing.get((signal.id, basis))
     if row is None:
         row = SignalExcursion(signal_id=signal.id, basis=basis, **vals)
