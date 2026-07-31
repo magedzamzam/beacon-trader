@@ -110,6 +110,53 @@ def test_a_tp_vs_sl_disagreement_never_counts_as_agreement():
     assert out["outcome"]["agreement_rate"] == 0.0
 
 
+def test_disagreements_carry_a_direction_not_just_a_rate():
+    """An agreement rate says how often the simulator was wrong and never which
+    way. Winners it INVENTED inflate every variant; winners it MISSED understate
+    them, and the two need opposite responses."""
+    sim, live = _legs(10, outcome="tp_hit", live_outcome="sl_hit")
+    o = validate.compare(sim, live)["outcome"]
+    assert o["n_disagreements"] == 10
+    assert o["sim_better_than_live"] == 10 and o["sim_worse_than_live"] == 0
+    assert o["disagreement_bias"].startswith("optimistic")
+    assert o["confusion"] == {"sim=tp_hit live=sl_hit": 10}
+
+
+def test_the_opposite_lean_is_named_pessimistic():
+    sim, live = _legs(10, outcome="sl_hit", live_outcome="tp_hit")
+    o = validate.compare(sim, live)["outcome"]
+    assert o["sim_worse_than_live"] == 10
+    assert o["disagreement_bias"].startswith("pessimistic")
+
+
+def test_evenly_split_disagreements_read_as_balanced():
+    """Both directions in equal measure is the simulator resolving coin-flip
+    bars differently, which is noise — not a finding."""
+    a_s, a_l = _legs(5, outcome="tp_hit", live_outcome="sl_hit")
+    b_s, b_l = _legs(5, outcome="sl_hit", live_outcome="tp_hit")
+    for i, row in enumerate(b_s):
+        row["signal_id"] = b_l[i]["signal_id"] = 100 + i
+    o = validate.compare(a_s + b_s, a_l + b_l)["outcome"]
+    assert o["disagreement_bias"] == "balanced"
+
+
+def test_a_stop_family_relabel_is_not_counted_as_a_disagreement():
+    sim, live = _legs(10, outcome="breakeven", live_outcome="sl_hit")
+    o = validate.compare(sim, live)["outcome"]
+    assert o["n_disagreements"] == 0
+    assert o["n_stop_family_relabels"] == 10
+    assert o["disagreement_bias"] is None
+
+
+def test_the_report_states_what_an_r_based_gate_cannot_see():
+    """A pass is a statement about entries, exits and timing — never about
+    sizing, because every pure size multiplier cancels out of R."""
+    rep = validate.report(*_legs(5), *_trades([0.0] * 5))
+    hidden = rep["what_this_gate_cannot_see"]
+    assert "scale-free" in hidden
+    assert "fx_factor" in hidden and "session risk multiplier" in hidden
+
+
 def test_no_comparable_data_fails_rather_than_passing_vacuously():
     rep = validate.report([], [], [], [])
     assert rep["gate"]["passed"] is False

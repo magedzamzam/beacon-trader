@@ -46,6 +46,17 @@ MAX_ABS_MEAN_DELTA_R = 0.10
 # MECHANISM (the stop took it) and the distinction is reported separately.
 _STOP_FAMILY = frozenset({"sl_hit", "breakeven"})
 
+# Outcomes ordered by how good they are for the account. Used ONLY to give a
+# disagreement a direction: an agreement rate says how often the simulator was
+# wrong, never which way, and "wrong 8% of the time" is a very different finding
+# depending on whether the errors are winners it invented or winners it missed.
+_FAVOURABILITY = {"tp_hit": 3, "horizon": 2, "manual": 2, "breakeven": 1,
+                  "expired": 1, "sl_hit": 0}
+
+
+def _rank(outcome) -> Optional[int]:
+    return _FAVOURABILITY.get(str(outcome or "").lower())
+
 
 def _same_outcome(sim: Optional[str], live: Optional[str]) -> Optional[bool]:
     if sim is None or live is None:
@@ -81,6 +92,8 @@ def compare(sim_legs: Sequence[dict], live_legs: Sequence[dict]) -> dict:
     adverse_deltas: List[float] = []
     outcome_n = outcome_ok = 0
     label_mismatch = 0
+    confusion: dict = {}
+    sim_better = sim_worse = 0
     rows: List[dict] = []
     for k in matched:
         s, lv = sim_by[k], live_by[k]
@@ -106,6 +119,15 @@ def compare(sim_legs: Sequence[dict], live_legs: Sequence[dict]) -> dict:
                 outcome_ok += 1 if agree else 0
                 if agree and s.get("outcome") != lv.get("outcome"):
                     label_mismatch += 1
+                if not agree:
+                    pair = (str(s.get("outcome")), str(lv.get("outcome")))
+                    confusion[pair] = confusion.get(pair, 0) + 1
+                    sr, lr = _rank(s.get("outcome")), _rank(lv.get("outcome"))
+                    if sr is not None and lr is not None:
+                        if sr > lr:
+                            sim_better += 1
+                        elif sr < lr:
+                            sim_worse += 1
         rows.append({"signal_id": k[0], "account_id": k[1], "tp_index": k[2],
                      "sim_outcome": s.get("outcome"), "live_outcome": lv.get("outcome"),
                      "outcome_agrees": agree, "delta_fill": d_fill,
@@ -118,6 +140,17 @@ def compare(sim_legs: Sequence[dict], live_legs: Sequence[dict]) -> dict:
             "n": outcome_n,
             "agreement_rate": round(outcome_ok / outcome_n, 4) if outcome_n else None,
             "n_stop_family_relabels": label_mismatch,
+            # An agreement RATE says how often the simulator was wrong and never
+            # which way. "Wrong 8% of the time" is a different finding depending
+            # on whether those are winners it invented or winners it missed —
+            # the first inflates every variant, the second understates them.
+            "n_disagreements": outcome_n - outcome_ok,
+            "sim_better_than_live": sim_better,
+            "sim_worse_than_live": sim_worse,
+            "disagreement_bias": _bias_word(sim_better, sim_worse),
+            "confusion": {f"sim={k[0]} live={k[1]}": v
+                          for k, v in sorted(confusion.items(),
+                                             key=lambda kv: (-kv[1], kv[0]))},
         },
         "fill": _dist(fill_deltas, "delta_fill (sim - live), instrument points "
                                    "— pooled across BUY and SELL, so the MEAN "
@@ -214,6 +247,7 @@ def report(sim_legs, live_legs, sim_trades, live_trades, *,
                 "spread and slippage",
                 "the daily-loss breaker",
             ],
+            "what_this_gate_cannot_see": WHAT_R_HIDES,
             "note": ("Most P&L variance this week was EXECUTION, not prediction. "
                      "The caps and the breaker are simulated; the reject/404 and "
                      "orphaned-order failure modes are NOT — they are broker "
@@ -221,6 +255,21 @@ def report(sim_legs, live_legs, sim_trades, live_trades, *,
                      "structurally optimistic by however often they occurred. "
                      "That is a reason to weight the gate's bias term, not to "
                      "explain a failure away.")}
+
+
+# R = realized_pl / planned_risk, and ANY pure size multiplier scales both, so
+# it divides out. That is exactly why R is the right comparator between arms —
+# and exactly why passing this gate is not a statement about sizing.
+WHAT_R_HIDES = (
+    "This gate is R-BASED, and R is scale-free: any pure size multiplier scales "
+    "realized_pl and planned_risk together and cancels. So a PASS says the "
+    "simulator picks the same entries, exits and timing as live — it says "
+    "NOTHING about whether it sizes them the same. fx_factor, the session risk "
+    "multiplier (#81), filtration `scale` actions and the cluster budgeter "
+    "(#106) are all invisible here by construction. Sizing fidelity needs the "
+    "real account equity and a money-level comparison; until then read "
+    "`return_pct` as indicative and rank on R."
+)
 
 
 # --- small numeric helpers ----------------------------------------------------
@@ -231,6 +280,21 @@ def _num(v) -> Optional[float]:
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+def _bias_word(sim_better: int, sim_worse: int) -> Optional[str]:
+    """Which way the outcome disagreements lean. Balanced counts are noise —
+    the simulator resolving a coin-flip bar differently each way. A lean is a
+    finding, and it points at where the residual R gap comes from."""
+    total = sim_better + sim_worse
+    if not total:
+        return None
+    share = sim_better / total
+    if share >= 0.6:
+        return "optimistic (the simulation invents outcomes live did not get)"
+    if share <= 0.4:
+        return "pessimistic (the simulation misses outcomes live did get)"
+    return "balanced"
 
 
 def _adverse_delta(direction, sim_fill: float, live_fill: float) -> Optional[float]:
