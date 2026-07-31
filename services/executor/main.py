@@ -871,6 +871,7 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             minutes=effective_entry_ttl_min({"entry_ttl_minutes": planner_cfg.get("ttl_minutes")}))
 
         placed = 0
+        placed_lots = Decimal("0")     # size that actually reached the broker (#179)
         tranche_legs = {"toe_in": [], "runner": [], "reclaim": []}
         for pleg in valid:
             leg = Leg(trade_id=trade.id, tp_index=pleg.tp_index,
@@ -935,6 +936,7 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                                       payload={"ref": res.broker_order_ref,
                                                "status": res.status.value}))
                     placed += 1
+                    placed_lots += pleg.lot
             except Exception as exc:              # one leg failing must not sink the rest
                 leg.status = "rejected"
                 session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="reject",
@@ -972,6 +974,7 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         if placed:
             _notify("order_placed", {
                 "symbol": sig.symbol, "direction": sig.direction, "account": acct.name,
+                "size": str(placed_lots),
                 "channel": source.name if source else None,
                 "detail": f"{placed}/{len(valid)} legs placed"})
         # Non-blocking review mode: run the AI for the record after placing.

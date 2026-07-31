@@ -76,16 +76,27 @@ def test_event_fields_are_all_known_tokens():
 def test_field_descriptor_is_per_event_and_honest():
     d = T.field_descriptor("trade_closed")
     tokens = [f["token"] for f in d]
-    # emitted in FIELDS order; trade_closed now carries channel + account
-    assert tokens == ["symbol", "direction", "channel", "account",
+    # emitted in FIELDS order; trade_closed now carries channel + account + size
+    assert tokens == ["symbol", "direction", "channel", "account", "size",
                       "pl", "open_time", "close_time"]
     assert "price" not in tokens and "entry" not in tokens   # runtime/signal-only, not sent
     # tp_hit is a different set that does NOT carry channel/account
     tp = {f["token"] for f in T.field_descriptor("tp_hit")}
-    assert tp == {"symbol", "direction", "price", "pl", "detail"}
+    assert tp == {"symbol", "direction", "size", "price", "pl", "detail"}
     # new_signal is a different, disjoint-ish set
     ns = {f["token"] for f in T.field_descriptor("new_signal")}
     assert ns == {"symbol", "direction", "entry", "sl", "tp", "channel"}
+
+
+def test_size_is_offered_on_every_money_moving_event():
+    """#179 — lot size is the number that scales the risk, so every event where
+    a position exists must be able to render it, and it must resolve."""
+    for ev in ("order_placed", "order_filled", "tp_hit", "sl_hit", "trade_closed"):
+        assert "size" in T.EVENT_FIELDS[ev], ev
+        assert T.render("{size}", T.sample_ctx(ev)) == "0.10", ev
+    # events with no position attached must NOT advertise it
+    assert "size" not in T.EVENT_FIELDS["new_signal"]
+    assert "size" not in T.EVENT_FIELDS["order_cancelled"]
 
 
 def test_non_emitted_event_has_no_fields():

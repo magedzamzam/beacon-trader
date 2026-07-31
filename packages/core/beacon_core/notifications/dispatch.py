@@ -97,6 +97,9 @@ def _default_message(event_id: str, ctx: dict) -> tuple[str, str]:
         if v not in (None, "", []):
             _rows.append((k, str(v)))
 
+    # Size leads the detail block: it is the number that scales the money at
+    # risk, so a trader reading a fill must not have to hunt for it (#179).
+    add("Size", ctx.get("size"))
     add("Entry", ctx.get("entry"))
     add("Price", ctx.get("price"))
     add("TP", ctx.get("tp"))

@@ -26,6 +26,18 @@ def test_format_message_negative_pl_and_aligned_rows():
     assert "\n" in text and "Price:" in text and "Account:" in text
 
 
+def test_format_message_size_is_the_first_detail_row():
+    """#179 — lot size scales the money at risk, so it leads the detail block."""
+    _subj, text = D.format_message("order_filled", {
+        "symbol": "XAUUSD", "direction": "BUY", "size": "0.30", "price": "3428.10"})
+    rows = text.splitlines()
+    assert rows[0].startswith("Size:") and "0.30" in rows[0]
+    assert "Price:" in rows[1]
+    # unset size simply drops the row — no "None", no error
+    _s2, t2 = D.format_message("order_filled", {"symbol": "XAUUSD", "price": "3428.10"})
+    assert "Size" not in t2 and "None" not in t2
+
+
 def test_format_message_default_when_no_template():
     # no templates arg -> byte-for-byte the built-in format (backward compat)
     a = D.format_message("tp_hit", {"symbol": "XAUUSD", "direction": "BUY", "pl": "5"})

@@ -11,9 +11,13 @@ from typing import Optional
 
 from sqlalchemy import select
 
-from ..db.models import Account, AiAssessment, Signal, Source, Trade
+from ..db.models import Account, AiAssessment, Leg, Signal, Source, Trade
 from ..timeutil import utcnow
 from .templates import EVENT_FIELDS
+
+# Leg states that never reached the broker — they carry a planned lot, not a
+# traded one, so they must not inflate the reported size (#179).
+_UNTRADED_LEG_STATUS = {"staged", "rejected", "cancelled", "expired"}
 
 
 def _fmt_time(v) -> Optional[str]:
@@ -31,6 +35,17 @@ def _entry(signal) -> Optional[str]:
     if signal.entry_to is not None and signal.entry_to != signal.entry_from:
         return f"{signal.entry_from}–{signal.entry_to}"
     return str(signal.entry_from)
+
+
+async def _trade_size(session, trade) -> Optional[str]:
+    """Σ lot over the trade's legs that actually reached the broker. This is the
+    historical reconstruction of `{size}` — what the live emitter sends at event
+    time — so a test-fire renders the same number the real alert carried."""
+    legs = (await session.execute(
+        select(Leg).where(Leg.trade_id == trade.id))).scalars().all()
+    lots = [l.lot for l in legs
+            if l.lot is not None and l.status not in _UNTRADED_LEG_STATUS]
+    return str(sum(lots)) if lots else None
 
 
 async def build_ctx(session, event_id: str = None, *,
@@ -57,6 +72,11 @@ async def build_ctx(session, event_id: str = None, *,
     # the extra query for events (like trade_closed) that don't surface ai.*.
     want_ai = event_id is None or any(
         t.split(".")[0] == "ai" for t in EVENT_FIELDS.get(event_id, []))
+    # Same idea for the leg query behind `{size}` — only pay for it when the
+    # event's contract actually surfaces it.
+    want_size = event_id is None or "size" in EVENT_FIELDS.get(event_id, [])
+    size = await _trade_size(session, trade) if (trade is not None and want_size) else None
+
     ai = None
     if signal is not None and want_ai:
         ai = (await session.execute(
@@ -68,6 +88,7 @@ async def build_ctx(session, event_id: str = None, *,
         "direction": (trade.direction if trade else None) or (signal.direction if signal else None),
         "channel": source.name if source else None,
         "account": account.name if account else None,
+        "size": size,
         "entry": _entry(signal),
         "tp": ", ".join(signal.tps) if signal and signal.tps else None,
         "sl": str(signal.sl) if signal and signal.sl is not None else None,

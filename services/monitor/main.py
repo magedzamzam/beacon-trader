@@ -704,6 +704,7 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
             _ev = {"tp_hit": "tp_hit", "sl_hit": "sl_hit", "breakeven": "sl_hit"}.get(outcome)
             if _ev:
                 _notify(_ev, {"symbol": trade.symbol, "direction": trade.direction,
+                              "size": str(leg.lot) if leg.lot is not None else None,
                               "price": str(close_px) if close_px is not None else None,
                               "pl": str(realized_pl), "detail": f"TP{leg.tp_index} — {outcome}"})
             return True
@@ -812,6 +813,7 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                                       payload={"position": pos.broker_position_ref, "via": via}))
                     _notify("order_filled", {
                         "symbol": trade.symbol, "direction": trade.direction,
+                        "size": str(leg.lot) if leg.lot is not None else None,
                         "price": str(leg.fill_price) if leg.fill_price is not None else None,
                         "detail": f"TP{leg.tp_index} entry filled"})
                     _resolve_tranche(leg.id, STG.FILLED, f"filled via {via}")
