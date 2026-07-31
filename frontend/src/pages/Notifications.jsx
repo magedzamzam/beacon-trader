@@ -27,8 +27,9 @@ const BUILT = new Set(["email", "telegram", "sms"]);
 /**
  * Notifications — configure delivery channels (Email / Telegram / WhatsApp /
  * SMS / Webhook / Push) and route each event type to one or more channels.
- * Configuration only for now: nothing is dispatched yet. Secrets are write-only
- * (encrypted server-side); the UI only ever learns whether one is set.
+ * Email / Telegram / SMS deliver live (see `BUILT`) — the other channels store
+ * config only, for now. Secrets are write-only (encrypted server-side); the UI
+ * only ever learns whether one is set.
  */
 export default function Notifications() {
   const [cat, setCat] = useState(null);
@@ -198,7 +199,7 @@ export default function Notifications() {
       <div>
         <div className="flex items-center justify-between mb-2">
           <div className="text-sm font-medium flex items-center gap-2"><Bell className="w-4 h-4 text-beacon" /> Channels</div>
-          <span className="text-[11px] text-muted">Configuration only — delivery isn't wired up yet.</span>
+          <span className="text-[11px] text-muted">Email, Telegram and SMS deliver live. WhatsApp / Webhook / Push are config-only for now.</span>
         </div>
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {cat.channels.map(ch => {
