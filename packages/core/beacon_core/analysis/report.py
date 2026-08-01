@@ -1660,6 +1660,154 @@ def delever_null(pairs, *, n_boot=DEFAULT_BOOT, seed=DEFAULT_SEED) -> dict:
     }
 
 
+# --- #186: ruling a FILTER arm on what it removed -----------------------------
+# Arm C's false positive had a twin on Arm B, and it is the opposite error: the
+# `adx_regime` filter ran for four days without firing once, which makes Arm B a
+# literal duplicate of the control. "No difference" then reads as "the filter has
+# no edge" when it is really "the filter was never tested". Both verdicts are
+# reported here by name so they cannot be confused for each other.
+FILTER_UNTESTED = "UNTESTED"
+FILTER_ACCUMULATE = "ACCUMULATE"
+FILTER_REMOVES_LOSERS = "REMOVES_LOSERS"
+FILTER_REMOVES_WINNERS = "REMOVES_WINNERS"
+FILTER_NO_EVIDENCE = "NO_EVIDENCE"
+
+# CLAUDE.md §2.4 / min_trades_for_significance. Effective-N is well below raw-N
+# here (one instrument, clustered channels), so this is a floor, not a target.
+MIN_REMOVED_N = 30
+
+
+def filter_removed_set(skips, control_trades, *, base_rate,
+                       min_n: int = MIN_REMOVED_N, cred: float = 0.90,
+                       eps: float = 0.0) -> dict:
+    """Score a filter arm by what it REMOVED, accumulated and tested ONCE (#186).
+
+    A filter arm trades fewer signals, so its own gross is smaller by
+    construction and comparing it is meaningless. The only question that means
+    anything is: **the signals it skipped — what did those same signals do on the
+    control?** Lost money there, the filter works; made money there, it is
+    cutting profit rather than stops.
+
+    `skips`: one row per skip, `{signal_id, epoch}` — from
+    `events.kind='entry_filtered'` with `payload.reason='filtration_skip'` on the
+    filter account. Deduped by signal within an epoch, because one signal fans
+    out to several legs and each can log its own event.
+    `control_trades`: `{signal_id, realized_pl, planned_risk}` for the CONTROL
+    arm. Broker-truth P&L, never `legs.realized_pl` (CLAUDE.md §2.5).
+
+    TWO DISCIPLINES ARE STRUCTURAL HERE, not left to the caller's memory.
+
+    **Epochs are never pooled.** `epoch` names the filter's configuration — its
+    rule and its timeframe, e.g. `adx_regime@4h`. Moving the `adx_regime` filter
+    from 4h to 1h mid-week made it a different experiment: the 4h half fired ZERO
+    times (Arm B ≡ control) and the 1h half fired 8. Averaging the two describes
+    no filter that ever ran. So the return is per epoch, and there is deliberately
+    no pooled-across-epochs figure to reach for.
+
+    **One test, at accumulated N.** Pass every week's skips for an epoch, not one
+    week's: re-reading a fresh 90% CI each week is repeated peeking and inflates
+    type-I exactly where the promote bar is supposed to be high. Below `min_n`
+    the verdict is `ACCUMULATE` and NO interval is offered to act on — the number
+    is still returned, because hiding it would just get it recomputed by hand.
+
+    Read the win rate on the NEAR bound: this is a bucket you want to EXCLUDE, so
+    the bound that matters is the UPPER one. And the P&L sign must AGREE with it
+    before either becomes a verdict — TP1 distance varies ~7x across channels, so
+    a removed set can be low-win-rate and net-POSITIVE, and a filter that removes
+    money is not helping however its win rate reads."""
+    by_sig = {}
+    for t in control_trades or ():
+        sig = t.get("signal_id")
+        if sig is not None:
+            by_sig[sig] = t
+
+    epochs: dict = {}
+    for s in skips or ():
+        sig = s.get("signal_id")
+        if sig is None:
+            continue
+        epochs.setdefault(str(s.get("epoch") or "?"), set()).add(sig)
+
+    out: dict = {}
+    for epoch, sigs in sorted(epochs.items()):
+        n_skipped = len(sigs)
+        pls, rs = [], []
+        n_unscoreable = 0
+        for sig in sorted(sigs, key=str):
+            t = by_sig.get(sig)
+            pl = None if t is None else t.get("realized_pl")
+            if pl is None:
+                # The control never closed a trade on this signal either — its own
+                # risk guard, breaker or fill failure took it. It is NOT a
+                # zero-P&L removal; it is a signal the removed set cannot score,
+                # and counting it as flat would drag the mean toward nothing.
+                n_unscoreable += 1
+                continue
+            pl = float(pl)
+            pls.append(pl)
+            pr = t.get("planned_risk")
+            if pr not in (None, 0) and float(pr) != 0:
+                rs.append(pl / abs(float(pr)))
+
+        n_scored = len(pls)
+        wins = sum(1 for p in pls if p > eps)
+        n_flat = sum(1 for p in pls if abs(p) <= eps)
+        n_decisive = n_scored - n_flat
+        net = round(sum(pls), 2) if pls else 0.0
+        post = (posterior(wins, n_decisive, base_rate, cred=cred)
+                if n_decisive else None)
+        ci = ((round(post["ci_low"], 4), round(post["ci_high"], 4))
+              if post else (None, None))
+
+        if not n_skipped:
+            verdict, reason = FILTER_UNTESTED, "the filter never fired"
+        elif n_decisive < min_n:
+            verdict = FILTER_ACCUMULATE
+            reason = (f"{n_decisive} decisive removals of the {min_n} needed. "
+                      "Accumulate the NEXT weeks into this same epoch and test "
+                      "once — do not read the interval yet")
+        elif ci[1] is not None and ci[1] < base_rate and net < 0:
+            verdict = FILTER_REMOVES_LOSERS
+            reason = (f"the removed set won {ci[0]}-{ci[1]} against a base of "
+                      f"{round(base_rate, 4)} and cost the control {net} — the "
+                      "upper bound is below the base, so the filter is cutting "
+                      "losers on the bound that matters for an exclusion")
+        elif ci[0] is not None and ci[0] > base_rate and net > 0:
+            verdict = FILTER_REMOVES_WINNERS
+            reason = (f"the removed set won {ci[0]}-{ci[1]} against a base of "
+                      f"{round(base_rate, 4)} and MADE the control {net} — the "
+                      "filter is cutting profit, not stops")
+        elif ci[0] is not None and (ci[1] < base_rate or ci[0] > base_rate):
+            verdict = FILTER_NO_EVIDENCE
+            reason = (f"the win rate and the P&L disagree: interval "
+                      f"[{ci[0]}, {ci[1]}] vs base {round(base_rate, 4)}, net "
+                      f"{net}. A removed set can be low-win-rate and net-positive "
+                      "when its TP1 sits close — neither alone is a verdict")
+        else:
+            verdict = FILTER_NO_EVIDENCE
+            reason = (f"interval [{ci[0]}, {ci[1]}] spans the base rate "
+                      f"{round(base_rate, 4)} — no evidence of edge either way")
+
+        out[epoch] = {
+            "n_skipped": n_skipped, "n_scored": n_scored,
+            "n_unscoreable": n_unscoreable,
+            "n_decisive": n_decisive, "n_flat": n_flat, "wins": wins,
+            "removed_set_net": net,
+            "win_rate_ci": ci, "base_rate": round(base_rate, 4),
+            "mean_r": round(sum(rs) / len(rs), 4) if rs else None,
+            "sum_r": round(sum(rs), 4) if rs else None,
+            "verdict": verdict, "reason": reason,
+        }
+
+    return {
+        "epochs": out, "n_epochs": len(out), "min_n": min_n,
+        "note": ("Per EPOCH, never pooled across one: a filter that changed its "
+                 "timeframe is a different experiment, and a half that never "
+                 "fired is UNTESTED, not null. Accumulate weeks WITHIN an epoch "
+                 "and test once — a fresh interval each week is peeking."),
+    }
+
+
 async def stop_geometry_report(session, frm=None, to=None,
                                floor: float = None) -> dict:
     """Per-signal sub-ATR stop labels + the widen-and-resize counterfactual (#189).
