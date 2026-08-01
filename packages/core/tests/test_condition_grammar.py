@@ -29,7 +29,11 @@ CTX = {
     "sessions": ["London"],
     "ta": {
         "15m": {"rsi_14": {"value": 65.0},
-                "macd_12_26_9": {"macd": 1.5, "signal": 0.4, "cross": "bull"},
+                # `cross` is "up"/"down"/None — the values `ta.indicators.macd`
+                # actually emits. A hand-built ctx that invents "bull" would
+                # make this suite agree with a config the registry can never
+                # satisfy (#184).
+                "macd_12_26_9": {"macd": 1.5, "signal": 0.4, "cross": "up"},
                 "fvg_0.25_50": {"present": True, "bottom": 1990.0, "top": 1995.0},
                 "order_block_1.0_50": {"present": False, "bottom": 1980.0}},
         "4h": {"adx_14": {"adx": 31.2, "trending": True}},
@@ -41,8 +45,8 @@ RSI_LT_70 = {"type": "indicator", "id": "rsi", "timeframe": "15m",
              "field": "value", "op": "lt", "value": 70}
 RSI_GT_70 = {"type": "indicator", "id": "rsi", "timeframe": "15m",
              "field": "value", "op": "gt", "value": 70}
-MACD_BULL = {"type": "indicator", "id": "macd", "timeframe": "15m",
-             "field": "cross", "op": "eq", "value": "bull"}
+MACD_CROSS_UP = {"type": "indicator", "id": "macd", "timeframe": "15m",
+             "field": "cross", "op": "eq", "value": "up"}
 FVG_PRESENT = {"type": "indicator", "id": "fvg", "timeframe": "15m",
                "field": "present", "op": "is_true"}
 OB_PRESENT = {"type": "indicator", "id": "order_block", "timeframe": "15m",
@@ -58,7 +62,7 @@ IN_NEW_YORK = {"type": "session_in", "sessions": ["New York"]}
 def test_a_leaf_is_still_a_leaf():
     assert ST.matches_condition(RSI_LT_70, CTX) is True
     assert ST.matches_condition(RSI_GT_70, CTX) is False
-    assert ST.matches_condition(MACD_BULL, CTX) is True
+    assert ST.matches_condition(MACD_CROSS_UP, CTX) is True
     assert ST.matches_condition(IN_LONDON, CTX) is True
     assert ST.matches_condition(IN_NEW_YORK, CTX) is False
 
@@ -67,14 +71,14 @@ def test_both_entry_points_agree_on_every_leaf():
     """`_matches` is what filtration calls; `matches_condition` is what the
     generator calls. If they can ever disagree, the shared grammar is a fiction
     and the backtest is measuring a different rule from the one that would run."""
-    for cond in (RSI_LT_70, RSI_GT_70, MACD_BULL, FVG_PRESENT, OB_PRESENT,
+    for cond in (RSI_LT_70, RSI_GT_70, MACD_CROSS_UP, FVG_PRESENT, OB_PRESENT,
                  UNKNOWABLE, IN_LONDON, IN_NEW_YORK, {"type": "always"},
                  {"type": "nonsense"}, {}):
         assert ST._matches(cond, CTX) is ST.matches_condition(cond, CTX)
 
 
 def test_both_entry_points_agree_on_composed_conditions():
-    for cond in ({"all": [RSI_LT_70, MACD_BULL]},
+    for cond in ({"all": [RSI_LT_70, MACD_CROSS_UP]},
                  {"any": [RSI_GT_70, OB_PRESENT]},
                  {"not": IN_NEW_YORK},
                  {"all": [RSI_LT_70, {"any": [FVG_PRESENT, OB_PRESENT]}]}):
@@ -83,7 +87,7 @@ def test_both_entry_points_agree_on_composed_conditions():
 
 # --- composition --------------------------------------------------------------
 def test_all_requires_every_arm():
-    assert ST.matches_condition({"all": [RSI_LT_70, MACD_BULL]}, CTX) is True
+    assert ST.matches_condition({"all": [RSI_LT_70, MACD_CROSS_UP]}, CTX) is True
     assert ST.matches_condition({"all": [RSI_LT_70, RSI_GT_70]}, CTX) is False
 
 
@@ -100,14 +104,14 @@ def test_not_inverts_a_known_answer():
 def test_the_issue_example_composes_to_a_single_expression():
     """The shape #184 states, end to end: an `all` of two indicator bounds, an
     `any` of two structure predicates, and a session exclusion."""
-    cond = {"all": [MACD_BULL, RSI_LT_70,
+    cond = {"all": [MACD_CROSS_UP, RSI_LT_70,
                     {"any": [FVG_PRESENT, OB_PRESENT]},
                     {"not": IN_NEW_YORK}]}
     assert ST.matches_condition(cond, CTX) is True
 
 
 def test_composition_nests_to_any_depth():
-    deep = {"all": [{"any": [{"all": [{"not": RSI_GT_70}, MACD_BULL]}]}]}
+    deep = {"all": [{"any": [{"all": [{"not": RSI_GT_70}, MACD_CROSS_UP]}]}]}
     assert ST.matches_condition(deep, CTX) is True
 
 
@@ -145,7 +149,7 @@ def test_an_empty_composite_is_not_vacuous_truth():
 
 
 def test_an_empty_context_never_matches_anything():
-    for cond in (RSI_LT_70, MACD_BULL, {"all": [RSI_LT_70]}, {"any": [RSI_LT_70]},
+    for cond in (RSI_LT_70, MACD_CROSS_UP, {"all": [RSI_LT_70]}, {"any": [RSI_LT_70]},
                  {"not": RSI_LT_70}, IN_LONDON):
         assert ST.matches_condition(cond, {}) is False
 
@@ -167,7 +171,7 @@ def test_a_nested_indicator_is_still_a_requirement():
     """If it isn't, the executor computes nothing for it, `ctx['ta']` is empty,
     the leaf is UNKNOWN on every evaluation, and the rule is inert forever with
     no error anywhere."""
-    rules = [{"enabled": True, "when": {"all": [MACD_BULL,
+    rules = [{"enabled": True, "when": {"all": [MACD_CROSS_UP,
                                                 {"any": [FVG_PRESENT, OB_PRESENT]}]}}]
     keys = {(r["timeframe"], r["id"]) for r in ST.ta_rule_requirements(rules)}
     assert ("15m", "macd") in keys
@@ -176,7 +180,7 @@ def test_a_nested_indicator_is_still_a_requirement():
 
 
 def test_condition_requirements_is_the_generators_entry_point():
-    reqs = ST.condition_requirements({"all": [MACD_BULL, RSI_LT_70]}, "15m")
+    reqs = ST.condition_requirements({"all": [MACD_CROSS_UP, RSI_LT_70]}, "15m")
     assert {r["id"] for r in reqs} == {"macd", "rsi"}
     assert {r["timeframe"] for r in reqs} == {"15m"}
 
@@ -207,7 +211,7 @@ def test_a_nested_shadow_block_is_still_declared():
 
 
 def test_condition_leaves_walks_to_the_leaves_in_order():
-    cond = {"all": [MACD_BULL, {"any": [FVG_PRESENT, {"not": OB_PRESENT}]}]}
+    cond = {"all": [MACD_CROSS_UP, {"any": [FVG_PRESENT, {"not": OB_PRESENT}]}]}
     assert [l["id"] for l in ST.condition_leaves(cond)] == \
         ["macd", "fvg", "order_block"]
 
@@ -218,10 +222,10 @@ def test_wrapping_an_indicator_does_not_promote_it_to_live():
     significant-looking rules by chance, so an authored indicator rule ships
     inert. A composite has no `type` of its own to read — reading nothing must
     not mean 'live'."""
-    assert ST.rule_mode({"when": {"all": [MACD_BULL]}}) == "shadow"
-    assert ST.rule_mode({"when": {"any": [IN_LONDON, MACD_BULL]}}) == "shadow"
+    assert ST.rule_mode({"when": {"all": [MACD_CROSS_UP]}}) == "shadow"
+    assert ST.rule_mode({"when": {"any": [IN_LONDON, MACD_CROSS_UP]}}) == "shadow"
     assert ST.rule_mode({"when": {"all": [IN_LONDON]}}) == "live"
-    assert ST.rule_mode({"mode": "live", "when": {"all": [MACD_BULL]}}) == "live"
+    assert ST.rule_mode({"mode": "live", "when": {"all": [MACD_CROSS_UP]}}) == "live"
 
 
 # --- filtration behaviour is unchanged by the split ---------------------------

@@ -362,6 +362,59 @@ def test_an_unknown_timeframe_is_a_config_error():
         G.RulesSpec(cfg(timeframe="13m"))
 
 
+def test_the_shipped_example_names_values_the_registry_can_actually_emit():
+    """The example config shipped with #184 said `macd.cross == "bull"`. The
+    registry emits "up" / "down" / None and has never emitted "bull", so every
+    condition in it was UNKNOWN on every bar and the generator produced ZERO
+    signals — silently, because fail-open is supposed to be silent.
+
+    `check --config` cannot catch this: it validates that the indicator ID
+    resolves, not that a literal is in the field's range. Nothing did. So this
+    test computes the indicator through the REAL registry path over a series
+    built to force a crossing, and asserts the example's literal is a value that
+    actually turns up. A config the registry can never satisfy is not a config."""
+    import json
+    from beacon_core.execution import strategy as ST
+
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    cfg = json.loads((root / "runs" / "example-generator-rules.json")
+                     .read_text(encoding="utf-8"))["generator_config"]
+    leaves = [l for side in ("long", "short")
+              for l in ST.condition_leaves((cfg.get(side) or {}).get("when") or {})
+              if l.get("type") == "indicator" and isinstance(l.get("value"), str)]
+    assert leaves, "the example should exercise at least one string-valued field"
+
+    # A long decline then a sharp rally: guarantees MACD crosses in both
+    # directions somewhere in the series.
+    n = 4000
+    mids = [4000.0 - i * 0.02 for i in range(n // 2)]
+    mids += [mids[-1] + i * 0.05 for i in range(n // 2)]
+    s = B.BarSeries(path_bars(mids))
+    builder = ContextBuilder(s)
+    frame = B.resample(s.bars, cfg["timeframe"])
+    minutes = B.timeframe_minutes(cfg["timeframe"])
+
+    observed = {}
+    for i in range(MIN_WARMUP_SCAN, len(frame)):
+        when = frame[i].ts + dt.timedelta(minutes=minutes)
+        ta = builder.ta_block([{"when": l} for l in leaves], when)
+        for l in leaves:
+            v = ST.indicator_value({"ta": ta}, l)
+            if v is not None:
+                observed.setdefault((l["id"], l["field"]), set()).add(str(v))
+
+    for l in leaves:
+        seen = observed.get((l["id"], l["field"]), set())
+        assert seen, f"{l['id']}.{l['field']} produced nothing over the probe series"
+        assert l["value"] in seen, (
+            f"example config wants {l['id']}.{l['field']} == {l['value']!r}, but "
+            f"the registry only ever emitted {sorted(seen)}")
+
+
+MIN_WARMUP_SCAN = 40
+
+
 def test_the_config_declares_the_indicator_instances_it_needs():
     """What `check --config` prints, so an unknown id surfaces as a missing
     requirement instead of a strategy that mysteriously never fires."""

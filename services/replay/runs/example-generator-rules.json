@@ -45,7 +45,7 @@
       "when": {
         "all": [
           {"type": "indicator", "id": "macd", "timeframe": "15m",
-           "field": "cross", "op": "eq", "value": "bull"},
+           "field": "cross", "op": "eq", "value": "up"},
           {"type": "indicator", "id": "rsi", "timeframe": "15m",
            "field": "value", "op": "lt", "value": 70},
           {"any": [
@@ -61,7 +61,7 @@
       "when": {
         "all": [
           {"type": "indicator", "id": "macd", "timeframe": "15m",
-           "field": "cross", "op": "eq", "value": "bear"},
+           "field": "cross", "op": "eq", "value": "down"},
           {"type": "indicator", "id": "rsi", "timeframe": "15m",
            "field": "value", "op": "gt", "value": 30}
         ]
