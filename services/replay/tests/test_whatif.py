@@ -386,7 +386,7 @@ def test_an_exit_that_can_never_fire_is_declared():
     module exists to refuse: nothing errors, the numbers move for another
     reason, and the operator acts on a wrong attribution."""
     c = W.exit_reach_caveat([_S(2) for _ in range(114)], {"exit": "be_at_tp2"})
-    assert c and "every one of" in c and "114" in c
+    assert c and c.startswith("Every one of these 114 signals")
     assert "REMOVING the exit you run today" in c
 
 

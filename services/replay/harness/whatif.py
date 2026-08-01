@@ -303,11 +303,14 @@ def bulk_ingest_caveats(signals, changes: dict) -> List[str]:
         # ALWAYS. This one is about the left column, so it does not depend on
         # what was changed. Both arms simulate these signals; the account did
         # not trade them.
-        f"{n} of these {len(signals)} signals arrived in {len(blocks)} burst(s) "
-        f"— {blocks[worst]} of them in one {BULK_BAR_MINUTES}-minute window at "
-        f"{when}, which is when the channel was onboarded and its backlog was "
-        "imported. Both columns SIMULATE those signals; they are not a replay of "
-        "your account statement.",
+        f"{n} of these {len(signals)} signals arrived in "
+        + (f"one burst — all {blocks[worst]} of them in the "
+           if len(blocks) == 1 else
+           f"{len(blocks)} bursts — {blocks[worst]} of them in a single ")
+        + f"{BULK_BAR_MINUTES}-minute window at {when}, which is when the "
+        "channel was onboarded and its backlog was imported. Both columns "
+        "SIMULATE those signals; they are not a replay of your account "
+        "statement.",
     ]
     if changes.get("filters"):
         # Only for filters: an exit ladder is evaluated bar by bar AFTER entry,
@@ -351,11 +354,13 @@ def exit_reach_caveat(signals, changes: dict) -> Optional[str]:
     if unreachable < 0.9 * len(depths):
         return None
     label = EXIT_LABELS.get(changes["exit"], changes["exit"])
-    every = "every one of" if unreachable == len(depths) else f"{unreachable} of"
-    return (f"{every} these {len(depths)} signals posts {idx} target(s) or "
-            f"fewer, so \"{label}\" never has a leg left to protect. Any "
-            "difference you see below comes from REMOVING the exit you run "
-            "today, not from adding this one.")
+    every = ("Every one of these" if unreachable == len(depths)
+             else f"{unreachable} of these")
+    target = "target" if idx == 1 else "targets"
+    return (f"{every} {len(depths)} signals posts {idx} {target} at most, so "
+            f"\"{label}\" never has a leg left to protect. Any difference you "
+            "see below comes from REMOVING the exit you run today, not from "
+            "adding this one.")
 
 
 def verdict(base: dict, alt: dict, changes: dict) -> dict:
