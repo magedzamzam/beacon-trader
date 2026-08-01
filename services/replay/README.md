@@ -285,9 +285,30 @@ pooled mean from a trade that genuinely scratched. `compare_r` now reports
 every variant inherits**. The gate still judges on the pooled figure it
 pre-registered — reported beside, never substituted for.
 
-Read them together: 36 of the 80 missed legs were live winners, so the under-fill
-drags the pooled mean ΔR *down*. The harness is therefore **more** optimistic on
-the trades it does take than the headline +0.060R suggests.
+#### Measured, 2026-08-01 — and it went the OTHER way
+
+```
+mean delta R  pooled          +0.0599   n 452
+mean delta R  entered only    +0.0477   n 415
+n_sim_never_filled                 37
+```
+
+The under-fill accounts for **+0.0122 of the +0.0599 headline — 20% of the
+gate's entire optimism.** Remove it and the harness is **+0.048R** optimistic on
+the trades it actually entered, not more.
+
+**This falsified the obvious reading, which is why it is written down.** The
+missed legs look winner-heavy — 36 `tp_hit` against 15 `sl_hit` — so the
+expectation was that skipping them *hid* optimism. The opposite is true: those 37
+**trades** averaged **−0.197R** live, so the simulator's under-fill was dodging
+net losers and *flattering* the pooled figure.
+
+Leg outcome labels do not give a trade's sign. A trade can bank a `tp_hit` leg
+and still finish negative once its `breakeven` and `sl_hit` legs settle, and 29
+of the 80 were breakevens. This is CLAUDE.md §2.5 in a second costume: **trade
+P&L is the trustworthy basis; leg labels are for mechanism, never for direction.**
+Reasoning from a leg-outcome histogram to a trade-level mean is exactly the
+inference that fails here.
 
 **Defect B is now selectable rather than assumed.** `ratchet_timing` on a
 variant:

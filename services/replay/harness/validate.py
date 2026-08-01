@@ -330,10 +330,16 @@ def compare_r(sim_trades: Sequence[dict], live_trades: Sequence[dict]) -> dict:
     out["excluding_sim_never_filled"] = _dist(
         filled_deltas,
         "delta R over trades the simulator ACTUALLY ENTERED. The pooled figure "
-        "above scores every under-filled trade as 0.0R against live's real R, "
-        "which drags the mean toward zero and understates how optimistic the "
-        "harness is on the trades it does take. Read BOTH: the gap between them "
-        "is the under-fill's contribution.")
+        "above scores every under-filled trade as 0.0R against live's real R. "
+        "Read BOTH: the gap between them is the under-fill's contribution to the "
+        "bias, and its SIGN is whatever the missed trades happened to do live — "
+        "it is not knowable in advance and must not be assumed. Do NOT infer it "
+        "from the leg-outcome histogram either: a trade can bank a tp_hit leg "
+        "and still finish negative, so leg labels give the mechanism and never "
+        "the trade's sign (CLAUDE.md 2.5). On 2026-08-01 the missed trades "
+        "averaged -0.197R live, so the under-fill FLATTERED the pooled figure by "
+        "+0.0122 — 20% of the headline optimism — which is the opposite of what "
+        "36 tp_hit vs 15 sl_hit legs suggested.")
     # Deliberately reported beside the gate's figure and not substituted for it:
     # the thresholds were fixed before the numbers were seen, and swapping the
     # basis after the fact is moving the goalposts (see the module docstring).
