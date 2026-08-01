@@ -67,6 +67,37 @@ Spread is therefore modelled *intrinsically*. `candles.spread_nominal` is never
 used: it is the CLOSE spread and disagrees with the open/high/low spreads on the
 same bar.
 
+#### Where the bars come from (#190)
+
+Answering #169's open question. The store is **Capital.com's own data**, pulled
+by the operator's `history_price.py` against `GET /prices/{epic}` with
+`epic=GOLD` — which matches `symbol_maps.broker_epic` for `XAUUSD` — at
+`resolution=MINUTE`, keyed on `snapshotTimeUTC`.
+
+**Bid and ask are genuine quotes, not a mid with a modelled spread.** Capital.com
+returns `{bid, ask}` on each of `openPrice` / `highPrice` / `lowPrice` /
+`closePrice`, and the script writes all eight columns through unaltered. That is
+what licenses the sided predicates above. `volume` is `lastTradedVolume`, a
+tick-count proxy; the CSV's `spread` column is `close_ask - close_bid` and lands
+in `spread_nominal`, which is why that column is advisory only.
+
+Two things it does **not** settle, and both are live in #190:
+
+- **Live or demo endpoint.** The script defaults to `LIVE_BASE` and treats
+  `--demo` as opt-in, while every trading account here is a **demo** account
+  (`AEDd`). Which base produced this import is not recorded, and Capital.com's
+  demo and live spreads need not match — so a spread comparison is still owed.
+- **The CSV → Postgres loader is not in this repo.** `history_price.py` writes a
+  CSV and nothing else; `quality='suspect'` (200 bars) is assigned by whatever
+  loads it, and `candles.source` records the file (`csv:gold_1m`) rather than the
+  upstream.
+
+**A high/low spread is not an instantaneous spread.** `highPrice.bid` and
+`highPrice.ask` are the extremes of two separate series and need not occur in the
+same instant, so `high_ask - high_bid` is a range artifact, not a quote. Only
+`close_ask - close_bid` is a spread you can reason about — which is why the
+distribution below is measured on the close.
+
 ### The conservative choices, all counted and reported
 
 * **Same-bar TP+SL is scored as the STOP.** A 1m bar cannot say which came
