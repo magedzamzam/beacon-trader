@@ -322,6 +322,33 @@ async def load_sources(session) -> dict:
             (await session.execute(select(Source))).scalars().all()}
 
 
+async def real_pl(session, *, source_ids=None, account_ids=None,
+                  frm=None, to=None) -> dict:
+    """What the broker ACTUALLY did on this scope and window.
+
+    The what-if's left column is today's config simulated over these signals,
+    which is NOT the same as what happened — and the gap can be enormous. GOLD
+    VIP SIGNAL TM simulates at +1,438 over 2026-07-05..07-31 while the account
+    really lost 41,639 on it in the same window, because the book ran 5% risk
+    until 2026-07-25 and the simulation applies today's 2% throughout.
+
+    A page that shows the first number without the second invites reading a
+    losing channel as a winner. Trade-level `realized_pl` only (CLAUDE.md §2 —
+    leg-level is not trustworthy)."""
+    q = (select(func.count(Trade.id), func.sum(Trade.realized_pl))
+         .join(Signal, Signal.id == Trade.signal_id))
+    if source_ids:
+        q = q.where(Signal.source_id.in_(list(source_ids)))
+    if account_ids:
+        q = q.where(Trade.account_id.in_(list(account_ids)))
+    if frm is not None:
+        q = q.where(Trade.created_at >= frm)
+    if to is not None:
+        q = q.where(Trade.created_at < to)
+    n, pl = (await session.execute(q)).one()
+    return {"trades": int(n or 0), "profit": round(float(pl or 0.0), 2)}
+
+
 # --- writes (replay_* ONLY) ---------------------------------------------------
 async def create_run(session, **kw) -> ReplayRun:
     run = ReplayRun(**kw)

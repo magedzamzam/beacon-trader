@@ -393,6 +393,40 @@ def exit_reach_caveat(signals, changes: dict) -> Optional[str]:
             "adding this one.")
 
 
+def reality_caveat(actual: Optional[dict], base: dict) -> Optional[str]:
+    """Say it out loud when the simulated baseline and the real book disagree.
+
+    MEASURED: GOLD VIP SIGNAL TM simulates at +1,438 over 2026-07-05..07-31
+    while the account really lost 41,639 on it in the same window. The number
+    is not wrong for what it is — today's config over this history — but read
+    without the real one it turns the worst channel on the book into a winner.
+
+    The dominant cause here is that `load_live_config` returns TODAY's config:
+    the book ran 5% risk until 2026-07-25 and 2% since, so the whole window is
+    simulated at the lower size. Filters and account mappings have moved too."""
+    if not actual or not actual.get("trades"):
+        return None
+    real, sim = float(actual["profit"]), float(base.get("profit") or 0.0)
+    # STRICTLY opposite signs. A simulated zero is not "the other direction",
+    # it is no result — `far` is what catches that.
+    flipped = (real < 0 < sim) or (sim < 0 < real)
+    # Relative to the REAL magnitude: losing 41,639 and simulating a 1,100 loss
+    # is the same misreading wearing a minus sign.
+    far = abs(real - sim) > max(500.0, 0.5 * abs(real))
+    if not (flipped or far):
+        return None
+    lead = ("The simulated column says you MADE money on a window where the "
+            "account lost it. " if flipped and sim > 0 else
+            "The simulated column says you LOST money on a window where the "
+            "account made it. " if flipped else
+            "The simulated column is a long way from what the account did. ")
+    return (lead + f"Really traded: {real:,.2f} over {actual['trades']} trades. "
+            f"Simulated here: {sim:,.2f}. This runs your CURRENT settings over "
+            "old signals — risk sizing, filters and account routing have all "
+            "changed since — so read the two columns against each other, not "
+            "against your statement.")
+
+
 def verdict(base: dict, alt: dict, changes: dict) -> dict:
     """One sentence a person can act on, plus the two numbers behind it."""
     delta = round(alt["profit"] - base["profit"], 2)
@@ -440,7 +474,7 @@ def verdict(base: dict, alt: dict, changes: dict) -> dict:
 
 
 def report(base_res, alt_res, *, changes: dict, scope_label: str,
-           frm=None, to=None, signals=()) -> dict:
+           frm=None, to=None, signals=(), actual=None) -> dict:
     """The whole answer: two columns, a verdict, and what it cannot tell you."""
     # NOT "what happened". The left column is a SIMULATION of the current setup
     # over these signals, and on this book 179 of 856 signals were never traded
@@ -453,6 +487,9 @@ def report(base_res, alt_res, *, changes: dict, scope_label: str,
     reach = exit_reach_caveat(signals, changes)
     if reach:
         caveats.insert(0, reach)      # it changes what the numbers MEAN
+    real = reality_caveat(actual, base)
+    if real:
+        caveats.insert(0, real)       # and this one outranks even that
     return {
         "scope": scope_label,
         "from": frm.isoformat() if frm is not None else None,
@@ -461,6 +498,7 @@ def report(base_res, alt_res, *, changes: dict, scope_label: str,
         "baseline": base,
         "whatif": alt,
         "verdict": verdict(base, alt, changes),
+        "actual": actual,
         "caveats": caveats,
         "note": ("Same signals, run twice. This is a screening question — it says "
                  "whether a change is worth a real test, not whether to make it. "

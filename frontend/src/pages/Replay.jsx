@@ -347,6 +347,12 @@ function Report({ r }) {
           <Row strong label="Profit / loss"
             a={<span className={b.profit >= 0 ? "text-long" : "text-short"}>{money(b.profit)}</span>}
             b={<span className={w.profit >= 0 ? "text-long" : "text-short"}>{money(w.profit)}</span>} />
+          {r.actual?.trades > 0 && (
+            <Row label="Actually traded" indent
+              a={<span className={r.actual.profit >= 0 ? "text-long" : "text-short"}>
+                {money(r.actual.profit)}</span>}
+              b={<span className="text-muted">{r.actual.trades} real orders</span>} />
+          )}
           <Row label="Wins / losses" a={`${b.wins} / ${b.losses}`} b={`${w.wins} / ${w.losses}`} />
           <Row label="TP1 hit" a={b.tp1} b={w.tp1} />
           <Row label="TP2 hit" a={b.tp2} b={w.tp2} />

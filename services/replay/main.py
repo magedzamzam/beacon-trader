@@ -484,8 +484,10 @@ async def _run_whatif(session, job, cfg: dict) -> tuple:
     alt_res = PortfolioSim(alt_v, series, ctx=ctx).run(alt_signals)
     alt_res.not_taken.extend(geo_skipped)
 
+    actual = await store.real_pl(session, source_ids=source_ids,
+                                 account_ids=account_ids, frm=frm, to=to)
     rep = W.report(base_res, alt_res, changes=changes, scope_label=scope_label,
-                   frm=frm, to=to, signals=signals)
+                   frm=frm, to=to, signals=signals, actual=actual)
     return rep, {"baseline": base_res, "whatif": alt_res}, series, symbol, frm, to
 
 

@@ -456,6 +456,57 @@ def test_the_unreachable_exit_is_the_first_thing_the_report_says():
     assert "never has a leg left to protect" in rep["caveats"][0]
 
 
+def test_a_simulated_profit_on_a_losing_channel_is_called_out():
+    """MEASURED: GOLD VIP SIGNAL TM simulates at +1,438 over 2026-07-05..07-31
+    while the account really lost 41,639 on it in the same window (113 trades).
+
+    The simulated number is not wrong for what it is — today's config over old
+    signals, and the book ran 5% risk until 2026-07-25 against today's 2% — but
+    read on its own it turns the worst channel on the book into a winner. That
+    is the single most expensive misreading this page could invite."""
+    c = W.reality_caveat({"trades": 113, "profit": -41638.72},
+                         {"profit": 1438.21})
+    assert c and c.startswith("The simulated column says you MADE money")
+    assert "-41,638.72" in c and "113 trades" in c
+    assert "CURRENT settings over old signals" in c
+
+
+def test_the_mirror_case_is_called_out_too():
+    c = W.reality_caveat({"trades": 40, "profit": 5000.0}, {"profit": -900.0})
+    assert c and "LOST money on a window where the account made it" in c
+
+
+def test_agreement_raises_nothing():
+    assert W.reality_caveat({"trades": 40, "profit": -1200.0},
+                            {"profit": -1100.0}) is None
+
+
+def test_a_big_gap_in_the_same_direction_is_still_called_out():
+    """Same sign is not agreement. Losing 40k and simulating a 1k loss is the
+    same misreading wearing a minus sign."""
+    c = W.reality_caveat({"trades": 113, "profit": -41638.72},
+                         {"profit": -1100.0})
+    assert c and "a long way from what the account did" in c
+
+
+def test_a_window_with_no_real_trades_says_nothing():
+    """A backtest over a period the account never traded has nothing to
+    compare against — a warning there would be noise."""
+    assert W.reality_caveat({"trades": 0, "profit": 0.0}, {"profit": 500.0}) is None
+    assert W.reality_caveat(None, {"profit": 500.0}) is None
+
+
+def test_the_reality_gap_outranks_every_other_caveat():
+    """It decides whether the left column means anything at all."""
+    sigs = [_S(2, dt.datetime(2026, 7, 5, 16, 32)) for _ in range(30)]
+    rep = W.report(_Res([]), _Res([]), changes={"exit": "be_at_tp2"},
+                   scope_label="GOLD VIP SIGNAL TM", signals=sigs,
+                   actual={"trades": 113, "profit": -41638.72})
+    assert len(rep["caveats"]) == 3
+    assert "Really traded:" in rep["caveats"][0]
+    assert rep["actual"]["trades"] == 113
+
+
 def test_the_baseline_is_not_called_what_happened():
     """It is a SIMULATION of the current setup over these signals. On this book
     179 of 856 signals were never traded live at all, and the Reconciler exists
