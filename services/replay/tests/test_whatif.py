@@ -370,6 +370,54 @@ def test_the_report_carries_the_caveat_where_the_page_can_show_it():
     assert "backlog" in rep["caveats"][0]
 
 
+class _S:
+    def __init__(self, n_tps, at=None):
+        self.parsed = type("P", (), {"tps": [0] * n_tps})()
+        self.at = at or dt.datetime(2026, 7, 8, 9, 0)
+
+
+def test_an_exit_that_can_never_fire_is_declared():
+    """MEASURED: all 114 Quartz Elite signals post exactly 2 targets, so
+    `be_at_tp2` and `let_it_run` returned BYTE-IDENTICAL results — TP2 closes
+    the last leg and there is nothing left to move a stop on.
+
+    The run was really measuring "stop ratcheting at TP1", and the verdict named
+    the wrong cause. A change that cannot fire is the silent-no-op failure this
+    module exists to refuse: nothing errors, the numbers move for another
+    reason, and the operator acts on a wrong attribution."""
+    c = W.exit_reach_caveat([_S(2) for _ in range(114)], {"exit": "be_at_tp2"})
+    assert c and "every one of" in c and "114" in c
+    assert "REMOVING the exit you run today" in c
+
+
+def test_a_ladder_deep_enough_for_the_ratchet_raises_nothing():
+    assert W.exit_reach_caveat([_S(4) for _ in range(50)],
+                               {"exit": "be_at_tp2"}) is None
+    assert W.exit_reach_caveat([_S(2) for _ in range(50)],
+                               {"exit": "be_at_tp1"}) is None
+
+
+def test_never_moving_the_stop_is_always_reachable():
+    """`let_it_run` is the absence of a ratchet, so it cannot fail to fire."""
+    assert W.exit_reach_caveat([_S(2) for _ in range(50)],
+                               {"exit": "let_it_run"}) is None
+
+
+def test_a_mixed_book_below_the_threshold_raises_nothing():
+    """Half the book reaching TP2 is a real test, not a no-op."""
+    sigs = [_S(2) for _ in range(50)] + [_S(4) for _ in range(50)]
+    assert W.exit_reach_caveat(sigs, {"exit": "be_at_tp2"}) is None
+
+
+def test_the_unreachable_exit_is_the_first_thing_the_report_says():
+    """It changes what the numbers MEAN, so it outranks the backfill note."""
+    sigs = [_S(2, dt.datetime(2026, 7, 5, 16, 32)) for _ in range(30)]
+    rep = W.report(_Res([]), _Res([]), changes={"exit": "be_at_tp2"},
+                   scope_label="Quartz Elite", signals=sigs)
+    assert len(rep["caveats"]) == 2
+    assert "never has a leg left to protect" in rep["caveats"][0]
+
+
 def test_the_baseline_is_not_called_what_happened():
     """It is a SIMULATION of the current setup over these signals. On this book
     179 of 856 signals were never traded live at all, and the Reconciler exists

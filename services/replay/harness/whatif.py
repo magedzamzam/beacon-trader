@@ -319,6 +319,45 @@ def bulk_ingest_caveats(signals, changes: dict) -> List[str]:
     return out
 
 
+# The TP index each named exit ratchets on. A ratchet at TP N only protects
+# something if a leg is still open AFTER TP N closes — i.e. the signal posted
+# more than N targets.
+EXIT_TRIGGER = {"be_at_tp1": 1, "be_at_tp2": 2}
+
+
+def exit_reach_caveat(signals, changes: dict) -> Optional[str]:
+    """Say when the chosen exit could not fire on the signals it was tested on.
+
+    MEASURED: all 114 Quartz Elite signals post exactly 2 targets, so
+    `be_at_tp2` and `let_it_run` returned byte-identical results — TP2 closes
+    the last leg and there is nothing left to move a stop on. The run was really
+    measuring "stop ratcheting at TP1", and the verdict named the wrong cause.
+
+    A change that cannot fire is the silent-no-op failure this module exists to
+    refuse: nothing errors, the numbers move for a different reason, and the
+    operator acts on an attribution that is wrong."""
+    idx = EXIT_TRIGGER.get(changes.get("exit"))
+    if not idx:
+        return None
+    depths = []
+    for s in signals:
+        try:
+            depths.append(len(s.parsed.tps or ()))
+        except AttributeError:
+            continue
+    if not depths:
+        return None
+    unreachable = sum(1 for d in depths if d <= idx)
+    if unreachable < 0.9 * len(depths):
+        return None
+    label = EXIT_LABELS.get(changes["exit"], changes["exit"])
+    every = "every one of" if unreachable == len(depths) else f"{unreachable} of"
+    return (f"{every} these {len(depths)} signals posts {idx} target(s) or "
+            f"fewer, so \"{label}\" never has a leg left to protect. Any "
+            "difference you see below comes from REMOVING the exit you run "
+            "today, not from adding this one.")
+
+
 def verdict(base: dict, alt: dict, changes: dict) -> dict:
     """One sentence a person can act on, plus the two numbers behind it."""
     delta = round(alt["profit"] - base["profit"], 2)
@@ -376,6 +415,9 @@ def report(base_res, alt_res, *, changes: dict, scope_label: str,
     base = summarise(base_res, label="Your setup now")
     alt = summarise(alt_res, label="What-if: " + describe(changes))
     caveats = bulk_ingest_caveats(signals, changes)
+    reach = exit_reach_caveat(signals, changes)
+    if reach:
+        caveats.insert(0, reach)      # it changes what the numbers MEAN
     return {
         "scope": scope_label,
         "from": frm.isoformat() if frm is not None else None,
