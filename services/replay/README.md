@@ -103,7 +103,18 @@ distribution below is measured on the close.
 * **Same-bar TP+SL is scored as the STOP.** A 1m bar cannot say which came
   first. `n_same_bar_ambiguous_legs` is a headline field.
 * **A LIMIT fills at its level, never better.** Gap improvement is free money
-  the harness cannot verify.
+  the harness cannot verify. **That refusal is not free, and since #190 it is
+  measured rather than assumed away:** it pushes `fill_adverse` positive on its
+  own, so `fill_adverse.decomposition` splits the number into `by_design_mean`
+  (this rule) and `residual_mean` (everything else, over the same denominator so
+  the subtraction is an identity). `residual_mean` is the only part a spread or
+  feed argument may be built on. The same rule cuts the other way on a STOP that
+  gapped through its trigger — the simulator fills at the trigger while live
+  pays the gap — so that contribution comes back NEGATIVE, and the two order
+  types are reported apart rather than netted to a misleading ~0. A zero
+  residual says the harness explains its own fill error; it says nothing about
+  whether the store's LIVE-endpoint bars match the DEMO accounts they back
+  (#190 defect B — that needs an overlapping re-pull from Capital.com).
 * **Slippage is adverse-only** and applies to MARKET/STOP entries and SL exits
   (the fills that cross the spread). LIMIT entries and TP exits are passive.
   Default `0.0` — an explicit operator input, not a number the harness invents.

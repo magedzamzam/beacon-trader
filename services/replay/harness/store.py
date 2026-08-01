@@ -402,7 +402,12 @@ def sim_legs_for_validation(res) -> tuple:
                          # explained rather than counted.
                          "order_type": l.order_type, "entry": l.entry,
                          "closest_approach": l.closest_approach,
-                         "expired_on_fillable_bar": l.expired_on_fillable_bar})
+                         "expired_on_fillable_bar": l.expired_on_fillable_bar,
+                         # #190: what the "fills AT its level, never better" rule
+                         # cost on this fill. Carried so `fill_adverse` can be
+                         # split into the harness's own rule and the residual,
+                         # rather than the whole of it being read as spread.
+                         "gap_at_open": l.gap_at_open})
     return legs, trades
 
 

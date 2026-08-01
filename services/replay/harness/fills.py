@@ -17,6 +17,9 @@ TWO CONSERVATIVE CHOICES, both counted and reported rather than assumed away:
    resting BUY limit would in reality fill at the better open price; crediting
    that improvement is free money the harness cannot verify, so it is not
    credited. Slippage, where configured, is applied ADVERSELY only.
+   That refusal is not free — it pushes `fill_adverse` positive on its own — so
+   since #190 it is MEASURED per fill as `gap_at_open` and subtracted out before
+   any of that number is attributed to the candle feed's spread.
 
 Slippage is a per-fill price penalty in instrument points, applied to fills that
 cross the spread on their own initiative — MARKET entries, STOP entries, and
@@ -105,6 +108,17 @@ class SimLeg:
     # `_expire_working` runs before `_fill_working`, which is the cheapest of the
     # candidate causes to eliminate — so it is COUNTED rather than argued about.
     expired_on_fillable_bar: bool = False
+
+    # --- fill-model decomposition (#190) --------------------------------------
+    # What choice 2 below cost (or saved) on THIS fill, adverse-signed. Positive
+    # = a LIMIT that declined a gap-open improvement; negative = a STOP filled at
+    # its trigger on a bar that opened beyond it. None when the bar did not open
+    # through the level, so live would have filled where the simulator did.
+    #
+    # It exists so `fill_adverse` can be SPLIT: a deliberate refusal to credit
+    # price improvement produces a positive mean on its own, and attributing that
+    # to the candle feed's spread would charge spread for the harness's own rule.
+    gap_at_open: Optional[float] = None
 
     # --- helpers --------------------------------------------------------------
     @property
@@ -197,11 +211,13 @@ def try_fill(leg: SimLeg, direction: str, bar: B.Bar, *,
         if not B.limit_touched(direction, leg.entry, bar):
             return False
         px = leg.entry
+        leg.gap_at_open = B.gap_at_open(direction, ot, leg.entry, bar)
     elif ot == "STOP":
         level = leg.trigger if leg.trigger is not None else leg.entry
         if not B.stop_triggered(direction, level, bar):
             return False
         px = level + B.adverse(direction, slippage_points)
+        leg.gap_at_open = B.gap_at_open(direction, ot, level, bar)
     else:
         return False
     leg.status = OPEN

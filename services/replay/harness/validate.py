@@ -8,7 +8,10 @@ an opinion with a confidence interval attached.
 WHAT IS COMPARED
   fill    simulated fill price vs the leg's real `fill_price`. A stored 0 is an
           UNKNOWN fill, not a fill at zero (#159), and is excluded rather than
-          scored as a 1000-point error.
+          scored as a 1000-point error. `fill_adverse` carries a DECOMPOSITION
+          (#190): the harness declines gap-open price improvement by design, and
+          that contribution is subtracted out before the residual is read as
+          anything about the feed's spread.
   outcome simulated leg outcome vs the real leg `outcome`, on FILLED legs only.
           An order that never filled has no outcome to agree about.
   R       simulated R vs broker-truth R. Trade-level P&L only, never
@@ -90,6 +93,10 @@ def compare(sim_legs: Sequence[dict], live_legs: Sequence[dict]) -> dict:
 
     fill_deltas: List[float] = []
     adverse_deltas: List[float] = []
+    # #190: the by-design half of `adverse_deltas`. Same population, same order,
+    # so the two means are subtractable — see `_fill_model_block`.
+    gap_deltas: List[float] = []
+    gap_by_order_type: dict = {}
     # #185 defect A: legs the simulator never filled and live did. 34 of the 72
     # disagreements sit here, and the CAUSE is not readable from the count.
     under_fill_misses: List[float] = []
@@ -118,6 +125,18 @@ def compare(sim_legs: Sequence[dict], live_legs: Sequence[dict]) -> dict:
                                    sf, lf)
             if d_adv is not None:
                 adverse_deltas.append(d_adv)
+                # #190: how much of THIS delta the harness's own "fills at its
+                # level, never better" rule produced. Appended on the same
+                # branch as `d_adv` — a gap recorded on a leg that never
+                # entered the adverse mean would make the two means describe
+                # different populations and the subtraction meaningless.
+                g = _num(s.get("gap_at_open")) or 0.0
+                gap_deltas.append(g)
+                if g:
+                    ot = str(s.get("order_type") or "?")
+                    b = gap_by_order_type.setdefault(ot, {"n": 0, "sum": 0.0})
+                    b["n"] += 1
+                    b["sum"] += g
         if sf is None and lf is not None:
             # The simulator never filled an entry live DID fill. Record how far
             # its side came short, and what live went on to do — a miss that
@@ -188,17 +207,71 @@ def compare(sim_legs: Sequence[dict], live_legs: Sequence[dict]) -> dict:
         "fill": _dist(fill_deltas, "delta_fill (sim - live), instrument points "
                                    "— pooled across BUY and SELL, so the MEAN "
                                    "is not a bias; read fill_adverse for that"),
-        "fill_adverse": _dist(
+        "fill_adverse": dict(_dist(
             adverse_deltas,
             "delta_fill re-signed so POSITIVE = the simulation got the WORSE "
             "entry. A negative mean is the harness giving itself better fills "
             "than live got, which flatters every variant it ranks."),
+            **{"decomposition": _fill_model_block(adverse_deltas, gap_deltas,
+                                                  gap_by_order_type)}),
         "under_fill": _under_fill_block(under_fill_misses, n_under_fill,
                                         n_under_fill_ttl,
                                         under_fill_by_live_outcome,
                                         under_fill_by_order_type,
                                         under_fill_beyond),
         "rows": rows,
+    }
+
+
+def _fill_model_block(adverse: List[float], gaps: List[float],
+                      by_order_type: dict) -> dict:
+    """Split `fill_adverse` into the harness's own rule and what is left (#190).
+
+    `fill_adverse` was read as evidence about the candle feed's spread. It is not
+    a clean measurement of that, because the simulator contains a deliberate rule
+    that pushes it positive: a LIMIT fills AT its level and never better, so every
+    bar that gapped through a resting entry contributes the improvement live would
+    have taken and the harness declines (`fills.py`, choice 2). The same rule cuts
+    the other way on a STOP that gapped through its trigger, where the simulator
+    fills at the trigger and live pays the gap.
+
+    Both are known exactly, per fill, so neither has to be inferred:
+
+        by_design_mean  the mean contribution of that rule, over the SAME
+                        denominator as `fill_adverse.mean` — every scored fill,
+                        not just the gapped ones. That is what makes
+                        `residual_mean = fill_adverse.mean - by_design_mean`
+                        an identity rather than an approximation.
+        residual_mean   what is left once the rule is paid for. THIS is the
+                        number a spread argument may use.
+
+    A residual near zero means the fill error was the harness's own modelling
+    choice and there is nothing about the feed to explain. It does NOT rule a
+    live-vs-demo spread difference in or out — that needs an overlapping re-pull
+    from the broker, not this harness (#190 defect B).
+    """
+    n = len(adverse)
+    if not n:
+        return {"n_fills_scored": 0, "n_gapped_fills": 0,
+                "by_design_mean": None, "residual_mean": None,
+                "by_order_type": {}}
+    obs_mean = sum(adverse) / n
+    by_design = sum(gaps) / n
+    return {
+        "n_fills_scored": n,
+        "n_gapped_fills": sum(1 for g in gaps if g),
+        "by_design_total": round(sum(gaps), 5),
+        "by_design_mean": round(by_design, 5),
+        "residual_mean": round(obs_mean - by_design, 5),
+        "by_order_type": {
+            k: {"n_gapped": v["n"],
+                "total": round(v["sum"], 5),
+                "mean_contribution": round(v["sum"] / n, 5)}
+            for k, v in sorted(by_order_type.items())},
+        "label": ("`fill_adverse.mean` minus the price improvement the harness "
+                  "refuses to credit. POSITIVE by_design_mean = the rule is "
+                  "making the simulation look worse than live; residual_mean is "
+                  "the only part a spread or feed argument may be built on."),
     }
 
 

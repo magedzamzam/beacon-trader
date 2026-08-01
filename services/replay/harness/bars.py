@@ -113,6 +113,43 @@ def entry_shortfall(direction: str, order_type: str, level: float,
     return None                          # MARKET always fills; there is no gap
 
 
+def gap_at_open(direction: str, order_type: str, level: float,
+                bar: Bar) -> Optional[float]:
+    """How much the "fills AT its level" rule cost (or saved) on THIS fill (#190).
+
+    The harness fills a LIMIT at its level and never better, deliberately: a bar
+    that gapped through a resting BUY limit would in reality have filled at the
+    better open, and crediting that improvement is free money it cannot verify
+    (`fills.py`). That refusal is not free — it puts a POSITIVE mean into
+    `fill_adverse` all by itself, and spread must not be charged for it.
+
+    So it is measured rather than argued about. Compare the level the simulator
+    fills at against the price the bar's OPEN would have given on the side we
+    transact, and return it only when the bar OPENED already through the level —
+    the one case where live would genuinely have transacted at the open instead.
+
+    ADVERSE-SIGNED, the same convention as `validate._adverse_delta`:
+      * POSITIVE — a LIMIT whose bar opened BETTER than the level. The simulator
+        declines the improvement, so its fill is worse than live's would be.
+      * NEGATIVE — a STOP whose bar opened BEYOND the trigger. Live pays the gap;
+        the simulator fills at the trigger, so it is FLATTERED here. The same
+        modelling choice cuts both ways and both directions are reported.
+      * None — no gap (the level was reached inside the bar, so live would have
+        filled at the level too), or a MARKET order, which already fills at the
+        open and has nothing to forgo.
+
+    Measured against the ORDER'S LEVEL, before slippage: slippage is a separate,
+    operator-configured penalty, and folding it in here would attribute a
+    deliberate cost to the fill model."""
+    if order_type not in ("LIMIT", "STOP"):
+        return None
+    px = entry_price_now(direction, bar)          # the side we pay, at the open
+    d = (level - px) if direction == BUY else (px - level)
+    if order_type == "LIMIT":
+        return d if d > 0 else None               # opened better; improvement forgone
+    return d if d < 0 else None                   # opened worse; trigger fill flatters
+
+
 def tp_touched(direction: str, tp: float, bar: Bar) -> bool:
     """We exit a BUY by SELLING at the bid, so a BUY take-profit needs
     `high_bid >= tp`. The mirror for a SELL."""
