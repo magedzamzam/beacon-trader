@@ -18,6 +18,19 @@ export default function Signals() {
   const [add, setAdd] = useState(false);
   const [busy, setBusy] = useState(null);
   const [score, setScore] = useState({});   // signal_id -> P(win) result
+
+  // Awaited HERE, not inside the setScore updater. `setScore(v => ({...await}))`
+  // puts the await inside a non-async callback — which esbuild rejects outright,
+  // and which would have been a silent promise-in-state bug if it had not.
+  const runScore = async (id) => {
+    setScore(v => ({ ...v, [id]: { loading: true } }));
+    try {
+      const res = await api.bayesScore(id);
+      setScore(v => ({ ...v, [id]: res }));
+    } catch (e) {
+      setScore(v => ({ ...v, [id]: { error: e.message } }));
+    }
+  };
   const [structId, setStructId] = useState(null);   // signal id whose structure panel is open
   const [reinitSig, setReinitSig] = useState(null); // signal pending re-initiate confirmation
   const [tradeId, setTradeId] = useState(null);     // trade id whose TradeDetail modal is open
@@ -108,11 +121,7 @@ export default function Signals() {
                       <Button variant="ghost" onClick={() => runAi(s.id)} title="Run AI validation">
                         <Sparkles className={`w-4 h-4 ${busy === s.id ? "animate-pulse" : ""}`} /></Button>
                       <Button variant="ghost" title="Naive-Bayes P(win) from the captured features"
-                        onClick={async () => {
-                          setScore(v => ({ ...v, [s.id]: { loading: true } }));
-                          try { setScore(v => ({ ...v, [s.id]: await api.bayesScore(s.id) })); }
-                          catch (e) { setScore(v => ({ ...v, [s.id]: { error: e.message } })); }
-                        }}><Sigma className="w-4 h-4" /></Button>
+                        onClick={() => runScore(s.id)}><Sigma className="w-4 h-4" /></Button>
                       <Button variant="ghost" onClick={() => setReinitSig(s)} title="Re-initiate — re-open as a fresh trade"><RotateCcw className="w-4 h-4" /></Button>
                     </div>
                   </Td>
