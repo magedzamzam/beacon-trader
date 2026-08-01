@@ -205,14 +205,25 @@ def summarise(res, *, label: str) -> dict:
     pl = sum(float(t.realized_pl) for t in filled)
     wins = sum(1 for t in filled if float(t.realized_pl) > 0)
 
+    # COUNTED PER TRADE, not per leg. A staged entry is several legs on one
+    # signal, so counting legs reported 172 stop-outs against 78 executed
+    # trades — a number that cannot be read, next to one that can.
+    #
+    # Cumulative, because that is how the ladder is read out loud: a trade that
+    # reached TP2 also reached TP1. And `stopped_out` means the trade reached NO
+    # target and closed at the stop — a trade that banked TP1 and then stopped
+    # the runner is not what anyone means by "stopped out".
     tp = {1: 0, 2: 0, 3: 0}
     stopped = 0
     for t in filled:
-        for leg in t.legs:
-            if leg.outcome == "tp_hit" and leg.tp_index in tp:
-                tp[leg.tp_index] += 1
-            elif leg.outcome in ("sl_hit", "breakeven"):
-                stopped += 1
+        best = max([leg.tp_index or 0 for leg in t.legs
+                    if leg.outcome == "tp_hit"] or [0])
+        for i in tp:
+            if best >= i:
+                tp[i] += 1
+        if not best and any(leg.outcome in ("sl_hit", "breakeven")
+                            for leg in t.legs):
+            stopped += 1
 
     reasons = {}
     for nt in res.not_taken:
@@ -244,6 +255,50 @@ def summarise(res, *, label: str) -> dict:
     }
 
 
+# --- what the answer cannot tell you ------------------------------------------
+# A signal's timestamp is its INGEST time. When a channel is onboarded its
+# backlog arrives at once, so a block of signals carries one moment — and every
+# indicator filter evaluates all of them against the same bar. Measured on this
+# book: 179 of 856 signals sit in `2026-07-05 16:30`, the onboarding backfill.
+#
+# Left unsaid, that reads as "the RSI filter barely did anything" when the truth
+# is "a fifth of your history has no usable time for an indicator to be read at".
+# The filter is not broken and the number is not wrong; the question is partly
+# unanswerable on that block, which is a different thing and has to be said.
+BULK_BAR_MINUTES = 15
+BULK_MIN_SIGNALS = 10
+
+
+def _bar_key(at):
+    return at.replace(minute=(at.minute // BULK_BAR_MINUTES) * BULK_BAR_MINUTES,
+                      second=0, microsecond=0)
+
+
+def bulk_ingest_caveat(signals, changes: dict) -> Optional[str]:
+    """Plain-words warning when a filter cannot see the signals it is judging."""
+    if not (changes.get("filters") or []):
+        return None                        # no filter, no timing dependence
+    counts = {}
+    for s in signals:
+        try:
+            counts[_bar_key(s.at)] = counts.get(_bar_key(s.at), 0) + 1
+        except (AttributeError, TypeError, ValueError):
+            continue
+    blocks = {k: n for k, n in counts.items() if n >= BULK_MIN_SIGNALS}
+    n = sum(blocks.values())
+    if not n:
+        return None
+    worst = max(blocks, key=blocks.get)
+    return (f"{n} of these {len(signals)} signals arrived in "
+            f"{len(blocks)} burst(s) — {blocks[worst]} of them in the single "
+            f"{BULK_BAR_MINUTES}-minute window at "
+            f"{worst.strftime('%Y-%m-%d %H:%M')}, which is when the channel was "
+            "onboarded and its backlog was imported. A filter reads the market "
+            "at the signal's timestamp, so for those it reads ONE moment and "
+            "can only keep or drop the whole block. Treat the filter's effect on "
+            "them as unmeasured rather than small.")
+
+
 def verdict(base: dict, alt: dict, changes: dict) -> dict:
     """One sentence a person can act on, plus the two numbers behind it."""
     delta = round(alt["profit"] - base["profit"], 2)
@@ -267,6 +322,16 @@ def verdict(base: dict, alt: dict, changes: dict) -> dict:
         parts.append(f"It took {abs(removed)} signal(s) you skipped before.")
     if base["executed"] and alt["executed"] == 0:
         parts.append("It skipped EVERYTHING — the filter is too strict to test.")
+    elif changes.get("filters") and removed <= 0:
+        # Measured: an RSI-below-70 filter touched 2 of 114 Quartz signals,
+        # because RSI is rarely that high when these channels post. The delta
+        # was +80 on a -1,189 book, and reading that as "the filter helps" is
+        # reading noise. Say the filter barely applied instead.
+        parts.append("The filter barely applied — it changed almost nothing, so "
+                     "this says little either way. Try a tighter threshold.")
+    elif base["executed"] and removed >= 0.9 * base["executed"]:
+        parts.append("It removed nearly everything, so what is left is a handful "
+                     "of survivors rather than a strategy.")
     if alt["executed"] and alt["executed"] < 10:
         parts.append(f"Only {alt['executed']} trades left, so treat this as a hint "
                      "rather than an answer.")
@@ -281,10 +346,11 @@ def verdict(base: dict, alt: dict, changes: dict) -> dict:
 
 
 def report(base_res, alt_res, *, changes: dict, scope_label: str,
-           frm=None, to=None) -> dict:
-    """The whole answer: two columns and a verdict."""
+           frm=None, to=None, signals=()) -> dict:
+    """The whole answer: two columns, a verdict, and what it cannot tell you."""
     base = summarise(base_res, label="What happened")
     alt = summarise(alt_res, label="What-if: " + describe(changes))
+    caveats = [c for c in (bulk_ingest_caveat(signals, changes),) if c]
     return {
         "scope": scope_label,
         "from": frm.isoformat() if frm is not None else None,
@@ -293,6 +359,7 @@ def report(base_res, alt_res, *, changes: dict, scope_label: str,
         "baseline": base,
         "whatif": alt,
         "verdict": verdict(base, alt, changes),
+        "caveats": caveats,
         "note": ("Same signals, run twice. This is a screening question — it says "
                  "whether a change is worth a real test, not whether to make it. "
                  "A live frozen-week A/B is still what promotes a config."),

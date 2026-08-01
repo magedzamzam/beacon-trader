@@ -223,6 +223,32 @@ def test_the_summary_counts_what_the_operator_asked_to_see():
     assert s["travel"] == {"ran_to_target": 1, "straight_to_sl": 1}
 
 
+def test_the_ladder_is_counted_per_trade_not_per_leg():
+    """A staged entry is several legs on ONE signal. Counting legs reported 172
+    stop-outs against 78 executed trades — a number that cannot be read sitting
+    next to one that can.
+
+    Cumulative, because that is how a ladder is read out loud: a trade that
+    reached TP2 also reached TP1."""
+    t = _Trade(pl=50, mfe=2012, legs=[_Leg("tp_hit", 1, fill_price=2000),
+                                      _Leg("tp_hit", 1, fill_price=2000),
+                                      _Leg("tp_hit", 2, fill_price=2000)])
+    s = W.summarise(_Res([t]), label="x")
+    assert (s["tp1"], s["tp2"], s["tp3"]) == (1, 1, 0)
+
+
+def test_a_trade_that_banked_tp1_then_stopped_is_not_a_stop_out():
+    """"Stopped out" has to mean the trade reached NO target. A runner stopped
+    at breakeven after TP1 is a different outcome, and lumping them together is
+    what makes the exit question unanswerable."""
+    banked = _Trade(pl=40, mfe=2012, legs=[_Leg("tp_hit", 1, fill_price=2000),
+                                           _Leg("breakeven", fill_price=2000)])
+    pure = _Trade(pl=-80, mfe=2002, legs=[_Leg("sl_hit", fill_price=2000),
+                                          _Leg("sl_hit", fill_price=2000)])
+    s = W.summarise(_Res([banked, pure]), label="x")
+    assert s["stopped_out"] == 1
+
+
 def test_a_geometry_skip_is_counted_as_a_rule_skip_not_as_an_error():
     """The worker declares them with a `whatif:` reason because the engine has no
     filter to attribute them to. If `summarise` did not recognise the prefix they
@@ -268,6 +294,72 @@ def test_a_filter_that_skips_everything_says_it_is_untestable():
 def test_a_thin_result_is_labelled_a_hint():
     v = W.verdict(_sum(-500), _sum(200, executed=4), {})
     assert "hint" in v["headline"]
+
+
+def test_a_filter_that_barely_applied_says_so_instead_of_reporting_the_delta():
+    """MEASURED, not hypothetical: an RSI-below-70 filter touched 2 of 114
+    Quartz Elite signals, because RSI is rarely that high when these channels
+    post. The delta was +80 on a -1,189 book. Reporting "Better by 79.91" and
+    stopping there invites acting on noise."""
+    v = W.verdict(_sum(-1189, by_rule=0), _sum(-1109, by_rule=0),
+                  {"filters": [{"kind": "rsi_below", "value": 70}]})
+    assert "barely applied" in v["headline"]
+
+
+def test_a_filter_that_removed_nearly_everything_says_that_too():
+    v = W.verdict(_sum(-1000, executed=100, by_rule=0),
+                  _sum(50, executed=5, by_rule=95),
+                  {"filters": [{"kind": "only_trending"}]})
+    assert "nearly everything" in v["headline"]
+
+
+# --- the caveat -------------------------------------------------------------
+class _At:
+    def __init__(self, at):
+        self.at = at
+
+
+def _burst(n, when, spacing=1):
+    return [_At(when + dt.timedelta(seconds=i * spacing)) for i in range(n)]
+
+
+def test_a_backfilled_burst_is_declared_because_a_filter_cannot_see_it():
+    """MEASURED: 179 of 856 signals sit in the single 15-minute window
+    2026-07-05 16:30 — the onboarding backfill. A signal's timestamp is its
+    INGEST time, so a filter reads ONE market moment for all 179 and can only
+    keep or drop the whole block.
+
+    Unsaid, that reads as "the RSI filter barely did anything" when the truth is
+    "a fifth of the history has no usable time to read an indicator at"."""
+    sigs = _burst(30, dt.datetime(2026, 7, 5, 16, 32)) + \
+        [_At(dt.datetime(2026, 7, 8, 9, 0)), _At(dt.datetime(2026, 7, 9, 11, 0))]
+    c = W.bulk_ingest_caveat(sigs, {"filters": [{"kind": "rsi_below", "value": 70}]})
+    assert c and "30" in c and "2026-07-05 16:30" in c
+    assert "unmeasured" in c
+
+
+def test_the_caveat_is_silent_when_the_change_does_not_depend_on_timing():
+    """An exit ladder is evaluated bar by bar AFTER entry, so a clustered ingest
+    time does not blind it. Warning anyway would train the operator to ignore
+    the line that matters."""
+    sigs = _burst(30, dt.datetime(2026, 7, 5, 16, 32))
+    assert W.bulk_ingest_caveat(sigs, {"exit": "be_at_tp1"}) is None
+    assert W.bulk_ingest_caveat(sigs, {"risk_percent": 1.0}) is None
+
+
+def test_evenly_spread_signals_raise_no_caveat():
+    sigs = [_At(dt.datetime(2026, 7, 5, 9, 0) + dt.timedelta(hours=3 * i))
+            for i in range(40)]
+    assert W.bulk_ingest_caveat(
+        sigs, {"filters": [{"kind": "only_trending"}]}) is None
+
+
+def test_the_report_carries_the_caveat_where_the_page_can_show_it():
+    sigs = _burst(30, dt.datetime(2026, 7, 5, 16, 32))
+    rep = W.report(_Res([]), _Res([]),
+                   changes={"filters": [{"kind": "rsi_below", "value": 70}]},
+                   scope_label="Quartz Elite", signals=sigs)
+    assert rep["caveats"] and "backlog" in rep["caveats"][0]
 
 
 def test_the_report_carries_both_arms_and_the_window():

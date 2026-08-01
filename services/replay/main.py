@@ -485,7 +485,7 @@ async def _run_whatif(session, job, cfg: dict) -> tuple:
     alt_res.not_taken.extend(geo_skipped)
 
     rep = W.report(base_res, alt_res, changes=changes, scope_label=scope_label,
-                   frm=frm, to=to)
+                   frm=frm, to=to, signals=signals)
     return rep, {"baseline": base_res, "whatif": alt_res}, series, symbol, frm, to
 
 

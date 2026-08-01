@@ -341,6 +341,9 @@ function Report({ r }) {
           <Row label="Skipped" a={b.skipped} b={w.skipped} />
           <Row indent label="· filtered by rule" a={b.skipped_by_rule} b={w.skipped_by_rule} />
           <Row indent label="· never filled" a={b.skipped_no_fill} b={w.skipped_no_fill} />
+          {(b.skipped_other > 0 || w.skipped_other > 0) && (
+            <Row indent label="· blocked before entry" a={b.skipped_other} b={w.skipped_other} />
+          )}
           <Row strong label="Profit / loss"
             a={<span className={b.profit >= 0 ? "text-long" : "text-short"}>{money(b.profit)}</span>}
             b={<span className={w.profit >= 0 ? "text-long" : "text-short"}>{money(w.profit)}</span>} />
@@ -362,6 +365,9 @@ function Report({ r }) {
         <div className="text-xs font-medium uppercase tracking-wider text-muted mb-1">Verdict</div>
         <div className="text-sm">{v.headline}</div>
       </div>
+      {(r.caveats || []).map((c, i) => (
+        <div key={i} className="px-4 py-2 text-[11px] text-warn border-t border-edge">{c}</div>
+      ))}
       <div className="px-4 py-2 text-[11px] text-muted border-t border-edge">{r.note}</div>
     </Card>
   );
