@@ -12,6 +12,13 @@
 #     tests/test_isolation.py fails the build's test stage if anything that can
 #     place or cancel an order becomes reachable from this entrypoint.
 FROM python:3.14-slim
+# The commit this image was built from. There is no `.git` and no `git`
+# binary in here, so this build arg is the ONLY way a run can record what
+# code produced it — without it `git_sha` is NULL and #169's reproducibility
+# column says nothing (and a sweep cannot inherit a gate verdict).
+#   GIT_SHA=$(git rev-parse HEAD) docker compose build replay
+ARG GIT_SHA=""
+ENV BEACON_GIT_SHA=$GIT_SHA
 ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /app
 COPY packages/core /app/packages/core

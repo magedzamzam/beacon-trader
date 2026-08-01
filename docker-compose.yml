@@ -77,6 +77,11 @@ services:
     build:
       context: .
       dockerfile: services/replay/Dockerfile
+      args:
+        # Baked into the image so a stored run can name the code that made it.
+        # Empty is tolerated and reported, never guessed:
+        #   GIT_SHA=$(git rev-parse HEAD) docker compose build replay
+        GIT_SHA: "${GIT_SHA:-}"
     restart: "no"
     environment:
       REPLAY_DATABASE_URL: ${REPLAY_DATABASE_URL}

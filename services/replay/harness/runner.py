@@ -68,10 +68,31 @@ def _iso(d):
     return d.isoformat() if d is not None else None
 
 
+GIT_SHA_ENV = "BEACON_GIT_SHA"
+
+
 def git_sha(cwd: Optional[str] = None) -> Optional[str]:
     """The commit the harness ran at. Recorded on the run so a result is always
     attributable to a version of the logic that produced it — a replay whose code
-    cannot be identified is not reproducible, only repeatable."""
+    cannot be identified is not reproducible, only repeatable.
+
+    THE ENV VAR IS CHECKED FIRST, AND IN A CONTAINER IT IS THE ONLY THING THAT
+    WORKS. The image COPYs the source in; there is no `.git` and no `git` binary,
+    so shelling out returns None and always has — every run stored before this
+    was written carries `git_sha = NULL`, which quietly made #169's central
+    reproducibility claim unenforceable and blocked a sweep from inheriting a
+    gate verdict (there was no code identity to match on). The Dockerfile bakes
+    it from a build arg:
+
+        GIT_SHA=$(git rev-parse HEAD) docker compose build replay
+
+    The subprocess fallback is for running the harness straight from a checkout,
+    where it does work. Both paths can still return None — that is reported
+    loudly by the caller rather than swallowed, because an unattributable run is
+    a real limitation, not a detail."""
+    env = (os.getenv(GIT_SHA_ENV) or "").strip()
+    if env:
+        return env[:40]
     try:
         out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=cwd or os.getcwd(),
                              capture_output=True, text=True, timeout=10)

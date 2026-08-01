@@ -57,7 +57,7 @@ the generator emits the same `ParsedSignal`, so planner, sizing, staging,
       "timeframe": "15m",
       "long":  {"when": {"all": [
         {"type": "indicator", "id": "macd", "timeframe": "15m",
-         "field": "cross", "op": "eq", "value": "bull"},
+         "field": "cross", "op": "eq", "value": "up"},   # "up"/"down", not "bull"
         {"type": "indicator", "id": "rsi", "timeframe": "15m",
          "field": "value", "op": "lt", "value": 70}]}},
       "entry": {"type": "close"},
@@ -262,6 +262,23 @@ async def cmd_scaffold(args) -> int:
     return 0
 
 
+def _warn_unattributable() -> None:
+    """Say so, on stderr, when a run cannot name the code that produced it.
+
+    `git_sha` was NULL on every run ever stored here and nothing said a word:
+    the image has no `.git` and no `git` binary, so the lookup failed silently
+    and #169's reproducibility column recorded nothing. A missing sha also stops
+    a sweep inheriting a gate verdict, because there is no code identity to match
+    on. Loud is the only honest setting for a guarantee that has quietly not
+    been holding."""
+    if R.git_sha():
+        return
+    print("WARNING: git_sha is unknown, so this run cannot be attributed to a "
+          "commit and no sweep can inherit its gate verdict. Rebuild with:\n"
+          "  GIT_SHA=$(git rev-parse HEAD) docker compose build replay",
+          file=sys.stderr)
+
+
 async def cmd_run(args) -> int:
     cfg = json.loads(Path(args.config).read_text(encoding="utf-8"))
     # BEFORE the sweep, not after. A missing grant or a missing schema is a
@@ -286,6 +303,7 @@ async def cmd_run(args) -> int:
             return 0
 
         cdig = await store.candle_digest(session, symbol=symbol, timeframe=tf)
+        _warn_unattributable()
         run = await store.create_run(
             session, label=spec.label, signal_source=spec.signal_source,
             symbol=symbol, timeframe=tf, frm=frm, to=to,
@@ -362,6 +380,7 @@ async def cmd_validate(args) -> int:
         stored_run_id = None
         if not args.dry_run:
             cdig = await store.candle_digest(session, symbol=symbol, timeframe=tf)
+            _warn_unattributable()
             run = await store.create_run(
                 session, label=(spec.label or "validation gate"),
                 signal_source=spec.signal_source, symbol=symbol, timeframe=tf,

@@ -79,7 +79,11 @@ class ReplayRun(ReplayBase):
     config: Mapped[dict] = mapped_column(JSON, default=dict)      # the run as authored
     coverage: Mapped[dict] = mapped_column(JSON, default=dict)    # candle window + exclusions
     summary: Mapped[dict] = mapped_column(JSON, default=dict)     # per-variant reports
-    validation: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # §5 gate
+    # `none_as_null` is load-bearing: a plain JSON column stores Python None
+    # as JSON `null`, so `validation IS NOT NULL` matched EVERY run and could
+    # not distinguish "gated" from "never gated".
+    validation: Mapped[dict | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True)              # §5 gate
     status: Mapped[str] = mapped_column(String(16), default="running")    # running|done|failed
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)

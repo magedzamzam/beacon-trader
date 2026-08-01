@@ -213,10 +213,17 @@ async def _validation_index(db: AsyncSession) -> dict:
     Matched on `git_sha` AND `candle_digest` together: different code, or
     different bars, is a different simulator and inherits nothing."""
     q = (select(RUNS.c.id, RUNS.c.git_sha, RUNS.c.candle_digest, RUNS.c.validation)
-         .where(RUNS.c.validation.isnot(None))
          .order_by(RUNS.c.id.desc()).limit(200))
     idx: dict = {}
     for r in (await db.execute(q)).all():
+        # NOT `WHERE validation IS NOT NULL`. A plain JSON column stores Python
+        # None as JSON `null`, so that predicate matched every row ever written
+        # and the index filled up with runs that carry no verdict at all. The
+        # shape is what qualifies a row, checked here so rows written before
+        # `none_as_null` was set are handled the same as rows written after.
+        val = r.validation if isinstance(r.validation, dict) else None
+        if not val or not isinstance(val.get("gate"), dict):
+            continue
         if not r.git_sha or not r.candle_digest:
             continue                    # unattributable — cannot be inherited from
         idx.setdefault((r.git_sha, r.candle_digest), r)   # newest first, so first wins
