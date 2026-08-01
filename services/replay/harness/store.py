@@ -173,7 +173,8 @@ async def candle_digest(session, *, symbol: str, timeframe: str, frm=None,
 
 
 async def load_signals(session, *, symbol: str = "XAUUSD", frm=None, to=None,
-                       source_ids=None, account_ids=None) -> List[SignalRow]:
+                       source_ids=None, account_ids=None,
+                       strict_accounts: bool = False) -> List[SignalRow]:
     """Every signal in the window as a `SignalRow` — including ones we skipped,
     filtered, risk-blocked or never filled. That is the §6 requirement: replaying
     from the signal's STATED entry takes the evaluable set from the filled trades
@@ -202,7 +203,17 @@ async def load_signals(session, *, symbol: str = "XAUUSD", frm=None, to=None,
         src = srcs.get(s.source_id)
         mapped = tuple(src.account_map or ()) if src else ()
         if account_ids:
-            mapped = tuple(a for a in mapped if a in set(account_ids)) or tuple(account_ids)
+            mapped = tuple(a for a in mapped if a in set(account_ids))
+            if not mapped:
+                # A sweep scoped to an account wants the signal evaluated THERE
+                # regardless of the routing table, so the default fails open.
+                # A what-if asking "what did this account actually do" wants the
+                # opposite: a channel that never reached the account did not
+                # contribute to its P&L, and pulling it in answers a different
+                # question than the one that was asked.
+                if strict_accounts:
+                    continue
+                mapped = tuple(account_ids)
         out.append(SignalRow(
             id=s.id, at=s.created_at, source_id=s.source_id,
             source_name=src.name if src else None, account_ids=mapped,

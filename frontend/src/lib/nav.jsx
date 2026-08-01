@@ -60,10 +60,11 @@ export const NAV = [
     { id: "analysis", label: "Bayesian Analysis", icon: Brain },
     { id: "reconciliation", label: "Reconciler", icon: GitCompare },
     { id: "performance", label: "Performance", icon: BarChart3 },
-    // Read-only view of the offline replay harness (#183). Nothing here starts
-    // a run — the sweep is a CLI batch job behind the compose `research`
-    // profile, and keeping it there is what stops it competing with `monitor`.
-    { id: "replay", label: "Backtest (Replay)", icon: FlaskConical },
+    // "Would we have made money doing it differently?" — the same signals run
+    // twice, as they were and with one change. The quant surface (credible
+    // intervals, best-of-N, de-lever nulls) stays on execution-geometry and in
+    // the harness; it is the wrong tool for a screening question.
+    { id: "replay", label: "Backtest", icon: FlaskConical },
   ]},
   { title: "Settings", items: [
     { label: "Connectivity", icon: Plug, children: [

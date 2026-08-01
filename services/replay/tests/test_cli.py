@@ -162,13 +162,49 @@ def test_the_control_arm_is_a_rule_that_can_never_fire():
 
 
 def test_the_page_sends_names_and_never_sl_rules():
-    """If the page ever starts authoring exit rules again, this fails."""
+    """If the page ever starts authoring exit rules again, this fails.
+
+    The form now sends an exit by NAME ("be_at_tp1") and the worker resolves it
+    through `harness.whatif.EXITS`, for the same reason the scaffold resolves
+    ladders server-side: a browser that authors execution config can express a
+    variant no live account would ever run, and the run still reports `done`."""
     page = (SERVICE_ROOT.parents[1] / "frontend/src/pages/Replay.jsx").read_text(
         encoding="utf-8")
-    block = page.split("function LaunchCard", 1)[1].split("function ", 1)[0]
-    assert "scaffold: true" in block
-    assert "sl_rules" not in block, "the browser must not author exit rules"
-    assert "move_sl_to" not in block
+    assert '"whatif"' in page
+    assert "sl_rules" not in page, "the browser must not author exit rules"
+    assert "move_sl_to" not in page
+    assert "entry_filters" not in page, "nor filtration rules"
+
+
+def test_every_exit_the_page_offers_is_one_the_worker_knows():
+    """A dropdown option with no server-side ladder behind it is a silent
+    no-op: the arm runs with the default exit and the report says the change
+    made no difference, which is a wrong answer rather than an error."""
+    import re
+
+    from harness.whatif import EXITS
+    page = (SERVICE_ROOT.parents[1] / "frontend/src/pages/Replay.jsx").read_text(
+        encoding="utf-8")
+    block = page.split("const EXITS = [", 1)[1].split("];", 1)[0]
+    offered = {v for v in re.findall(r'v:\s*"([^"]*)"', block) if v}
+    assert offered, "the page should offer named exits"
+    assert offered <= set(EXITS), sorted(offered - set(EXITS))
+
+
+def test_every_filter_the_page_offers_resolves_to_a_rule_or_a_geometry_skip():
+    """Same failure, on the filtration side � an unknown `kind` falls through
+    `filter_rule` as None and quietly filters nothing."""
+    import re
+
+    from harness.whatif import GEOMETRY_KINDS, filter_rule
+    page = (SERVICE_ROOT.parents[1] / "frontend/src/pages/Replay.jsx").read_text(
+        encoding="utf-8")
+    block = page.split("const FILTERS = [", 1)[1].split("];", 1)[0]
+    kinds = set(re.findall(r'kind:\s*"([^"]+)"', block))
+    assert kinds, "the page should offer named filters"
+    for k in kinds:
+        f = {"kind": k, "value": 1, "sessions": ["New York"]}
+        assert filter_rule(f) is not None or k in GEOMETRY_KINDS, k
 
 
 def test_a_scaffold_request_with_no_known_ladder_is_refused():

@@ -172,6 +172,32 @@ JOBS = Table(
 MAX_QUEUED = 5
 MAX_VARIANTS = 24
 
+# What-if asks: "would we have made money doing it differently?" The browser
+# names a scope, a window and a change; the WORKER builds the two arms from the
+# live config. So there is no variants list to validate here — validating the
+# shape of the question instead is what stops a request that can only produce an
+# empty or meaningless report from reaching the queue at all.
+WHATIF_SCOPES = ("source", "account", "manual")
+
+
+def _check_whatif(cfg: dict) -> None:
+    scope = cfg.get("scope")
+    if not isinstance(scope, dict) or scope.get("type") not in WHATIF_SCOPES:
+        raise HTTPException(400, f"scope.type must be one of {WHATIF_SCOPES}")
+    if scope["type"] == "source" and not scope.get("source_id"):
+        raise HTTPException(400, "scope.source_id is required for a source what-if")
+    if scope["type"] == "account" and not scope.get("account_id"):
+        raise HTTPException(400, "scope.account_id is required for an account what-if")
+    ch = cfg.get("changes")
+    if not isinstance(ch, dict):
+        raise HTTPException(400, "changes must be an object")
+    # Both arms would be byte-identical, and the report would confidently say the
+    # change made no difference — a wrong answer, not an error, which is worse.
+    if not (ch.get("filters") or ch.get("exit") or ch.get("risk_percent")
+            or ch.get("entry_style")):
+        raise HTTPException(400, "changes must contain at least one change, "
+                                 "otherwise both arms are identical")
+
 
 def _unavailable(exc: Exception) -> dict:
     """The grant hasn't been run (or the harness has never created its tables).
@@ -326,14 +352,17 @@ async def enqueue_job(body: dict, db: AsyncSession = Depends(get_db),
     cfg = (body or {}).get("config")
     if not isinstance(cfg, dict) or not cfg:
         raise HTTPException(400, "config must be a non-empty object")
-    variants = cfg.get("variants")
-    if not isinstance(variants, list) or not variants:
-        raise HTTPException(400, "config.variants must be a non-empty list")
-    if len(variants) > MAX_VARIANTS:
-        # Best-of-N is upward-biased by construction; an unbounded grid from a
-        # browser is a false-discovery machine with a submit button.
-        raise HTTPException(400, f"at most {MAX_VARIANTS} variants per run "
-                                 f"(asked for {len(variants)})")
+    if cfg.get("mode") == "whatif":
+        _check_whatif(cfg)
+    else:
+        variants = cfg.get("variants")
+        if not isinstance(variants, list) or not variants:
+            raise HTTPException(400, "config.variants must be a non-empty list")
+        if len(variants) > MAX_VARIANTS:
+            # Best-of-N is upward-biased by construction; an unbounded grid from
+            # a browser is a false-discovery machine with a submit button.
+            raise HTTPException(400, f"at most {MAX_VARIANTS} variants per run "
+                                     f"(asked for {len(variants)})")
     try:
         queued = int((await db.execute(
             select(func.count()).select_from(JOBS)

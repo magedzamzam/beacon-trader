@@ -99,7 +99,8 @@ from harness import runner as R
 from harness import scaffold, store, validate
 from harness import signal_sources as SS
 from harness.models import REPLAY_SCHEMA
-from harness.portfolio import SignalRow
+from harness.context import ContextBuilder
+from harness.portfolio import PortfolioSim, SignalRow
 from harness.variants import RATCHET_TIMINGS, build_variant
 # Imported for its side effect: importing the module is what REGISTERS
 # `generator:rules` (#184). Nothing else here references it by name.
@@ -417,6 +418,77 @@ async def cmd_run(args) -> int:
     return 0
 
 
+async def _run_whatif(session, job, cfg: dict) -> tuple:
+    """Run the SAME signals twice — as they were, and with one change (#183).
+
+    The engine is the shipped one; only the framing is new. Both arms see an
+    identical signal set, so any difference in the result is the change and
+    nothing else."""
+    from harness import whatif as W
+
+    scope = cfg.get("scope") or {}
+    symbol = str(cfg.get("symbol") or "XAUUSD")
+    equity = float(cfg.get("equity") or DEFAULT_PORTAL_EQUITY)
+    frm, to = _dt(cfg.get("from")), _dt(cfg.get("to"))
+
+    base_cfg = await store.load_live_config(
+        session, symbol=symbol, equity=equity, frm=frm, to=to)
+    live = (base_cfg.get("variants") or [{}])[0]
+    changes = cfg.get("changes") or {}
+
+    # SCOPE. Source-wise keeps one channel; account-wise keeps one account and
+    # every channel that reaches it; otherwise the whole book.
+    source_ids = [int(scope["source_id"])] if (
+        scope.get("type") == "source" and scope.get("source_id")) else None
+    account_ids = [int(scope["account_id"])] if (
+        scope.get("type") == "account" and scope.get("account_id")) else None
+
+    series = await store.load_series(session, symbol=symbol, timeframe="1m")
+    if not len(series):
+        raise ValueError(f"no usable candles for {symbol}")
+    signals = await store.load_signals(session, symbol=symbol, frm=frm, to=to,
+                                       source_ids=source_ids,
+                                       account_ids=account_ids,
+                                       strict_accounts=bool(account_ids))
+    sources = await store.load_sources(session)
+    scope_label = (sources.get(source_ids[0], f"source #{source_ids[0]}")
+                   if source_ids else
+                   (f"account #{account_ids[0]}" if account_ids else "all sources"))
+    await store.set_job_progress(
+        session, job, f"{len(signals)} signals · {scope_label}")
+
+    ctx = ContextBuilder(series)
+    base_v = build_variant({**live, "name": "baseline"})
+    alt_v = build_variant({**W.apply_changes(live, changes), "name": "whatif"})
+    base_res = PortfolioSim(base_v, series, ctx=ctx).run(signals)
+
+    # GEOMETRY FILTERS run here, not in the engine: the live filtration grammar
+    # has no `when.type` for stop distance, and #189 measured that sub-ATR stops
+    # were the largest single R leak on the control arm — so it is the one
+    # what-if worth asking that the engine cannot express. Applied by removing
+    # the signal from the alt arm and re-declaring it as a skip, so both columns
+    # still total the same signal count; dropping it silently would make the
+    # what-if arm look like it saw fewer signals rather than rejecting them.
+    geo = [f for f in (changes.get("filters") or [])
+           if f.get("kind") in W.GEOMETRY_KINDS]
+    alt_signals, geo_skipped = signals, []
+    if geo:
+        alt_signals = []
+        for s in signals:
+            atr = ctx.atr(W.ATR_TIMEFRAME, s.at)
+            hit = next((f for f in geo if W.geometry_skip(f, s, atr)), None)
+            (geo_skipped if hit else alt_signals).append(
+                {"signal_id": s.id, "reason": "whatif:" + str(hit.get("kind"))}
+                if hit else s)
+
+    alt_res = PortfolioSim(alt_v, series, ctx=ctx).run(alt_signals)
+    alt_res.not_taken.extend(geo_skipped)
+
+    rep = W.report(base_res, alt_res, changes=changes, scope_label=scope_label,
+                   frm=frm, to=to)
+    return rep, {"baseline": base_res, "whatif": alt_res}, series, symbol, frm, to
+
+
 async def cmd_worker(args) -> int:
     """Drain the job queue the portal appends to (#183).
 
@@ -483,6 +555,26 @@ async def _execute_job(job_id: int) -> str:
                 return "vanished"
             cfg = dict(job.config or {})
             await store.set_job_progress(session, job, "loading candles and signals")
+            if cfg.get("mode") == "whatif":
+                rep, results, series, symbol, frm, to = await _run_whatif(
+                    session, job, cfg)
+                cdig = await store.candle_digest(session, symbol=symbol,
+                                                 timeframe="1m")
+                run = await store.create_run(
+                    session, label=(cfg.get("label") or job.label or "what-if"),
+                    signal_source="historical", symbol=symbol, timeframe="1m",
+                    frm=frm, to=to, n_variants=2, git_sha=R.git_sha(),
+                    code_version=R.CODE_VERSION, config_digest="",
+                    candle_digest=cdig, config=cfg, coverage=series.coverage())
+                rows = []
+                for name, res in sorted(results.items()):
+                    rows.extend(store.result_rows(run.id, name, res))
+                await store.write_results(session, rows)
+                await store.finish_run(session, run, summary={"whatif": rep},
+                                       coverage=series.coverage())
+                await store.finish_job(session, job, status="done", run_id=run.id,
+                                       progress=rep["verdict"]["headline"][:160])
+                return "done"
             (spec, series, signals, sources, symbol, tf, frm, to,
              gen_stats) = await _load(session, cfg)
             if not len(series):

@@ -20,6 +20,9 @@ import ast
 import re
 from pathlib import Path
 
+import pytest
+from fastapi import HTTPException
+
 from app.routers import replay as R
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -71,6 +74,46 @@ def test_the_api_enqueues_and_never_executes():
                       "PortfolioSim", "R.sweep", "run_variant", "asyncio.create_task"):
         assert forbidden not in body, (
             f"the replay router must never {forbidden} — it enqueues, the worker runs")
+
+
+def test_a_whatif_is_validated_on_its_question_not_on_a_variants_list():
+    """A what-if names a scope, a window and a change; the worker builds both
+    arms from the live config. Requiring a `variants` list here would force the
+    browser to send a stub one, and a browser that authors arms is exactly how
+    the previous launch button produced runs that took zero trades.
+
+    Each rejection below is a request that would otherwise reach the queue, run
+    for minutes, and produce a report that is empty or confidently wrong."""
+    ok = {"mode": "whatif", "scope": {"type": "source", "source_id": 3},
+          "changes": {"exit": "be_at_tp1"}}
+    R._check_whatif(ok)                                   # no variants: fine
+
+    bad = [
+        ({"mode": "whatif", "changes": {"exit": "be_at_tp1"}}, "scope"),
+        ({"mode": "whatif", "scope": {"type": "everything"},
+          "changes": {"exit": "be_at_tp1"}}, "scope"),
+        # A named scope with nothing named in it silently widens to the whole
+        # book, which is a different question than the one that was asked.
+        ({"mode": "whatif", "scope": {"type": "source"},
+          "changes": {"exit": "be_at_tp1"}}, "source_id"),
+        ({"mode": "whatif", "scope": {"type": "account"},
+          "changes": {"exit": "be_at_tp1"}}, "account_id"),
+        # The dangerous one: both arms identical, so the report says "no
+        # difference" — a wrong answer rather than an error.
+        ({"mode": "whatif", "scope": {"type": "manual"}, "changes": {}}, "change"),
+        ({"mode": "whatif", "scope": {"type": "manual"}}, "changes"),
+    ]
+    for cfg, needle in bad:
+        with pytest.raises(HTTPException) as exc:
+            R._check_whatif(cfg)
+        assert exc.value.status_code == 400
+        assert needle in str(exc.value.detail)
+
+
+def test_a_whatif_scope_of_manual_needs_no_id():
+    """"Everything" is a real scope — the whole book is the baseline."""
+    R._check_whatif({"mode": "whatif", "scope": {"type": "manual"},
+                     "changes": {"filters": [{"kind": "only_trending"}]}})
 
 
 def test_the_only_writes_are_to_the_job_queue():
@@ -148,26 +191,29 @@ def test_the_client_can_queue_but_not_delete():
     assert "del(" not in block, "the replay client must never DELETE"
 
 
-def test_the_empty_state_names_the_command_that_produces_data():
-    """Same convention as the Analysis page's excursion recompute: an empty
-    state that does not say how to fill it is a dead end."""
+def test_the_cli_front_door_is_still_named_by_the_api():
+    """The page no longer quotes it, and should not: Backtest queues its own runs
+    now, so an empty state telling the operator to SSH would be a lie about the
+    product. But the harness is still driven from a shell for sweeps, and the API
+    response is the only place that name survives � so it is asserted here."""
     assert "main.py run --config" in R.RUN_COMMAND
-    page = REPLAY_PAGE.read_text(encoding="utf-8")
-    assert "run_command" in page
 
 
-def test_the_page_renders_every_guardrail_without_interaction():
-    """#169 §8 is the hard requirement, so the fields it names are asserted to
-    be present in the page source rather than trusted to a reviewer's eye. This
-    box has no npm — there is no render test to lean on."""
-    page = REPLAY_PAGE.read_text(encoding="utf-8")
+def test_the_quant_guardrails_ride_on_the_payload_not_the_page():
+    """#169 �8 said every guardrail must be visible without interaction, and the
+    page that rendered them is gone � Backtest is a screening tool now, and the
+    ranking it used to show moved to the API and the harness.
+
+    So the requirement moves with it. A headline that travels without its basis
+    and its search count is the failure being prevented, and it does not matter
+    whether the reader is a browser or a script."""
+    out = R._headline_of(_summary(basis="in_sample", searched=12, withheld=True))
     for field in ("headline_basis", "n_variants_searched",
-                  "best_of_n_inflation_sigma", "verdict_withheld",
-                  "n_never_filled", "n_blocked_by_risk_limits",
-                  "n_blocked_by_breaker", "n_horizon_capped",
-                  "n_same_bar_ambiguous_legs", "suspect_bars_excluded",
-                  "validation", "hypothesis-generating"):
-        assert field in page, f"the replay page must surface {field}"
+                  "best_of_n_inflation_sigma", "all_verdicts_withheld",
+                  "n_verdicts_withheld", "n_ranked"):
+        assert field in out, f"the run payload must carry {field}"
+    src = (REPO_ROOT / "services/api/app/routers/replay.py").read_text(encoding="utf-8")
+    assert "**_headline_of(" in src, "every listed run must carry its guardrails"
 
 
 def test_the_page_can_launch_a_run():
@@ -176,6 +222,26 @@ def test_the_page_can_launch_a_run():
     page = REPLAY_PAGE.read_text(encoding="utf-8")
     assert "replayEnqueue" in page
     assert "replayJobs" in page
+
+
+def test_the_page_asks_one_question_and_states_the_two_answers():
+    """The rebuild's whole point. The screen exists to answer "would we have made
+    money doing it differently", so it must ask for a scope, a window and a
+    change, and it must show BOTH arms � a what-if number with nothing to
+    compare it against is the thing that made the last page useless."""
+    page = REPLAY_PAGE.read_text(encoding="utf-8")
+    assert '"whatif"' in page and "changes:" in page
+    assert "baseline" in page and "verdict" in page
+    # The jargon the operator asked to be rid of. If any of it comes back onto
+    # this page, it has stopped being the screening tool they asked for.
+    # Comments are stripped first: the header names these terms in order to say
+    # where they went and why, and that explanation is the opposite of the drift
+    # being guarded against.
+    code = re.sub(r"/\*.*?\*/", "", page, flags=re.S)
+    code = re.sub(r"^\s*//.*$", "", code, flags=re.M)
+    for jargon in ("best_of_n_inflation_sigma", "credible", "headline_basis",
+                   "holdout", "delever", "bootstrap"):
+        assert jargon not in code, f"{jargon} does not belong on the what-if page"
 
 
 # --- the guardrail fold-up, unit-tested ---------------------------------------
