@@ -274,29 +274,49 @@ def _bar_key(at):
                       second=0, microsecond=0)
 
 
-def bulk_ingest_caveat(signals, changes: dict) -> Optional[str]:
-    """Plain-words warning when a filter cannot see the signals it is judging."""
-    if not (changes.get("filters") or []):
-        return None                        # no filter, no timing dependence
+def _bursts(signals) -> dict:
     counts = {}
     for s in signals:
         try:
             counts[_bar_key(s.at)] = counts.get(_bar_key(s.at), 0) + 1
         except (AttributeError, TypeError, ValueError):
             continue
-    blocks = {k: n for k, n in counts.items() if n >= BULK_MIN_SIGNALS}
+    return {k: n for k, n in counts.items() if n >= BULK_MIN_SIGNALS}
+
+
+def bulk_ingest_caveats(signals, changes: dict) -> List[str]:
+    """What this answer cannot tell you, in plain words.
+
+    TWO separate problems, and they need saying separately because one is about
+    the change and the other is about the baseline.
+
+    Measured on this book: 179 of 856 signals sit in the single 15-minute window
+    2026-07-05 16:30, and NONE of those 179 produced a real trade. They are the
+    onboarding backlog, imported at once and never executed."""
+    blocks = _bursts(signals)
     n = sum(blocks.values())
     if not n:
-        return None
+        return []
     worst = max(blocks, key=blocks.get)
-    return (f"{n} of these {len(signals)} signals arrived in "
-            f"{len(blocks)} burst(s) — {blocks[worst]} of them in the single "
-            f"{BULK_BAR_MINUTES}-minute window at "
-            f"{worst.strftime('%Y-%m-%d %H:%M')}, which is when the channel was "
-            "onboarded and its backlog was imported. A filter reads the market "
-            "at the signal's timestamp, so for those it reads ONE moment and "
-            "can only keep or drop the whole block. Treat the filter's effect on "
-            "them as unmeasured rather than small.")
+    when = worst.strftime("%Y-%m-%d %H:%M")
+    out = [
+        # ALWAYS. This one is about the left column, so it does not depend on
+        # what was changed. Both arms simulate these signals; the account did
+        # not trade them.
+        f"{n} of these {len(signals)} signals arrived in {len(blocks)} burst(s) "
+        f"— {blocks[worst]} of them in one {BULK_BAR_MINUTES}-minute window at "
+        f"{when}, which is when the channel was onboarded and its backlog was "
+        "imported. Both columns SIMULATE those signals; they are not a replay of "
+        "your account statement.",
+    ]
+    if changes.get("filters"):
+        # Only for filters: an exit ladder is evaluated bar by bar AFTER entry,
+        # so a clustered ingest time does not blind it.
+        out.append(
+            "A filter reads the market at the signal's timestamp, so for those "
+            f"{n} it reads ONE moment and can only keep or drop the whole block. "
+            "Treat the filter's effect on them as unmeasured rather than small.")
+    return out
 
 
 def verdict(base: dict, alt: dict, changes: dict) -> dict:
@@ -348,9 +368,14 @@ def verdict(base: dict, alt: dict, changes: dict) -> dict:
 def report(base_res, alt_res, *, changes: dict, scope_label: str,
            frm=None, to=None, signals=()) -> dict:
     """The whole answer: two columns, a verdict, and what it cannot tell you."""
-    base = summarise(base_res, label="What happened")
+    # NOT "what happened". The left column is a SIMULATION of the current setup
+    # over these signals, and on this book 179 of 856 signals were never traded
+    # live at all. Calling it "what happened" put a claim on it that the number
+    # cannot support — the Reconciler exists precisely because sim and broker
+    # truth differ (agreement 0.9149, #187).
+    base = summarise(base_res, label="Your setup now")
     alt = summarise(alt_res, label="What-if: " + describe(changes))
-    caveats = [c for c in (bulk_ingest_caveat(signals, changes),) if c]
+    caveats = bulk_ingest_caveats(signals, changes)
     return {
         "scope": scope_label,
         "from": frm.isoformat() if frm is not None else None,

@@ -323,35 +323,42 @@ def _burst(n, when, spacing=1):
     return [_At(when + dt.timedelta(seconds=i * spacing)) for i in range(n)]
 
 
-def test_a_backfilled_burst_is_declared_because_a_filter_cannot_see_it():
+def test_a_backfilled_burst_is_declared_even_when_nothing_time_dependent_changed():
     """MEASURED: 179 of 856 signals sit in the single 15-minute window
-    2026-07-05 16:30 — the onboarding backfill. A signal's timestamp is its
-    INGEST time, so a filter reads ONE market moment for all 179 and can only
-    keep or drop the whole block.
+    2026-07-05 16:30, and NONE of those 179 produced a real trade. They are the
+    onboarding backlog — imported at once, never executed.
 
-    Unsaid, that reads as "the RSI filter barely did anything" when the truth is
-    "a fifth of the history has no usable time to read an indicator at"."""
+    This caveat is about the LEFT column, so it fires whatever was changed: both
+    arms simulate those signals, and the operator has to know the baseline is
+    not a replay of their account statement."""
     sigs = _burst(30, dt.datetime(2026, 7, 5, 16, 32)) + \
         [_At(dt.datetime(2026, 7, 8, 9, 0)), _At(dt.datetime(2026, 7, 9, 11, 0))]
-    c = W.bulk_ingest_caveat(sigs, {"filters": [{"kind": "rsi_below", "value": 70}]})
-    assert c and "30" in c and "2026-07-05 16:30" in c
-    assert "unmeasured" in c
+    for changes in ({"exit": "be_at_tp1"}, {"risk_percent": 1.0}):
+        cs = W.bulk_ingest_caveats(sigs, changes)
+        assert len(cs) == 1
+        assert "2026-07-05 16:30" in cs[0] and "SIMULATE" in cs[0]
 
 
-def test_the_caveat_is_silent_when_the_change_does_not_depend_on_timing():
-    """An exit ladder is evaluated bar by bar AFTER entry, so a clustered ingest
-    time does not blind it. Warning anyway would train the operator to ignore
-    the line that matters."""
+def test_a_filter_adds_the_second_caveat_because_it_cannot_see_the_block():
+    """A filter reads the market at the signal's timestamp, so for a burst it
+    reads ONE moment. Unsaid, that reads as "the RSI filter barely did anything"
+    when the truth is "a fifth of the history has no usable time to read an
+    indicator at".
+
+    An exit ladder is evaluated bar by bar AFTER entry, so it is NOT blinded the
+    same way — adding this line there would train the operator to ignore it."""
     sigs = _burst(30, dt.datetime(2026, 7, 5, 16, 32))
-    assert W.bulk_ingest_caveat(sigs, {"exit": "be_at_tp1"}) is None
-    assert W.bulk_ingest_caveat(sigs, {"risk_percent": 1.0}) is None
+    cs = W.bulk_ingest_caveats(sigs, {"filters": [{"kind": "rsi_below", "value": 70}]})
+    assert len(cs) == 2
+    assert "unmeasured" in cs[1]
+    assert len(W.bulk_ingest_caveats(sigs, {"exit": "be_at_tp1"})) == 1
 
 
 def test_evenly_spread_signals_raise_no_caveat():
     sigs = [_At(dt.datetime(2026, 7, 5, 9, 0) + dt.timedelta(hours=3 * i))
             for i in range(40)]
-    assert W.bulk_ingest_caveat(
-        sigs, {"filters": [{"kind": "only_trending"}]}) is None
+    assert W.bulk_ingest_caveats(
+        sigs, {"filters": [{"kind": "only_trending"}]}) == []
 
 
 def test_the_report_carries_the_caveat_where_the_page_can_show_it():
@@ -359,7 +366,18 @@ def test_the_report_carries_the_caveat_where_the_page_can_show_it():
     rep = W.report(_Res([]), _Res([]),
                    changes={"filters": [{"kind": "rsi_below", "value": 70}]},
                    scope_label="Quartz Elite", signals=sigs)
-    assert rep["caveats"] and "backlog" in rep["caveats"][0]
+    assert len(rep["caveats"]) == 2
+    assert "backlog" in rep["caveats"][0]
+
+
+def test_the_baseline_is_not_called_what_happened():
+    """It is a SIMULATION of the current setup over these signals. On this book
+    179 of 856 signals were never traded live at all, and the Reconciler exists
+    because sim and broker truth differ anyway (agreement 0.9149, #187).
+    "What happened" put a claim on that column the number cannot support."""
+    rep = W.report(_Res([]), _Res([]), changes={"exit": "be_at_tp1"},
+                   scope_label="x")
+    assert rep["baseline"]["label"] == "Your setup now"
 
 
 def test_the_report_carries_both_arms_and_the_window():

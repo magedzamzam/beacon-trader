@@ -333,7 +333,7 @@ function Report({ r }) {
       </div>
       <Table minW={640}>
         <thead><tr className="border-b border-edge">
-          <Th></Th><Th right>What happened</Th><Th right>What-if: {r.change}</Th>
+          <Th></Th><Th right>Your setup now</Th><Th right>What-if: {r.change}</Th>
         </tr></thead>
         <tbody>
           <Row label="Signals" a={b.signals} b={w.signals} />
