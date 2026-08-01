@@ -252,6 +252,43 @@ def test_a_miss_that_dodged_a_loser_is_recorded_beside_one_that_cost_a_winner():
     assert uf["live_outcome_of_the_missed"] == {"sl_hit": 1, "tp_hit": 1}
 
 
+def test_a_trade_the_sim_never_entered_is_not_a_flat_outcome():
+    """It settles at realized_pl = 0, so it enters the R comparison as a real
+    0.0R against live's actual R — indistinguishable in the pooled mean from a
+    trade that genuinely scratched. That is the under-fill leaking into the one
+    figure every variant inherits, so both means are reported."""
+    sim = [{"signal_id": 1, "account_id": 1, "r": 0.0, "ever_filled": False},
+           {"signal_id": 2, "account_id": 1, "r": 1.0, "ever_filled": True}]
+    live = [{"signal_id": 1, "account_id": 1, "r": 2.0},
+            {"signal_id": 2, "account_id": 1, "r": 1.0}]
+    out = V.compare_r(sim, live)
+    assert out["n"] == 2
+    assert out["mean"] == pytest.approx(-1.0)              # (0-2) and (1-1)
+    assert out["n_sim_never_filled"] == 1
+    # ...and over the trades it actually entered, the harness agrees exactly.
+    assert out["excluding_sim_never_filled"]["n"] == 1
+    assert out["excluding_sim_never_filled"]["mean"] == pytest.approx(0.0)
+
+
+def test_the_gate_still_judges_on_the_pooled_figure_it_pre_registered():
+    """Reported beside, never substituted for. The thresholds were fixed before
+    the numbers were seen; swapping the basis afterwards is moving the goalposts."""
+    sim = [{"signal_id": 1, "account_id": 1, "r": 0.0, "ever_filled": False}]
+    live = [{"signal_id": 1, "account_id": 1, "r": 2.0}]
+    out = V.compare_r(sim, live)
+    assert V.gate(0.95, out)["passed"] is False            # judged on mean -2.0
+    assert out["excluding_sim_never_filled"]["mean"] is None
+
+
+def test_a_run_whose_trades_all_filled_reports_the_same_number_twice():
+    sim = [{"signal_id": i, "account_id": 1, "r": 0.5, "ever_filled": True}
+           for i in range(4)]
+    live = [{"signal_id": i, "account_id": 1, "r": 0.2} for i in range(4)]
+    out = V.compare_r(sim, live)
+    assert out["n_sim_never_filled"] == 0
+    assert out["excluding_sim_never_filled"]["mean"] == pytest.approx(out["mean"])
+
+
 def test_a_zero_shortfall_is_not_averaged_in_as_a_miss():
     """The level WAS reached; something else stopped the fill. Counting it as a
     ~0 miss would drag the median toward 'it was basically touching' and make

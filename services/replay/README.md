@@ -243,13 +243,51 @@ absent from the agreement rate *and* from the R comparison, while still changing
 which signals each variant is ranked on. That gap is the reason `under_fill` is
 its own block rather than a row in the confusion matrix.
 
-The remaining candidate is the **entry model**: the sim resting a LIMIT at the
-signalled level where live took a MARKET/chase fill beyond it (`build_plan`'s
-bounded market-on-receipt, #67). 2.88 points is the right order of magnitude for
-a 0.25R chase tolerance on a typical gold signal. `live_fill_beyond_entry` now
-measures it directly — adverse-signed, so a systematic chase cannot average to
-zero — and the verdict distinguishes it from the TTL, which the sign of that
-distribution is the only thing that can do.
+#### Confirmed: it is the entry model, and the cause is a data-resolution limit
+
+```
+sim_order_type_of_the_missed    LIMIT 77 · STOP 3
+live_fill_beyond_entry          n 80 · median +7.24 points · 74/80 beyond the level
+```
+
+Live filled a median of **7.24 points beyond** the level the simulator was
+resting at, on **74 of 80**. That is not a spread and not a TTL — live took a
+**MARKET/chase** fill where the harness planned a LIMIT.
+
+The root cause is in `context.py`, and it is structural rather than a bug:
+
+| | live | harness |
+|---|---|---|
+| `current_price` | the quote at signal receipt | open mid of the signal's own 1m bar |
+| `candle_high/low` | the **in-progress** candle — the part of the minute already elapsed | the **previous completed** 1m bar |
+
+`build_plan` opens MARKET when an entry has already been crossed ("the price
+touched it and may not rebound"), or — under a `MARKET` hint — when the gap is
+inside the chase tolerance. Live sees a dip *within the current minute, before
+the signal instant* and fires MARKET. The harness cannot see that dip: **a 1m
+OHLC bar cannot be sliced at the signal instant**, so the only no-look-ahead
+choice available is the previous completed bar. Using the signal bar's own full
+range would import the part of the minute *after* the signal — genuine
+look-ahead, and it would let the planner MARKET-fill on a touch that has not
+happened yet.
+
+So the harness is structurally biased toward LIMIT, and therefore toward
+**under-filling**, and closing it needs sub-minute data rather than a code fix.
+7.24 points is also the right order of magnitude for a 0.25R chase tolerance on a
+typical gold stop, which is consistent with the hint path carrying much of it.
+
+**These trades are not absent from the gate — they are worse than absent.** A
+trade whose entries never filled settles at `realized_pl = 0`, so it enters the R
+comparison as a flat **0.0R** against live's real R, indistinguishable in the
+pooled mean from a trade that genuinely scratched. `compare_r` now reports
+`n_sim_never_filled` and a second distribution `excluding_sim_never_filled`; the
+**gap between the two means is the under-fill's contribution to the one figure
+every variant inherits**. The gate still judges on the pooled figure it
+pre-registered — reported beside, never substituted for.
+
+Read them together: 36 of the 80 missed legs were live winners, so the under-fill
+drags the pooled mean ΔR *down*. The harness is therefore **more** optimistic on
+the trades it does take than the headline +0.060R suggests.
 
 **Defect B is now selectable rather than assumed.** `ratchet_timing` on a
 variant:

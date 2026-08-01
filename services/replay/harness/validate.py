@@ -288,11 +288,15 @@ def _under_fill_block(misses: List[float], n: int, n_ttl: int,
         },
         "live_outcome_of_the_missed": dict(sorted(by_live_outcome.items())),
         "verdict": verdict,
-        "note": ("An entry the simulator never took is a trade it never scored. "
-                 "These do not enter the R comparison at all, so they are "
-                 "INVISIBLE in mean delta R while still changing which signals "
-                 "each variant is ranked on — which is why they get their own "
-                 "block rather than a line in the confusion matrix."),
+        "note": ("An entry the simulator never took has no leg OUTCOME, so it is "
+                 "absent from the agreement rate — but it is NOT absent from the "
+                 "R comparison: the trade settles at realized_pl = 0 and enters "
+                 "as a flat 0.0R against live's real R, indistinguishable in the "
+                 "pooled mean from a trade that genuinely scratched. Read "
+                 "`r.excluding_sim_never_filled` beside `r` — the gap between "
+                 "them is what the under-fill is doing to the one figure every "
+                 "variant inherits. That is why this has its own block rather "
+                 "than a line in the confusion matrix."),
     }
 
 
@@ -307,12 +311,33 @@ def compare_r(sim_trades: Sequence[dict], live_trades: Sequence[dict]) -> dict:
 
     sim_by = {key(r): r for r in sim_trades}
     live_by = {key(r): r for r in live_trades}
-    deltas = []
+    deltas, filled_deltas, n_never_filled = [], [], 0
     for k in set(sim_by) & set(live_by):
         a, b = _num(sim_by[k].get("r")), _num(live_by[k].get("r"))
-        if a is not None and b is not None:
-            deltas.append(a - b)
-    return _dist(deltas, "delta R (sim - live), trade level")
+        if a is None or b is None:
+            continue
+        deltas.append(a - b)
+        # A trade the simulator never entered settles at 0.0R — a real number,
+        # indistinguishable in the pooled mean from a trade that genuinely
+        # scratched. It is NOT agreement; it is the under-fill (#185) leaking
+        # into the one figure every variant inherits.
+        if sim_by[k].get("ever_filled") is False:
+            n_never_filled += 1
+        else:
+            filled_deltas.append(a - b)
+    out = _dist(deltas, "delta R (sim - live), trade level")
+    out["n_sim_never_filled"] = n_never_filled
+    out["excluding_sim_never_filled"] = _dist(
+        filled_deltas,
+        "delta R over trades the simulator ACTUALLY ENTERED. The pooled figure "
+        "above scores every under-filled trade as 0.0R against live's real R, "
+        "which drags the mean toward zero and understates how optimistic the "
+        "harness is on the trades it does take. Read BOTH: the gap between them "
+        "is the under-fill's contribution.")
+    # Deliberately reported beside the gate's figure and not substituted for it:
+    # the thresholds were fixed before the numbers were seen, and swapping the
+    # basis after the fact is moving the goalposts (see the module docstring).
+    return out
 
 
 def gate(outcome_agreement: Optional[float], r_dist: dict) -> dict:

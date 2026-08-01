@@ -385,7 +385,13 @@ def sim_legs_for_validation(res) -> tuple:
     for t in res.trades:
         risk = float(t.planned_risk or 0)
         trades.append({"signal_id": t.signal_id, "account_id": t.account_id,
-                       "r": (float(t.realized_pl) / abs(risk)) if risk else None})
+                       "r": (float(t.realized_pl) / abs(risk)) if risk else None,
+                       # #185: a trade whose entries never filled settles at
+                       # realized_pl = 0, so it enters the R comparison as a
+                       # HONEST-LOOKING 0.0R rather than as absent. The gate has
+                       # to be able to tell those apart from a trade that really
+                       # scratched, or an under-fill reads as a flat outcome.
+                       "ever_filled": t.ever_filled})
         for l in t.legs:
             legs.append({"signal_id": t.signal_id, "account_id": t.account_id,
                          "tp_index": l.tp_index, "direction": t.direction,
