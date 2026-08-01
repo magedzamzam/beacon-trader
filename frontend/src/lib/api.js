@@ -98,6 +98,9 @@ export const api = {
     if (to) p.set("date_to", to);
     return req(`/analysis/excursion?${p.toString()}`);
   },
+  // The offline replay that fills the ladder. The route has always existed and
+  // NOTHING called it — the page told you to POST it by hand (#187).
+  excursionRecompute: (body = {}) => post("/analysis/excursion/recompute", body),
   // execution strategies (#84): per-(account, source) Entry / Filtration / Exit
   strategies: (accountId = "", sourceId = "") => {
     const p = new URLSearchParams();

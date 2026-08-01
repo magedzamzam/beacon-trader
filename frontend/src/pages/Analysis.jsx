@@ -45,7 +45,8 @@ export default function Analysis({ account = "" }) {
       <RangeFilter state={range} variant="coarse" />
       {err && <ErrorNote>{err}</ErrorNote>}
       {!err && data && <ExecutionTaxCard tax={data.execution_tax} />}
-      {!err && <ExcursionLadderCard data={ladder} error={ladderErr} basis={basis} onBasis={setBasis} />}
+      {!err && <ExcursionLadderCard data={ladder} error={ladderErr} basis={basis} onBasis={setBasis}
+        onRecomputed={() => setBasis(b => b)} />}
       {!err && gate && <BayesGateCard gate={gate} />}
       {!err && !data && <Card><Empty>Loading…</Empty></Card>}
       {!err && data && !data.ready && (
@@ -185,7 +186,7 @@ const rVal = (v) => (v == null ? "—" : Number(v).toFixed(2) + "R");
 const tp1Rung = (rungs, tp1r) =>
   (tp1r == null ? null : rungs.find(k => parseFloat(k) >= Number(tp1r)) || null);
 
-function ExcursionLadderCard({ data, error, basis, onBasis }) {
+function ExcursionLadderCard({ data, error, basis, onBasis, onRecomputed }) {
   const rungs = data?.ladder || [];
   const rows = data?.channels || [];
   return (
@@ -203,8 +204,10 @@ function ExcursionLadderCard({ data, error, basis, onBasis }) {
               {label}
             </Button>
           ))}
+          <RecomputeButton onDone={onRecomputed} />
         </div>
       </div>
+      <GateStrip gate={data?.gate} />
       <div className="px-4 py-2 text-[11px] text-muted border-b border-edge">
         How often price reached X×R in the called direction <b>before the original stop</b>, reconstructed
         from the 1m bid/ask candles — independent of both our exit and the channel's own claims.
@@ -308,4 +311,65 @@ function ExecutionTaxCard({ tax }) {
       )}
     </Card>
   );
+}
+
+
+// #187: the gate and the coverage travel WITH the ladder. It read 0.585 and made
+// the whole instrument unusable — not because the reconstruction was wrong, but
+// because the gate pooled three different questions (ratcheted stop-outs, and
+// stop-outs after TP1 was banked, both have an honest reconstruction of "tp1").
+// A reader who has to run a recompute to discover the gate will read the numbers
+// as usable.
+function GateStrip({ gate }) {
+  if (!gate) return null;
+  const a = gate.agreement_sl || {};
+  const c = gate.coverage || {};
+  const ok = a.passed;
+  return (
+    <div className={`px-4 py-2 text-[11px] border-b border-edge ${ok ? "text-muted" : "text-warn"}`}>
+      <div className="flex items-center gap-2 flex-wrap">
+        <Badge tone={ok ? "beacon" : "short"}>
+          agreement {a.rate == null ? "—" : a.rate} {ok ? "≥" : "<"} {a.threshold}
+        </Badge>
+        <span className="num">n={a.n}</span>
+        <span className="text-muted">· excluded {a.n_excluded_ratcheted} ratcheted,
+          {" "}{a.n_excluded_took_tp} post-TP1</span>
+        <span className="text-muted">· {gate.horizon_capped} horizon-capped,
+          {" "}{gate.same_bar_ambiguous} same-bar ambiguous</span>
+      </div>
+      <div className="mt-1 text-muted">{a.cohort}</div>
+      <div className="mt-1 num text-muted">
+        coverage {String(c.first).slice(0, 16)} → {String(c.last).slice(0, 16)}
+        {c.last_recompute && <> · recomputed {String(c.last_recompute).slice(0, 16)}</>}
+        {c.n_signals_after_last_row > 0 && (
+          <b className="text-warn"> · {c.n_signals_after_last_row} newer signal(s) have
+            NO ladder row — absent, not unresolved</b>
+        )}
+      </div>
+      {!ok && <div className="mt-1"><b>Below the bar — do not argue an exit change from
+        this ladder yet.</b></div>}
+    </div>
+  );
+}
+
+// The recompute route has existed since #182 and nothing ever called it: the
+// empty state told you to POST it by hand. It is an offline replay of the whole
+// candle store, so it stays a deliberate act — a button, not a page load.
+function RecomputeButton({ onDone }) {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const run = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const r = await api.excursionRecompute({});
+      setMsg(`${r.written ?? 0} rows · agreement ${r.agreement_sl?.rate ?? "—"}`);
+      onDone?.();
+    } catch (e) { setMsg(e.message); }
+    finally { setBusy(false); }
+  };
+  return (<>
+    <Button variant="ghost" onClick={run} disabled={busy}>
+      {busy ? "recomputing…" : "recompute"}</Button>
+    {msg && <span className="text-[10px] text-muted">{msg}</span>}
+  </>);
 }

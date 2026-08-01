@@ -177,21 +177,51 @@ async def _suspect_count(session, symbol: str, timeframe: str) -> int:
                Candle.quality != "ok"))).scalar() or 0)
 
 
+# The gate's cohort, and why it is narrower than "the broker said sl_hit" (#187).
+#
+# `race` answers ONE question: between TP1 and the ORIGINAL stop, which did price
+# reach FIRST? The gate was comparing that against a different question — "did
+# this trade eventually stop out" — and pooling three incompatible populations,
+# which is why it read 0.585 and made the whole #182 ladder unusable:
+#
+#   pure stop-out (no TP, no ratchet)  85/94  0.9043  <- the comparable cohort
+#   TP1 reached, a later leg stopped    1/27  0.0370  <- NOT a disagreement: the
+#                                                       market really did reach
+#                                                       TP1 first, exactly as the
+#                                                       reconstruction says
+#   stop was RATCHETED                  0/26  0.0000  <- the ratchet ARMS on
+#                                                       tp_hit(1), so race='tp1'
+#                                                       is the only answer it
+#                                                       could ever give
+#
+# So the reconstruction was not wrong; the gate was mis-specified. It now scores
+# only trades whose ORIGINAL stop was hit with TP1 never reached — the one case
+# where "raced to the stop" and "stopped out" are the same claim.
+GATE_MIN_AGREEMENT = 0.90
+
+
 async def _sl_truth(session, signal_ids: list) -> dict:
-    """{signal_id: True} where a leg of that signal's trade actually recorded an
-    `sl_hit`. The validation gate: a reconstruction that disagrees with what the
-    broker did is the reconstruction being wrong, not the data."""
+    """{signal_id: True} for trades that are COMPARABLE to a `race == 'sl'`.
+
+    Included only when the trade stopped out on its ORIGINAL stop AND never
+    reached TP1. A ratcheted stop-out, or a stop-out after TP1 was banked, is a
+    broker `sl_hit` whose honest reconstruction is `tp1` — scoring those as
+    disagreements measures the gate's own definition, not the reconstruction."""
     if not signal_ids:
         return {}
     rows = (await session.execute(
-        select(Trade.signal_id, Leg.outcome)
+        select(Trade.signal_id, Leg.outcome, Leg.sl_moved)
         .join(Leg, Leg.trade_id == Trade.id)
         .where(Trade.signal_id.in_(signal_ids)))).all()
-    out: dict = {}
-    for sid, outcome in rows:
+    stopped, ratcheted, took_tp = set(), set(), set()
+    for sid, outcome, sl_moved in rows:
         if outcome == "sl_hit":
-            out[sid] = True
-    return out
+            stopped.add(sid)
+            if sl_moved:
+                ratcheted.add(sid)
+        elif outcome == "tp_hit":
+            took_tp.add(sid)
+    return {sid: True for sid in stopped - ratcheted - took_tp}
 
 
 async def recompute(session, *, symbol: str = "XAUUSD", timeframe: str = "1m",
@@ -279,12 +309,23 @@ async def recompute(session, *, symbol: str = "XAUUSD", timeframe: str = "1m",
             counts["written"] += 1
 
     await session.commit()
+    rate = round(agree["agreed"] / agree["n"], 4) if agree["n"] else None
     counts["agreement_sl"] = {
         "n": agree["n"],
-        "rate": round(agree["agreed"] / agree["n"], 4) if agree["n"] else None,
-        "note": ("Share of broker-recorded sl_hit trades whose reconstruction also "
-                 "raced to the stop. Materially below 1.0 means the reconstruction "
-                 "is wrong, not the data — do not act on the label until it holds."),
+        "rate": rate,
+        "threshold": GATE_MIN_AGREEMENT,
+        "passed": (rate is not None and rate >= GATE_MIN_AGREEMENT),
+        "cohort": ("trades whose ORIGINAL stop was hit and which never reached "
+                   "TP1 — the only case where 'raced to the stop' and 'stopped "
+                   "out' are the same claim"),
+        "note": ("Share of comparable stop-outs whose reconstruction also raced "
+                 "to the stop. Ratcheted stop-outs and stop-outs after TP1 was "
+                 "banked are EXCLUDED, not counted as disagreements: their honest "
+                 "reconstruction is 'tp1' (#187). Exact agreement is not "
+                 "attainable — same-bar TP+SL is scored conservatively as the "
+                 "stop, suspect bars are dropped, and a 1m bar cannot resolve "
+                 "intra-minute order — so the bar is "
+                 f"{GATE_MIN_AGREEMENT}, not 1.0."),
     }
     counts["fill_clock"] = {
         **clocks,

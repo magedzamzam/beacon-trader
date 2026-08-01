@@ -950,7 +950,86 @@ async def excursion_report(session, frm=None, to=None,
          for name, tp1_r, mfe, mae, race, ladder, capped in rows],
         significance_n=significance_n)
     out["basis"] = basis
+    # #187: the gate and the coverage travel WITH the ladder. A caller that has
+    # to run a separate recompute to find out whether these numbers are usable
+    # will read them as usable. `agreement_sl` is the designated gate; the
+    # coverage tail is what says whether recent signals are simply absent rather
+    # than unresolved.
+    out["gate"] = await excursion_gate(session, basis=basis, frm=frm, to=to)
     return out
+
+
+async def excursion_gate(session, *, basis: str = "signal", frm=None, to=None) -> dict:
+    """The R-ladder's validation gate and coverage, computed from the persisted
+    rows (#187). No recompute — this is a read."""
+    from sqlalchemy import func, select
+    from ..db.models import Leg, Signal, SignalExcursion, Trade
+    from .excursion_store import GATE_MIN_AGREEMENT
+
+    q = (select(SignalExcursion.signal_id, SignalExcursion.race,
+                SignalExcursion.horizon_capped, SignalExcursion.same_bar_ambiguous)
+         .join(Signal, Signal.id == SignalExcursion.signal_id)
+         .where(SignalExcursion.basis == basis))
+    if frm is not None:
+        q = q.where(Signal.created_at >= frm)
+    if to is not None:
+        q = q.where(Signal.created_at < to)
+    rows = (await session.execute(q)).all()
+    by_sig = {sid: (race, capped, amb) for sid, race, capped, amb in rows}
+
+    lrows = (await session.execute(
+        select(Trade.signal_id, Leg.outcome, Leg.sl_moved)
+        .join(Leg, Leg.trade_id == Trade.id)
+        .where(Trade.signal_id.in_(list(by_sig) or [-1])))).all()
+    stopped, ratcheted, took_tp = set(), set(), set()
+    for sid, outcome, moved in lrows:
+        if outcome == "sl_hit":
+            stopped.add(sid)
+            if moved:
+                ratcheted.add(sid)
+        elif outcome == "tp_hit":
+            took_tp.add(sid)
+    cohort = stopped - ratcheted - took_tp
+    agreed = sum(1 for sid in cohort if by_sig.get(sid, (None,))[0] == "sl")
+    n = len(cohort)
+    rate = round(agreed / n, 4) if n else None
+
+    cov = (await session.execute(
+        select(func.min(SignalExcursion.entry_at), func.max(SignalExcursion.entry_at),
+               func.max(SignalExcursion.computed_at))
+        .where(SignalExcursion.basis == basis))).one()
+    first, last, computed = cov
+    newer = int((await session.execute(
+        select(func.count()).select_from(Signal)
+        .where(Signal.created_at > last))).scalar() or 0) if last else 0
+
+    return {
+        "agreement_sl": {
+            "n": n, "rate": rate, "threshold": GATE_MIN_AGREEMENT,
+            "passed": (rate is not None and rate >= GATE_MIN_AGREEMENT),
+            "n_excluded_ratcheted": len(stopped & ratcheted),
+            "n_excluded_took_tp": len((stopped - ratcheted) & took_tp),
+            "cohort": ("stopped on the ORIGINAL stop and never reached TP1 — the "
+                       "only cohort where 'raced to the stop' and 'stopped out' "
+                       "are the same claim (#187)"),
+        },
+        "coverage": {
+            "first": first.isoformat() if first else None,
+            "last": last.isoformat() if last else None,
+            "last_recompute": computed.isoformat() if computed else None,
+            # The tail lag, stated rather than left to be discovered. Signals
+            # newer than the last ladder row have NO row — absent, not
+            # unresolved — and a reader who cannot see that will read the ladder
+            # as covering the present.
+            "n_signals_after_last_row": newer,
+            "note": ("Signals newer than `last` have no ladder row at all. The "
+                     "usual cause is the candle store ending before them (#190), "
+                     "not a failed recompute."),
+        },
+        "horizon_capped": sum(1 for v in by_sig.values() if v[1]),
+        "same_bar_ambiguous": sum(1 for v in by_sig.values() if v[2]),
+        "n_rows": len(by_sig),
+    }
 
 
 # --- Shadow strategies: Monte Carlo geometry null + Turtle breakout -----------
