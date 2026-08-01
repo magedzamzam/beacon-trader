@@ -6,7 +6,8 @@ from beacon_core.analysis import bayes as B
 from beacon_core.analysis import excursion as EX
 from beacon_core.analysis import excursion_store as EXS
 from beacon_core.analysis import feature_vector as FV
-from beacon_core.analysis.report import execution_tax_report, excursion_report
+from beacon_core.analysis.report import (execution_tax_report, excursion_report,
+                                         stop_geometry_report)
 from beacon_core.execution import bayes_gate as BG
 from beacon_core.db.models import (SignalFeature, SignalAnalytics, AiAssessment,
                                    Trade, SignalClaim)
@@ -313,3 +314,19 @@ async def score_signal(signal_id: int, min_n: int = 5, db: AsyncSession = Depend
             "base_rate": round(model.get("base_rate", 0.0), 4) if model.get("ready") else None,
             "score": (None if not sc else
                       {"p_win": round(sc["p_win"], 4), "contributors": sc["contributors"]})}
+
+
+@router.get("/stop-geometry")
+async def stop_geometry(date_from: str = None, date_to: str = None,
+                        floor: float = None, db: AsyncSession = Depends(get_db)):
+    """Sub-ATR stop labels + the widen-and-resize counterfactual (#189).
+
+    Tight stops were the single largest R leak on the control arm in the frozen
+    week — -18.19R across 20 trades, more than the entire winners' book returned.
+    A stop closer than one ATR sits inside gold's ordinary breathing, so it is hit
+    by the instrument's own noise rather than by the trade being wrong.
+
+    SHADOW. Nothing gates on this, and there is not even an evaluator for a
+    stop-geometry gate today. Judge only at N>=30 in the below-floor bucket."""
+    return await stop_geometry_report(db, parse_iso_utc(date_from),
+                                      parse_iso_utc(date_to), floor=floor)

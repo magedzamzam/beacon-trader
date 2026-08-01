@@ -1655,3 +1655,63 @@ def delever_null(pairs, *, n_boot=DEFAULT_BOOT, seed=DEFAULT_SEED) -> dict:
                  "less. Symmetric capture (win ~ loss) is the corroborating "
                  "sign — a selecting arm would deploy less on losers."),
     }
+
+
+async def stop_geometry_report(session, frm=None, to=None,
+                               floor: float = None) -> dict:
+    """Per-signal sub-ATR stop labels + the widen-and-resize counterfactual (#189).
+
+    Joins three persisted layers, none of which is recomputed here:
+      * `signals`            the geometry as called (entry, sl, tp1)
+      * `signal_analytics`   the regime block, for `atr_pct` and `price`
+      * `signal_excursions`  the exit-INDEPENDENT travel (mfe_r / mae_r), which
+                             is the only honest way to ask whether a wider stop
+                             would have survived
+
+    SHADOW. Read-only, gates nothing, and the trading path never consults it."""
+    from sqlalchemy import select
+    from ..db.models import Signal, SignalAnalytics, SignalExcursion, Trade, Leg
+    from .stop_geometry import DEFAULT_FLOOR, rollup, shadow_label
+
+    floor = DEFAULT_FLOOR if floor is None else float(floor)
+    q = (select(Signal.id, Signal.entry_from, Signal.sl, Signal.tps,
+                SignalAnalytics.price, SignalAnalytics.analytics,
+                SignalExcursion.mfe_r, SignalExcursion.mae_r)
+         .select_from(Signal)
+         .join(SignalAnalytics, SignalAnalytics.signal_id == Signal.id)
+         .outerjoin(SignalExcursion,
+                    (SignalExcursion.signal_id == Signal.id)
+                    & (SignalExcursion.basis == "signal")))
+    if frm is not None:
+        q = q.where(Signal.created_at >= frm)
+    if to is not None:
+        q = q.where(Signal.created_at < to)
+    rows = (await session.execute(q)).all()
+
+    sids = [r[0] for r in rows]
+    actual = {}
+    if sids:
+        for sid, pl, risk in (await session.execute(
+                select(Trade.signal_id, Trade.realized_pl, Trade.planned_risk)
+                .where(Trade.signal_id.in_(sids),
+                       Trade.status == "closed"))).all():
+            if pl is not None and risk not in (None, 0) and float(risk) != 0:
+                actual.setdefault(sid, float(pl) / abs(float(risk)))
+
+    labels = []
+    for sid, entry, sl, tps, price, an, mfe, mae in rows:
+        regime = ((an or {}).get("regime") or {})
+        tp1 = (tps or [None])[0]
+        lab = shadow_label(entry=entry, sl=sl, atr_pct=regime.get("atr_pct"),
+                           price=price, mfe_r=mfe, mae_r=mae, tp1=tp1,
+                           floor=floor)
+        if lab is None:
+            continue
+        lab["signal_id"] = sid
+        if sid in actual:
+            lab["actual_r"] = round(actual[sid], 4)
+        labels.append(lab)
+    out = rollup(labels)
+    out["floor"] = floor
+    out["labels"] = labels
+    return out

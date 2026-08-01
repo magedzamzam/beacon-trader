@@ -23,6 +23,7 @@ EXPECTED = {
     ("GET", "/analysis/bayes-gate/report"),
     ("GET", "/analysis/excursion"),
     ("POST", "/analysis/excursion/recompute"),
+    ("GET", "/analysis/stop-geometry"),          # #189, shadow
 }
 
 

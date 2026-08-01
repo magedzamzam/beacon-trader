@@ -101,6 +101,15 @@ export const api = {
   // The offline replay that fills the ladder. The route has always existed and
   // NOTHING called it — the page told you to POST it by hand (#187).
   excursionRecompute: (body = {}) => post("/analysis/excursion/recompute", body),
+  // Sub-ATR stop labels + widen-and-resize counterfactual (#189) — SHADOW.
+  stopGeometry: (range = {}, floor = "") => {
+    const p = new URLSearchParams();
+    if (range.from) p.set("date_from", range.from);
+    if (range.to) p.set("date_to", range.to);
+    if (floor) p.set("floor", floor);
+    const qs = p.toString();
+    return req("/analysis/stop-geometry" + (qs ? "?" + qs : ""));
+  },
   // execution strategies (#84): per-(account, source) Entry / Filtration / Exit
   strategies: (accountId = "", sourceId = "") => {
     const p = new URLSearchParams();

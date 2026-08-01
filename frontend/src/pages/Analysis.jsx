@@ -26,6 +26,7 @@ export default function Analysis({ account = "" }) {
   const [ladder, setLadder] = useState(null);
   const [ladderErr, setLadderErr] = useState(null);
   const [basis, setBasis] = useState("signal");
+  const [stopGeo, setStopGeo] = useState(null);
   const load = () => { setData(null); setErr(null); setGate(null);
     api.bayesAnalysis(minN, range.range, account).then(setData).catch(e => setErr(e.message));
     api.bayesGateReport(minN, range.range, account).then(setGate).catch(() => setGate(null)); };
@@ -33,6 +34,10 @@ export default function Analysis({ account = "" }) {
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [range.fromIso, range.toIso, account]);
   // The excursion ladder (#182) is account-INDEPENDENT by construction, so it
   // follows the date range and the basis toggle but ignores the account filter.
+  // #189: sub-ATR stop labels. Shadow — nothing gates on it.
+  useEffect(() => { setStopGeo(null);
+    api.stopGeometry(range.range).then(setStopGeo).catch(() => setStopGeo(null));
+    /* eslint-disable-next-line */ }, [range.fromIso, range.toIso]);
   useEffect(() => { setLadder(null); setLadderErr(null);
     api.excursionLadder(range.range, basis)
       .then(d => { setLadder(d); setLadderErr(null); })
@@ -47,6 +52,7 @@ export default function Analysis({ account = "" }) {
       {!err && data && <ExecutionTaxCard tax={data.execution_tax} />}
       {!err && <ExcursionLadderCard data={ladder} error={ladderErr} basis={basis} onBasis={setBasis}
         onRecomputed={() => setBasis(b => b)} />}
+      {!err && <StopGeometryCard data={stopGeo} />}
       {!err && gate && <BayesGateCard gate={gate} />}
       {!err && !data && <Card><Empty>Loading…</Empty></Card>}
       {!err && data && !data.ready && (
@@ -372,4 +378,54 @@ function RecomputeButton({ onDone }) {
       {busy ? "recomputing…" : "recompute"}</Button>
     {msg && <span className="text-[10px] text-muted">{msg}</span>}
   </>);
+}
+
+
+// Sub-ATR stop distance (#189) — the single largest R leak on the control arm in
+// the frozen week: -18.19R across 20 trades, more than the entire winners' book
+// returned (+16.43R). A stop closer than one ATR sits inside gold's ordinary
+// breathing, so it is hit by the instrument's own noise rather than by the trade
+// being wrong. SHADOW: nothing gates on it, and there is no evaluator for a
+// stop-geometry gate today.
+function StopGeometryCard({ data }) {
+  if (!data || !data.n) return null;
+  const b = data.below_floor || {};
+  const enough = (b.n_with_counterfactual || 0) >= (data.n_to_confirm || 30);
+  return (
+    <Card>
+      <div className="px-4 py-3 border-b border-edge text-sm font-medium flex items-center gap-2 flex-wrap">
+        Sub-ATR stops
+        <Badge tone="muted">shadow · measure-only</Badge>
+        <Badge tone={enough ? "beacon" : "warn"}>
+          {b.n_with_counterfactual || 0}/{data.n_to_confirm} to confirm</Badge>
+        <span className="text-muted font-normal text-xs num">
+          · {data.n_below_floor}/{data.n} below {data.floor}×ATR
+          {data.median_stop_atr_ratio != null && ` · median ${data.median_stop_atr_ratio}×`}
+        </span>
+      </div>
+      <div className="px-4 py-2 text-[11px] text-muted border-b border-edge">
+        <b>stop_atr_ratio = |entry − SL| ÷ atr_abs</b>, where{" "}
+        <span className="num">atr_abs = (atr_pct ÷ 100) × price</span> — atr_pct is a
+        <b> percent of price</b>, and comparing the stop distance to it unconverted compares
+        dollars to percent. The counterfactual widens the stop to {data.floor}×ATR and
+        <b> resizes to hold risk constant</b>, so only the geometry changes: rejecting instead
+        would book nothing and flatter a losing week for reasons unrelated to stop placement.
+      </div>
+      <div className="px-4 py-3 grid grid-cols-2 md:grid-cols-4 gap-3 text-[11px]">
+        {[["actual (below floor)", b.actual_total_r, true],
+          ["widen + resize", b.widen_total_r, true],
+          ["reject", b.reject_total_r, true],
+          ["would still have stopped", b.n_would_still_have_stopped, false],
+          ["would have reached TP1", b.n_would_have_reached_tp1, false]].map(([k, v, isR]) => (
+          <div key={k} className="rounded bg-panel2 px-3 py-2">
+            <div className="text-[10px] uppercase tracking-wider text-muted">{k}</div>
+            <div className={`num text-sm ${isR && v < 0 ? "text-short" : isR && v > 0 ? "text-long" : ""}`}>
+              {v == null ? "—" : isR ? Number(v).toFixed(2) + "R" : v}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="px-4 py-2 text-[11px] text-muted border-t border-edge">{data.note}</div>
+    </Card>
+  );
 }
