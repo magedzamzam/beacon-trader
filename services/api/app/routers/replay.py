@@ -198,22 +198,55 @@ def _headline_of(summary: dict) -> dict:
     }
 
 
-def _validation_of(run) -> dict:
-    """The §5 gate verdict, flattened. `ran: false` is NOT `passed: false` — one
-    is "nobody checked the simulator against broker truth", the other is "the
-    check failed". Both mean the counterfactual is not actionable, and the UI has
-    to be able to say which."""
+async def _validation_index(db: AsyncSession) -> dict:
+    """`(git_sha, candle_digest)` -> the newest run carrying a gate verdict.
+
+    THE GATE VALIDATES THE SIMULATOR, NOT A SWEEP. What it establishes is that
+    a given version of the code, replayed over a given set of bars, reproduces
+    what the broker actually did. A sweep on that same code and those same bars
+    is covered by it — so reporting "not validated" there is simply false, and it
+    was: every stored sweep showed an amber unvalidated banner while a passing
+    gate sat in the same table.
+
+    Reporting it as the sweep's OWN result would be equally false, so an
+    inherited verdict is labelled as inherited and names the run it came from.
+    Matched on `git_sha` AND `candle_digest` together: different code, or
+    different bars, is a different simulator and inherits nothing."""
+    q = (select(RUNS.c.id, RUNS.c.git_sha, RUNS.c.candle_digest, RUNS.c.validation)
+         .where(RUNS.c.validation.isnot(None))
+         .order_by(RUNS.c.id.desc()).limit(200))
+    idx: dict = {}
+    for r in (await db.execute(q)).all():
+        if not r.git_sha or not r.candle_digest:
+            continue                    # unattributable — cannot be inherited from
+        idx.setdefault((r.git_sha, r.candle_digest), r)   # newest first, so first wins
+    return idx
+
+
+def _validation_of(run, index: dict = None) -> dict:
+    """The §5 gate verdict, flattened.
+
+    `ran: false` is NOT `passed: false` — one is "nobody checked the simulator
+    against broker truth", the other is "the check failed". Both mean the
+    counterfactual is not actionable, and the UI has to be able to say which."""
     val = run.validation or None
+    source, from_run = ("own", run.id) if val is not None else (None, None)
+    if val is None and index:
+        hit = index.get((run.git_sha, run.candle_digest))
+        if hit is not None and hit.id != run.id:
+            val, source, from_run = hit.validation, "inherited", hit.id
     gate = (val or {}).get("gate") or {}
     return {
         "ran": val is not None,
+        "source": source,               # own | inherited | None
+        "from_run_id": from_run,
         "passed": bool(gate.get("passed")) if val is not None else None,
         "failures": gate.get("failures") or [],
         "systematic_bias": gate.get("systematic_bias"),
     }
 
 
-def _run_row(r) -> dict:
+def _run_row(r, index: dict = None) -> dict:
     return {
         "id": r.id, "label": r.label, "signal_source": r.signal_source,
         "symbol": r.symbol, "timeframe": r.timeframe,
@@ -224,7 +257,7 @@ def _run_row(r) -> dict:
         "config_digest": r.config_digest, "candle_digest": r.candle_digest,
         "status": r.status, "error": r.error,
         "started_at": _iso(r.started_at), "finished_at": _iso(r.finished_at),
-        "validation": _validation_of(r),
+        "validation": _validation_of(r, index),
         **_headline_of(r.summary or {}),
     }
 
@@ -243,11 +276,12 @@ async def list_runs(limit: int = 50, offset: int = 0,
         rows = (await db.execute(q)).all()
         total = int((await db.execute(
             select(func.count()).select_from(RUNS))).scalar() or 0)
+        index = await _validation_index(db)
     except SQLAlchemyError as exc:
         await _rollback(db)
         return {**_unavailable(exc), "runs": [], "total": 0}
     return {"available": True, "total": total, "limit": limit, "offset": offset,
-            "runs": [_run_row(r) for r in rows],
+            "runs": [_run_row(r, index) for r in rows],
             "run_command": RUN_COMMAND, "promotion": PROMOTION_BANNER}
 
 
@@ -262,6 +296,7 @@ async def get_run(run_id: int, db: AsyncSession = Depends(get_db)):
     try:
         row = (await db.execute(
             select(RUNS).where(RUNS.c.id == run_id))).first()
+        index = await _validation_index(db) if row is not None else {}
     except SQLAlchemyError as exc:
         await _rollback(db)
         return {**_unavailable(exc), "run": None}
@@ -270,7 +305,7 @@ async def get_run(run_id: int, db: AsyncSession = Depends(get_db)):
     summary = row.summary or {}
     return {
         "available": True,
-        "run": _run_row(row),
+        "run": _run_row(row, index),
         "config": row.config or {},
         "coverage": row.coverage or {},
         "validation": row.validation,

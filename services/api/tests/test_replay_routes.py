@@ -182,15 +182,68 @@ def test_all_verdicts_withheld_is_false_when_there_is_nothing_ranked():
 
 
 class _Run:
-    def __init__(self, validation):
+    def __init__(self, validation, *, id=1, git_sha="abc123", candle_digest="cd1"):
         self.validation = validation
+        self.id = id
+        self.git_sha = git_sha
+        self.candle_digest = candle_digest
+
+
+class _Hit:
+    """A row from `_validation_index` — id + the stored verdict."""
+    def __init__(self, id, validation):
+        self.id = id
+        self.validation = validation
+
+
+PASSED = {"gate": {"passed": True, "failures": []}}
+
+
+def test_a_sweep_inherits_the_gate_that_covers_its_code_and_its_bars():
+    """The gate validates the SIMULATOR — a code version over a set of bars — not
+    one sweep. Every stored sweep used to show an amber "not validated" banner
+    while a passing gate sat in the same table, which was simply false."""
+    index = {("abc123", "cd1"): _Hit(9, PASSED)}
+    got = R._validation_of(_Run(None, id=12), index)
+    assert got["ran"] is True and got["passed"] is True
+    assert got["source"] == "inherited" and got["from_run_id"] == 9
+
+
+def test_an_inherited_verdict_is_never_reported_as_the_runs_own():
+    """Covered-by-a-gate and reconciled-against-broker-truth are different
+    claims, and the UI renders them differently."""
+    index = {("abc123", "cd1"): _Hit(9, PASSED)}
+    assert R._validation_of(_Run(None, id=12), index)["source"] == "inherited"
+    assert R._validation_of(_Run(PASSED, id=9), index)["source"] == "own"
+
+
+def test_a_runs_own_verdict_beats_anything_inheritable():
+    failed = {"gate": {"passed": False, "failures": ["median |delta R| too high"]}}
+    got = R._validation_of(_Run(failed, id=12), {("abc123", "cd1"): _Hit(9, PASSED)})
+    assert got["passed"] is False and got["source"] == "own"
+
+
+def test_different_code_or_different_bars_inherits_nothing():
+    """A gate on other code, or over other candles, is a gate on a different
+    simulator. Inheriting across either would launder an unvalidated run."""
+    index = {("abc123", "cd1"): _Hit(9, PASSED)}
+    assert R._validation_of(_Run(None, git_sha="other"), index)["ran"] is False
+    assert R._validation_of(_Run(None, candle_digest="other"), index)["ran"] is False
+    assert R._validation_of(_Run(None, git_sha=None), index)["ran"] is False
+    assert R._validation_of(_Run(None, candle_digest=None), index)["ran"] is False
+
+
+def test_with_no_index_a_run_still_reports_honestly():
+    assert R._validation_of(_Run(None))["ran"] is False
+    assert R._validation_of(_Run(None))["source"] is None
 
 
 def test_a_gate_that_never_ran_is_not_a_gate_that_passed():
     """`ran: false` and `passed: false` have different fixes and the UI has to
     be able to say which — but both mean the counterfactual is not actionable."""
     assert R._validation_of(_Run(None)) == {
-        "ran": False, "passed": None, "failures": [], "systematic_bias": None}
+        "ran": False, "source": None, "from_run_id": None,
+        "passed": None, "failures": [], "systematic_bias": None}
     failed = R._validation_of(_Run({"gate": {"passed": False,
                                              "failures": ["median |delta R| 0.4 > 0.25"],
                                              "systematic_bias": "optimistic"}}))

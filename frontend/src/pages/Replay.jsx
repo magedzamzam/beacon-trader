@@ -186,16 +186,28 @@ function BasisBadge({ basis }) {
   return <Badge tone="muted">unknown basis</Badge>;
 }
 
+// An INHERITED verdict is shown as inherited, never as the run's own. The gate
+// validates the simulator — a code version over a set of bars — so a sweep on
+// the same git_sha and candle_digest is genuinely covered by it; claiming the
+// sweep was itself reconciled against broker truth would be a different and
+// false statement.
 function GateBadge({ v }) {
   if (!v || !v.ran) return <Badge tone="warn">not validated</Badge>;
-  return v.passed ? <Badge tone="beacon">gate passed</Badge> : <Badge tone="short">gate FAILED</Badge>;
+  const inherited = v.source === "inherited";
+  const label = (v.passed ? "gate passed" : "gate FAILED") + (inherited ? " · inherited" : "");
+  return <Badge tone={v.passed ? (inherited ? "muted" : "beacon") : "short"}>{label}</Badge>;
 }
 
 // --- §5 validation gate -------------------------------------------------------
 function ValidationCard({ run, validation }) {
-  const gate = validation?.gate || null;
-  const ran = !!validation;
-  const passed = !!gate?.passed;
+  // `run.validation` is the flattened verdict and knows whether it was
+  // inherited; `validation` is this run's OWN stored block, absent on a sweep.
+  const v = run.validation || {};
+  const inherited = v.source === "inherited";
+  const gate = validation?.gate || (inherited ? { passed: v.passed, failures: v.failures,
+                                                  systematic_bias: v.systematic_bias } : null);
+  const ran = !!v.ran;
+  const passed = !!v.passed;
   return (
     <Card>
       <div className="px-4 py-3 border-b border-edge text-sm font-medium flex items-center gap-2 flex-wrap">
@@ -215,6 +227,10 @@ function ValidationCard({ run, validation }) {
           The harness replayed the LIVE config over the LIVE signals and matched broker truth
           within the stated thresholds (leg-outcome agreement and |Δ R|). That makes the
           counterfactuals below readable — it does not make them promotion-grade.
+          {inherited && <> <b>This verdict is inherited from run #{v.from_run_id}</b>, which
+            gated the same code (<span className="num">{(run.git_sha || "").slice(0, 7)}</span>)
+            over the same bars. The gate validates the SIMULATOR, so this run is covered by
+            it — but this run was not itself reconciled against broker truth.</>}
         </>) : (<>
           <b>The validation gate FAILED.</b> A harness consistently rosier than live is a blocking
           defect, not a calibration offset. Do not act on a counterfactual from a failed gate.

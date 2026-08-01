@@ -384,6 +384,39 @@ def gate(outcome_agreement: Optional[float], r_dist: dict) -> dict:
     }
 
 
+def overall(by_variant: dict) -> dict:
+    """Fold per-variant gate reports into ONE record, for storage (#185/#183).
+
+    `gate` sits at the TOP because that is where every reader looks — the API's
+    `_validation_of`, the portal's gate badge, and anyone doing
+    `jsonb_pretty(validation)` in psql. Burying it one level down behind a
+    variant name would mean each of them had to know how many arms a validation
+    run happened to have.
+
+    It passes only if EVERY variant passed. A gate that reports the best arm is
+    not a gate: the whole point is that the SIMULATOR reproduces reality, and it
+    either does so under each config it was asked about or it does not. Failures
+    are prefixed with the arm they came from so a mixed result says which."""
+    gates = [(name, (rep or {}).get("gate") or {})
+             for name, rep in sorted((by_variant or {}).items())]
+    failures = [f"{name}: {f}" for name, g in gates for f in (g.get("failures") or [])]
+    biases = sorted({g.get("systematic_bias") for _n, g in gates
+                     if g.get("systematic_bias")})
+    return {
+        "gate": {
+            "passed": bool(gates) and all(g.get("passed") for _n, g in gates),
+            "failures": failures,
+            "systematic_bias": (biases[0] if len(biases) == 1
+                                else (", ".join(biases) or None)),
+            "n_variants": len(gates),
+            "thresholds": gates[0][1].get("thresholds") if gates else None,
+            "note": ("Passes only if every variant passed. A gate that reports "
+                     "its best arm is not a gate."),
+        },
+        "by_variant": by_variant,
+    }
+
+
 def report(sim_legs, live_legs, sim_trades, live_trades, *,
            include_rows: bool = False) -> dict:
     """The gate report. `include_rows` keeps the per-leg detail — thousands of

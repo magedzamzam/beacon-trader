@@ -198,3 +198,52 @@ def test_the_unmodelled_execution_failures_are_named_in_the_report():
     joined = " ".join(rep["known_execution_reality"])
     assert "#150" in joined and "#161" in joined
     assert "structurally optimistic" in rep["note"]
+
+
+# --- the stored verdict (#183/#185) -------------------------------------------
+def _gate(passed, failures=(), bias=None):
+    return {"gate": {"passed": passed, "failures": list(failures),
+                     "systematic_bias": bias,
+                     "thresholds": {"outcome_agreement": 0.9}}}
+
+
+def test_the_gate_verdict_is_stored_with_gate_at_the_top():
+    """Every reader looks for `validation.gate` — the API's `_validation_of`, the
+    portal's badge, and anyone running `jsonb_pretty(validation)` in psql.
+    Burying it behind a variant name would force each of them to know how many
+    arms a validation run happened to have."""
+    out = validate.overall({"live": _gate(True)})
+    assert out["gate"]["passed"] is True
+    assert out["by_variant"]["live"]["gate"]["passed"] is True
+    assert out["gate"]["n_variants"] == 1
+
+
+def test_a_stored_verdict_passes_only_if_every_arm_passed():
+    """A gate that reports its best arm is not a gate: the claim is that the
+    SIMULATOR reproduces reality, under each config it was asked about."""
+    out = validate.overall({"a": _gate(True), "b": _gate(False, ["median |dR| too high"])})
+    assert out["gate"]["passed"] is False
+    assert out["gate"]["failures"] == ["b: median |dR| too high"]
+
+
+def test_a_mixed_failure_says_which_arm_it_came_from():
+    out = validate.overall({"a": _gate(False, ["x"]), "b": _gate(False, ["y"])})
+    assert out["gate"]["failures"] == ["a: x", "b: y"]
+
+
+def test_a_single_systematic_bias_survives_the_fold():
+    out = validate.overall({"a": _gate(False, ["x"], bias="optimistic")})
+    assert out["gate"]["systematic_bias"] == "optimistic"
+
+
+def test_disagreeing_biases_are_both_reported_not_silently_picked():
+    out = validate.overall({"a": _gate(False, ["x"], bias="optimistic"),
+                            "b": _gate(False, ["y"], bias="pessimistic")})
+    assert out["gate"]["systematic_bias"] == "optimistic, pessimistic"
+
+
+def test_an_empty_validation_does_not_pass():
+    """`passed` must never be vacuously true — a run that gated nothing has not
+    been gated, and storing it as passed would let a sweep inherit it."""
+    assert validate.overall({})["gate"]["passed"] is False
+    assert validate.overall(None)["gate"]["passed"] is False

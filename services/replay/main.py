@@ -309,8 +309,15 @@ async def cmd_validate(args) -> int:
     """Section 5: replay the ACTUAL live configs over the ACTUAL signals and
     reconcile against broker truth. Exits NON-ZERO when the gate fails — a
     failed gate is a blocking defect, and a validation step that always exits 0
-    is decoration."""
+    is decoration.
+
+    The verdict is STORED as a run (unless `--dry-run`), so a sweep can inherit
+    it instead of the portal claiming an unvalidated simulator."""
     cfg = json.loads(Path(args.config).read_text(encoding="utf-8"))
+    # BEFORE the sweep, exactly as `run` does: a missing grant is a two-second
+    # failure, and finding out after a full reconciliation costs an afternoon.
+    if not args.dry_run:
+        await store.init_replay_tables()
     # #185 defect B: the exit model is a modelling CHOICE with a measured cost,
     # so it has to be settled by running this gate both ways. An override beats
     # editing the baseline JSON between runs — the baseline is generated from the
@@ -344,8 +351,37 @@ async def cmd_validate(args) -> int:
         # is not a comparison (#185).
         timings = sorted({build_variant(v).ratchet_timing
                           for v in (spec.variants or [])}) or ["next_bar"]
+
+        # PERSIST the verdict. A gate run used to print and vanish, which meant
+        # the portal showed "not validated" on every sweep even when the
+        # simulator HAD been reconciled against broker truth minutes earlier —
+        # the verdict existed only in somebody's terminal scrollback. Stored, it
+        # is a first-class run: reproducible (git_sha / config_digest /
+        # candle_digest), readable over the API, and inheritable by any sweep on
+        # the same code and the same bars (see the router's `_validation_index`).
+        stored_run_id = None
+        if not args.dry_run:
+            cdig = await store.candle_digest(session, symbol=symbol, timeframe=tf)
+            run = await store.create_run(
+                session, label=(spec.label or "validation gate"),
+                signal_source=spec.signal_source, symbol=symbol, timeframe=tf,
+                frm=frm, to=to, holdout_from=spec.holdout_from,
+                n_variants=len(spec.variants), git_sha=R.git_sha(),
+                code_version=R.CODE_VERSION, config_digest=spec.digest(),
+                candle_digest=cdig, config=cfg, coverage=series.coverage())
+            await store.finish_run(
+                session, run,
+                summary={"run": out["run"], "variants": out["variants"],
+                         "ranking": R.compare_variants(out["variants"])},
+                coverage=series.coverage(),
+                validation=validate.overall(report),
+                status="done" if not failed else "failed",
+                error=None if not failed else "validation gate failed")
+            stored_run_id = run.id
+
         print(json.dumps({"ok": not failed, "coverage": series.coverage(),
                           "ratchet_timing": timings,
+                          "run_id": stored_run_id,
                           "validation": report}, indent=2, default=str))
     return 1 if failed else 0
 
@@ -468,6 +504,9 @@ def build_parser() -> argparse.ArgumentParser:
     v = sub.add_parser("validate", help="reconcile a replay of the LIVE config "
                                         "against broker truth (§5 gate)")
     v.add_argument("--config", required=True)
+    v.add_argument("--dry-run", action="store_true",
+                   help="print the verdict; store nothing. The gate normally "
+                        "persists its result as a run so sweeps can inherit it.")
     v.add_argument("--ratchet-timing", dest="ratchet_timing", default=None,
                    choices=list(RATCHET_TIMINGS),
                    help="override the exit model for this run (#185 defect B). "
