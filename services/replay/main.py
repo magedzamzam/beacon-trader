@@ -358,7 +358,14 @@ async def cmd_worker(args) -> int:
                 continue
             log(json.dumps({"worker": "claimed", "job": job.id,
                             "label": job.label}, default=str))
-            await _execute_job(job)
+            # Pass the ID, never the instance. The session that claimed it has
+            # closed, and a detached ORM object accepts attribute writes that a
+            # DIFFERENT session's commit silently discards — which is exactly
+            # how the first queued job wrote all 3,866 of its result rows and
+            # then sat at `running` forever with 0% CPU.
+            rc = await _execute_job(job.id)
+            log(json.dumps({"worker": "finished", "job": job.id, "result": rc},
+                           default=str))
         except asyncio.CancelledError:
             raise
         except Exception as exc:                 # the loop never dies on one job
@@ -368,18 +375,26 @@ async def cmd_worker(args) -> int:
             return 0
 
 
-async def _execute_job(job) -> None:
-    """Run one queued job to completion and record what happened to it."""
-    cfg = dict(job.config or {})
+async def _execute_job(job_id: int) -> str:
+    """Run one queued job to completion and record what happened to it.
+
+    Takes the ID and re-loads the row inside THIS session: every write below has
+    to happen through a session the object is actually attached to, or it is
+    discarded without error."""
+    from harness.models import ReplayJob
     try:
         async with store.Session()() as session:
+            job = await session.get(ReplayJob, job_id)
+            if job is None:
+                return "vanished"
+            cfg = dict(job.config or {})
             await store.set_job_progress(session, job, "loading candles and signals")
             (spec, series, signals, sources, symbol, tf, frm, to,
              gen_stats) = await _load(session, cfg)
             if not len(series):
                 await store.finish_job(session, job, status="failed",
                                        error=f"no usable candles for {symbol} {tf}")
-                return
+                return "failed"
             await store.set_job_progress(
                 session, job,
                 f"{len(spec.variants)} variant(s) over {len(signals)} signals")
@@ -406,12 +421,14 @@ async def _execute_job(job) -> None:
                                    coverage=series.coverage())
             await store.finish_job(session, job, status="done", run_id=run.id,
                                    progress=f"{len(rows)} rows")
+            return "done"
     except Exception as exc:
         async with store.Session()() as session:
-            fresh = await session.get(type(job), job.id)
+            fresh = await session.get(ReplayJob, job_id)
             if fresh is not None:
                 await store.finish_job(session, fresh, status="failed",
                                        error=str(exc)[:2000])
+        return "failed"
 
 
 async def cmd_validate(args) -> int:
