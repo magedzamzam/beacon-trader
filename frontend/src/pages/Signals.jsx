@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { Plus, RotateCcw, Sparkles, Layers } from "lucide-react";
+import { Fragment, useEffect, useState } from "react";
+import { Plus, RotateCcw, Sparkles, Layers, Sigma } from "lucide-react";
 import { Card, Table, Th, Td, Badge, Empty } from "../components/ui";
 import { Button, ErrorNote, Modal, Field, Input, NumberInput, Select } from "../components/form";
 import TradeDetail from "../components/TradeDetail";
@@ -17,6 +17,7 @@ export default function Signals() {
   const [err, setErr] = useState(null);
   const [add, setAdd] = useState(false);
   const [busy, setBusy] = useState(null);
+  const [score, setScore] = useState({});   // signal_id -> P(win) result
   const [structId, setStructId] = useState(null);   // signal id whose structure panel is open
   const [reinitSig, setReinitSig] = useState(null); // signal pending re-initiate confirmation
   const [tradeId, setTradeId] = useState(null);     // trade id whose TradeDetail modal is open
@@ -77,7 +78,8 @@ export default function Signals() {
             </tr></thead>
             <tbody>
               {data.map(s => (
-                <tr key={s.id} className="row-hover">
+                <Fragment key={s.id}>
+                <tr className="row-hover">
                   <Td mono>{
                     (s.trade_ids || []).length === 1
                       ? <button className="text-beacon hover:underline" title="Open trade"
@@ -105,10 +107,25 @@ export default function Signals() {
                         <Layers className="w-4 h-4" /></Button>
                       <Button variant="ghost" onClick={() => runAi(s.id)} title="Run AI validation">
                         <Sparkles className={`w-4 h-4 ${busy === s.id ? "animate-pulse" : ""}`} /></Button>
+                      <Button variant="ghost" title="Naive-Bayes P(win) from the captured features"
+                        onClick={async () => {
+                          setScore(v => ({ ...v, [s.id]: { loading: true } }));
+                          try { setScore(v => ({ ...v, [s.id]: await api.bayesScore(s.id) })); }
+                          catch (e) { setScore(v => ({ ...v, [s.id]: { error: e.message } })); }
+                        }}><Sigma className="w-4 h-4" /></Button>
                       <Button variant="ghost" onClick={() => setReinitSig(s)} title="Re-initiate — re-open as a fresh trade"><RotateCcw className="w-4 h-4" /></Button>
                     </div>
                   </Td>
                 </tr>
+                {score[s.id] && (
+                  <tr className="border-b border-edge/60">
+                    <Td colSpan={11}>
+                      <ScoreRow r={score[s.id]} onClose={() =>
+                        setScore(v => { const n = { ...v }; delete n[s.id]; return n; })} />
+                    </Td>
+                  </tr>
+                )}
+                </Fragment>
               ))}
             </tbody>
           </Table>
@@ -306,5 +323,50 @@ function ManualModal({ sources, onClose, onSaved }) {
         <Button onClick={save}>Send signal</Button>
       </div>
     </Modal>
+  );
+}
+
+
+// Naive-Bayes P(win) for ONE signal (#62). The endpoint has been served since
+// #62 and nothing called it: the Analysis page scores the 30 most recent signals
+// in bulk, so there was no way to ask about a specific one — which is the
+// question you actually have when looking at a signal.
+//
+// The CONTRIBUTORS are the point. A bare probability invites acting on it; the
+// per-condition breakdown shows what drove it, and a model that is not ready
+// says so instead of returning a confident-looking number.
+function ScoreRow({ r, onClose }) {
+  if (r.loading) return <span className="text-xs text-muted">scoring…</span>;
+  if (r.error) return <span className="text-xs text-short">{r.error}</span>;
+  if (!r.ready) return (
+    <span className="text-xs text-muted">
+      Model not ready — not enough closed trades with captured features yet.
+    </span>
+  );
+  if (!r.score) return (
+    <span className="text-xs text-muted">
+      No captured features for this signal, so it cannot be scored.
+    </span>
+  );
+  const p = r.score.p_win;
+  const base = r.base_rate;
+  return (
+    <div className="text-[11px] flex flex-wrap items-center gap-2">
+      <Badge tone={base != null && p > base ? "long" : "short"}>
+        P(win) {(p * 100).toFixed(1)}%
+      </Badge>
+      {base != null && <span className="text-muted num">base {(base * 100).toFixed(1)}%</span>}
+      <span className="text-muted">·</span>
+      {(r.score.contributors || []).slice(0, 6).map((c, i) => (
+        <span key={i} className="num text-muted">
+          {c.condition}
+          <span className={c.lift > 0 ? "text-long" : c.lift < 0 ? "text-short" : ""}>
+            {" "}{c.lift > 0 ? "+" : ""}{(c.lift * 100).toFixed(1)}%
+          </span>
+        </span>
+      ))}
+      {!r.score.contributors?.length && <span className="text-muted">no contributing conditions</span>}
+      <Button variant="ghost" onClick={onClose}>hide</Button>
+    </div>
   );
 }

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Sigma } from "lucide-react";
 import { Card, Table, Th, Td, Badge, Empty } from "../components/ui";
-import { Button, ErrorNote } from "../components/form";
+import { Button, ErrorNote, Field, Toggle, Select, NumberInput } from "../components/form";
 import RangeFilter, { useRange } from "../components/RangeFilter";
 import HelpHint from "../components/HelpHint";
 import { api } from "../lib/api";
@@ -54,6 +54,7 @@ export default function Analysis({ account = "" }) {
         onRecomputed={() => setBasis(b => b)} />}
       {!err && <StopGeometryCard data={stopGeo} />}
       {!err && gate && <BayesGateCard gate={gate} />}
+      {!err && gate && <BayesGateConfigCard onSaved={load} />}
       {!err && !data && <Card><Empty>Loading…</Empty></Card>}
       {!err && data && !data.ready && (
         <Card><Empty>{data.message || "Not enough data yet."} The Bayesian analysis
@@ -448,5 +449,72 @@ function CandleFreshness({ candles }) {
       {stale && <b> — STALE (&gt;{candles.stale_after_hours}h). The ladder cannot cover
         signals newer than this, and it is imported manually: nothing refreshes it.</b>}
     </div>
+  );
+}
+
+
+// The learned-P(win) gate's CONFIG (#64). The report card above has always shown
+// what the gate WOULD do; the thresholds driving it were served at
+// GET/PUT /analysis/bayes-gate/config and no screen ever called either, so the
+// only way to tune them was a hand-written PUT.
+//
+// `mode: active` is the go-live switch and is deliberately awkward: it is the
+// one control here that can alter execution, so it states that plainly rather
+// than sitting in a row of sliders.
+const GATE_NUMS = [
+  ["skip_threshold", "Skip when ci_high <", "even the best case is poor"],
+  ["desize_threshold", "De-size when ci_high <", "and >= skip threshold"],
+  ["desize_factor", "De-size factor", "size multiplier in that band"],
+  ["min_trades", "Min trades", "n_eff below this -> observe only"],
+  ["max_ci_width", "Max CI width", "wider than this -> too uncertain"],
+];
+
+function BayesGateConfigCard({ onSaved }) {
+  const [cfg, setCfg] = useState(null);
+  const [err, setErr] = useState(null);
+  const [saved, setSaved] = useState(false);
+  useEffect(() => { api.bayesGateConfig().then(setCfg).catch(e => setErr(e.message)); }, []);
+  if (err) return <Card><div className="p-4"><ErrorNote>{err}</ErrorNote></div></Card>;
+  if (!cfg) return null;
+  const set = (k, v) => { setCfg(c => ({ ...c, [k]: v })); setSaved(false); };
+  const save = async () => {
+    try { setCfg(await api.saveBayesGateConfig(cfg)); setSaved(true); onSaved?.(); }
+    catch (e) { setErr(e.message); }
+  };
+  const live = cfg.enabled && cfg.mode === "active";
+  return (
+    <Card>
+      <div className="px-4 py-3 border-b border-edge text-sm font-medium flex items-center gap-2 flex-wrap">
+        Learned-gate config<HelpHint term="p_win" />
+        <Badge tone={live ? "warn" : "muted"}>{live ? "ACTS ON EXECUTION" : "shadow · log-only"}</Badge>
+      </div>
+      <div className="px-4 py-2 text-[11px] text-muted border-b border-edge">
+        These thresholds drive the shadow table above. <b>Only <span className="num">enabled</span> +{" "}
+        <span className="num">mode=active</span> lets the gate skip or de-size a real trade</b> —
+        everything else is measured and recorded but never applied. Go live only once
+        <b> would-skip</b> expectancy is clearly worse than <b>would-allow</b> at n ≥ min-trades.
+      </div>
+      <div className="px-4 py-3 grid gap-3 md:grid-cols-2">
+        <Field label="Enabled"><Toggle checked={!!cfg.enabled} onChange={v => set("enabled", v)}
+          label={cfg.enabled ? "on" : "off"} /></Field>
+        <Field label="Mode" hint="active = may alter execution">
+          <Select value={cfg.mode} onChange={e => set("mode", e.target.value)}>
+            <option value="log_only">log_only (shadow)</option>
+            <option value="active">active (LIVE)</option>
+          </Select>
+        </Field>
+        {GATE_NUMS.map(([k, label, hint]) => (
+          <Field key={k} label={label} hint={hint}>
+            <NumberInput value={cfg[k]} step="0.01"
+              onChange={e => set(k, e.target.value === "" ? "" : Number(e.target.value))} />
+          </Field>
+        ))}
+      </div>
+      <div className="px-4 py-3 border-t border-edge flex items-center gap-3">
+        <Button onClick={save}>Save</Button>
+        {saved && <span className="text-[11px] text-beacon">Saved.</span>}
+        {live && <span className="text-[11px] text-warn">This gate can now change what trades.</span>}
+      </div>
+    </Card>
   );
 }

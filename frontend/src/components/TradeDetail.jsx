@@ -102,6 +102,7 @@ export default function TradeDetail({ tradeId, onClose }) {
   return (
     <Modal title={`Trade #${tradeId}`} onClose={onClose} size="4xl">
       {err && <div className="text-xs text-short bg-short/10 rounded-lg px-3 py-2">{err}</div>}
+      <AssessTrade tradeId={tradeId} />
       {!t ? <Empty>Loading…</Empty> : (
         <div className="space-y-5">
           <div className="flex flex-wrap items-center gap-2 text-sm">
@@ -238,5 +239,42 @@ export default function TradeDetail({ tradeId, onClose }) {
         </div>
       )}
     </Modal>
+  );
+}
+
+
+// POST /ai/trades/{id}/assess — the EXECUTION review (#62). It has been served
+// all along with no caller: the Signals page can re-run the signal-validation
+// review, but the post-hoc "did we execute this well" pass had no button
+// anywhere, so the only assessments in the table were the ones the executor
+// happened to trigger itself.
+function AssessTrade({ tradeId }) {
+  const [busy, setBusy] = useState(false);
+  const [res, setRes] = useState(null);
+  const [err, setErr] = useState(null);
+  const run = async () => {
+    setBusy(true); setErr(null);
+    try { setRes(await api.aiAssessTrade(tradeId)); }
+    catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div className="flex items-center gap-2 flex-wrap text-[11px]">
+      <button onClick={run} disabled={busy}
+        className="px-2 py-1 rounded-lg border border-edge hover:border-beacon disabled:opacity-50">
+        {busy ? "reviewing…" : "AI execution review"}
+      </button>
+      <span className="text-muted">
+        Post-hoc: did WE execute this well — separate from the signal-validation verdict.
+      </span>
+      {err && <span className="text-short">{err}</span>}
+      {res && (
+        <span className="flex items-center gap-2">
+          {res.verdict && <Badge tone={res.verdict === "good" ? "long" : res.verdict === "bad" ? "short" : "muted"}>
+            {res.verdict}</Badge>}
+          {res.summary && <span className="text-muted">{res.summary}</span>}
+        </span>
+      )}
+    </div>
   );
 }

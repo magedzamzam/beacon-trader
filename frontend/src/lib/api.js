@@ -82,6 +82,10 @@ export const api = {
     if (accountId) p.set("account_id", accountId);
     return req(`/analysis/bayes?${p.toString()}`);
   },
+  // Naive-Bayes P(win) for ONE signal, with the contributing conditions (#62).
+  // Served since #62 and never called: the Analysis page scored the 30 most
+  // recent signals in bulk and there was no way to ask about a specific one.
+  bayesScore: (signalId, minN = 5) => req(`/analysis/bayes/score/${signalId}?min_n=${minN}`),
   // learned-P(win) execution gate (#64) — shadow / log-only
   bayesGateReport: (minN = 5, { from, to } = {}, accountId = "") => {
     const p = new URLSearchParams({ min_n: minN });
@@ -130,7 +134,6 @@ export const api = {
   saveBayesGateConfig: (c) => req("/analysis/bayes-gate/config", { method: "PUT", body: JSON.stringify(c) }),
   // trading hours: sessions / news blackout / holidays
   tradingHoursStatus: () => req("/trading-hours/status"),
-  tradingHoursConfig: () => req("/trading-hours/config"),
   saveTradingHoursConfig: (c) => req("/trading-hours/config", { method: "PUT", body: JSON.stringify(c) }),
   refreshCalendar: () => post("/trading-hours/calendar/refresh", {}),
   // notifications: channels + per-event routing
@@ -177,6 +180,10 @@ export const api = {
   // recomputes the map on its own schedule (#175 removed the manual trigger with
   // the Structure card it belonged to).
   structureMap: (symbol = "XAUUSD") => req(`/analytics/structure/map?symbol=${encodeURIComponent(symbol)}`),
+  // The structure/magnet config (#61/#113). Both verbs were served and
+  // neither had a caller, so the shadow map ran on defaults nobody could see.
+  structureConfig: () => req("/analytics/structure/config"),
+  saveStructureConfig: (c) => req("/analytics/structure/config", { method: "PUT", body: JSON.stringify(c) }),
   // reconciliation: channel-claimed outcomes vs bot execution
   reconciliationSummary: (includeHistory = false, { from, to } = {}) => {
     const p = new URLSearchParams({ include_history: includeHistory });

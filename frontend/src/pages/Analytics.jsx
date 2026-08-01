@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { Table, Card, Th, Td, Badge, Empty } from "../components/ui";
-import { Toggle, Button } from "../components/form";
+import { Toggle, Button, Field, NumberInput } from "../components/form";
 import RangeFilter, { useRange } from "../components/RangeFilter";
 import HelpHint from "../components/HelpHint";
 import { api } from "../lib/api";
@@ -49,6 +49,8 @@ export default function Analytics() {
   // bias reads it, and the monitor keeps it fresh on its own schedule.
   const [map, setMap] = useState(null);
   const loadCfg = () => api.analyticsConfig().then(setCfg).catch(e => setErr(e.message));
+  const [structCfg, setStructCfg] = useState(null);
+  useEffect(() => { api.structureConfig().then(setStructCfg).catch(() => setStructCfg(null)); }, []);
   const loadMap = () => api.structureMap("XAUUSD").then(setMap).catch(e => setErr(e.message));
   useEffect(() => { loadCfg(); loadMap(); }, []);
 
@@ -102,6 +104,8 @@ export default function Analytics() {
           (small samples shrink toward the {synth ? `${fmt(synth.base_rate * 100, 1)}%` : "base"} rate).
         </div>
       </Card>
+
+      <StructureConfigCard cfg={structCfg} onSaved={setStructCfg} />
 
       <RangeFilter state={range} variant="coarse" />
 
@@ -667,6 +671,68 @@ function TurtleExitCard({ range }) {
           </div>
         </>
       )}
+    </Card>
+  );
+}
+
+
+// The structure / magnet config (#61/#113). GET and PUT were both served and
+// neither had a caller, so the shadow structure map has been running on defaults
+// that nothing on the platform could show you — including `enabled`, which
+// decides whether it runs at all.
+//
+// Only the fields worth an operator's attention are editable here: the zigzag
+// pivot sensitivity per timeframe and the fib levels are a research surface, and
+// exposing them as free-text would invite a typo that silently empties the map.
+function StructureConfigCard({ cfg, onSaved }) {
+  const [local, setLocal] = useState(null);
+  const [err, setErr] = useState(null);
+  const [saved, setSaved] = useState(false);
+  useEffect(() => { setLocal(cfg ? { ...cfg } : null); }, [cfg]);
+  if (!local) return null;
+  const set = (k, v) => { setLocal(c => ({ ...c, [k]: v })); setSaved(false); };
+  const save = async () => {
+    try {
+      const next = await api.saveStructureConfig({
+        enabled: !!local.enabled,
+        cluster_atr: Number(local.cluster_atr),
+        max_zone_width_atr: Number(local.max_zone_width_atr),
+      });
+      onSaved?.(next); setSaved(true); setErr(null);
+    } catch (e) { setErr(e.message); }
+  };
+  return (
+    <Card>
+      <div className="px-4 py-3 border-b border-edge text-sm font-medium flex items-center gap-2">
+        Structure &amp; magnets config
+        <Badge tone={local.enabled ? "beacon" : "muted"}>{local.enabled ? "on" : "off"}</Badge>
+        <Badge tone="muted">shadow · never gates</Badge>
+      </div>
+      <div className="px-4 py-2 text-[11px] text-muted border-b border-edge">
+        Multi-timeframe swings and Fibonacci magnet zones, computed beside live trading and
+        never gating it. <b>cluster_atr</b> is the zone tolerance (× ATR 1h);{" "}
+        <b>max_zone_width_atr</b> caps a zone's width so single-linkage cannot chain a whole
+        range into one blob. Timeframes, fib levels and per-TF zigzag sensitivity stay
+        config-file surface — a typo there empties the map silently.
+      </div>
+      <div className="px-4 py-3 grid gap-3 md:grid-cols-3">
+        <Field label="Enabled"><Toggle checked={!!local.enabled}
+          onChange={v => set("enabled", v)} label={local.enabled ? "on" : "off"} /></Field>
+        <Field label="cluster_atr" hint="zone tolerance × ATR(1h)">
+          <NumberInput value={local.cluster_atr} step="0.1"
+            onChange={e => set("cluster_atr", e.target.value)} /></Field>
+        <Field label="max_zone_width_atr" hint="hard cap on zone width">
+          <NumberInput value={local.max_zone_width_atr} step="0.1"
+            onChange={e => set("max_zone_width_atr", e.target.value)} /></Field>
+      </div>
+      <div className="px-4 py-3 border-t border-edge flex items-center gap-3">
+        <Button onClick={save}>Save</Button>
+        {saved && <span className="text-[11px] text-beacon">Saved.</span>}
+        {err && <span className="text-[11px] text-short">{err}</span>}
+        <span className="text-[11px] text-muted num">
+          {(local.timeframes || []).length} timeframes · {(local.symbols || []).join(", ")}
+        </span>
+      </div>
     </Card>
   );
 }

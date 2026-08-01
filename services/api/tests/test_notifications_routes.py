@@ -16,7 +16,6 @@ API_JS = Path(__file__).resolve().parents[3] / "frontend/src/lib/api.js"
 
 EXPECTED = {
     ("GET", "/notifications/catalog"),
-    ("GET", "/notifications/fields"),
     ("GET", "/notifications/config"),
     ("PUT", "/notifications/config"),
     ("GET", "/notifications/deliveries"),

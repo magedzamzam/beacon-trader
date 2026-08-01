@@ -13,6 +13,7 @@ export default function Brokers() {
   const [accounts, setAccounts] = useState([]);
   const [err, setErr] = useState(null);
   const [addBroker, setAddBroker] = useState(false);
+  const [editBroker, setEditBroker] = useState(null);
   const [liveFor, setLiveFor] = useState(null);      // broker for account picker
   const [editAcct, setEditAcct] = useState(null);
   const [health, setHealth] = useState({});
@@ -60,6 +61,7 @@ export default function Brokers() {
                     <div className="flex items-center gap-1 justify-end">
                       <Button variant="ghost" onClick={() => checkHealth(b.id)} title="Test connection"><Activity className="w-4 h-4" /></Button>
                       <Button variant="ghost" onClick={() => setLiveFor(b)} title="Fetch accounts"><Download className="w-4 h-4" /></Button>
+                      <Button variant="ghost" onClick={() => setEditBroker(b)} title="Edit"><Pencil className="w-4 h-4" /></Button>
                       <Button variant="danger" onClick={async () => { await api.deleteBroker(b.id); load(); }}><Trash2 className="w-4 h-4" /></Button>
                     </div>
                   </Td>
@@ -98,6 +100,8 @@ export default function Brokers() {
         )}
       </Card>
 
+      {editBroker && <EditBrokerModal broker={editBroker} onClose={() => setEditBroker(null)}
+        onSaved={() => { setEditBroker(null); load(); }} />}
       {addBroker && <AddBrokerModal onClose={() => setAddBroker(false)} onSaved={() => { setAddBroker(false); load(); }} />}
       {liveFor && <LiveAccountsModal broker={liveFor} existing={accounts} onClose={() => setLiveFor(null)}
         onAdded={() => { load(); }} />}
@@ -212,6 +216,65 @@ function EditAccountModal({ account, onClose, onSaved }) {
       <div className="flex justify-end gap-2 pt-2">
         <Button variant="ghost" onClick={onClose}>Cancel</Button>
         <Button onClick={save}>Save</Button>
+      </div>
+    </Modal>
+  );
+}
+
+
+// PATCH /brokers/{id} has existed all along with no caller: the page could
+// create and delete a broker but never edit one, so fixing a typo'd credential
+// meant DELETING the broker — which orphans its accounts — and starting again.
+//
+// Secrets are write-only by design: the API never returns them, so a blank field
+// here means "leave it alone" rather than "clear it". Sending an empty string
+// would wipe a working credential, so blanks are stripped before the PATCH.
+function EditBrokerModal({ broker, onClose, onSaved }) {
+  const [name, setName] = useState(broker.name || "");
+  const [isDemo, setIsDemo] = useState(!!broker.is_demo);
+  const [enabled, setEnabled] = useState(broker.enabled !== false);
+  const [apiKey, setApiKey] = useState("");
+  const [username, setUsername] = useState(broker.username || "");
+  const [password, setPassword] = useState("");
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const save = async () => {
+    setBusy(true); setErr(null);
+    try {
+      const body = { name, is_demo: isDemo, enabled };
+      if (apiKey) body.api_key = apiKey;         // blank = keep the stored one
+      if (username) body.username = username;
+      if (password) body.password = password;
+      await api.updateBroker(broker.id, body);
+      onSaved();
+    } catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  };
+  return (
+    <Modal title={`Edit ${broker.name}`} onClose={onClose}>
+      <ErrorNote>{err}</ErrorNote>
+      <Field label="Name"><Input value={name} onChange={e => setName(e.target.value)} /></Field>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <Field label="Mode"><Toggle checked={isDemo} onChange={setIsDemo} label={isDemo ? "Demo" : "Live"} /></Field>
+        <Field label="Enabled"><Toggle checked={enabled} onChange={setEnabled} label={enabled ? "Enabled" : "Off"} /></Field>
+      </div>
+      <div className="text-xs text-muted">
+        Leave a secret blank to keep the stored one — the API never returns secrets, so an
+        empty field means <b>unchanged</b>, not cleared.
+      </div>
+      <Field label="API key" hint="blank = unchanged">
+        <Input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="••••••••" />
+      </Field>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <Field label="Username"><Input value={username} onChange={e => setUsername(e.target.value)} /></Field>
+        <Field label="Password" hint="blank = unchanged">
+          <Input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="••••••••" />
+        </Field>
+      </div>
+      <div className="flex justify-end gap-2 pt-2">
+        <Button variant="ghost" onClick={onClose}>Cancel</Button>
+        <Button onClick={save} disabled={busy}>{busy ? "Saving…" : "Save"}</Button>
       </div>
     </Modal>
   );

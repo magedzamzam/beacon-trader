@@ -21,12 +21,14 @@ async def get_catalog():
     return notif.catalog()
 
 
-@router.get("/fields")
-async def get_fields():
-    """The template field descriptor + a sample object for the live preview.
-    Derived from the same registry the renderer resolves, so the picker can never
-    advertise a token the renderer can't resolve."""
-    return {"fields": notif.field_descriptor(), "sample": notif.sample_ctx()}
+# `GET /fields` used to live here: a GLOBAL field descriptor + sample. It was
+# never called, because `/catalog` already returns `fields_by_event` and
+# `samples` — the same descriptor in a strictly richer per-event form, which is
+# what the template editor actually renders from.
+#
+# Removed rather than wired. Its own docstring said the point was that "the
+# picker can never advertise a token the renderer can't resolve" — and two
+# descriptors for one renderer is precisely how that stops being true.
 
 
 @router.get("/config")

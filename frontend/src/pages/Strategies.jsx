@@ -150,6 +150,7 @@ export default function Strategies() {
   const scopeLabel = `${acctName(form.account_id)} · ${srcName(form.source_id)}`;
   return (
     <div className="space-y-5">
+      <ResolvePreview accounts={accounts} sources={sources} />
       {/* Editor */}
       <Card>
         <div className="px-4 py-3 border-b border-edge flex items-center gap-2 flex-wrap">
@@ -272,5 +273,83 @@ export default function Strategies() {
         )}
       </Card>
     </div>
+  );
+}
+
+
+// GET /strategies/resolve — the cascade PREVIEW (#84). Served since #84 with no
+// caller, which is the one place it was most needed: the whole point of this
+// page is a four-level cascade ((acct,src) > (acct,*) > (*,src) > (*,*)) with
+// per-pillar inheritance, and until now the only way to know which row actually
+// governs a given trade was to simulate the precedence in your head.
+//
+// It answers the question the editor cannot: not "what did I write" but "what
+// will RUN". `null` is a real answer — it means no enabled row matches and the
+// global defaults apply.
+function ResolvePreview({ accounts, sources }) {
+  const [acct, setAcct] = useState("");
+  const [src, setSrc] = useState("");
+  const [res, setRes] = useState(null);
+  const [err, setErr] = useState(null);
+
+  useEffect(() => {
+    if (!acct || !src) { setRes(null); return; }
+    let alive = true;
+    api.resolveStrategy(acct, src)
+      .then(d => alive && (setRes(d), setErr(null)))
+      .catch(e => alive && setErr(e.message));
+    return () => { alive = false; };
+  }, [acct, src]);
+
+  const r = res?.resolved;
+  return (
+    <Card>
+      <div className="px-4 py-3 border-b border-edge text-sm font-medium flex items-center gap-2 flex-wrap">
+        What actually runs
+        <span className="text-muted font-normal text-xs">
+          · resolve the cascade for one (account, source)</span>
+      </div>
+      <div className="px-4 py-2 text-[11px] text-muted border-b border-edge">
+        Pick a pair and this shows the <b>most-specific enabled</b> strategy a trade on it would
+        run under — the row that wins <span className="num">(acct,src) &gt; (acct,*) &gt; (*,src)
+        &gt; (*,*)</span>. Answers "what will run", which is not the same question as "what did
+        I write".
+      </div>
+      <div className="px-4 py-3 flex items-end gap-3 flex-wrap">
+        <Field label="Account">
+          <Select value={acct} onChange={e => setAcct(e.target.value)}>
+            <option value="">choose…</option>
+            {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+          </Select>
+        </Field>
+        <Field label="Source">
+          <Select value={src} onChange={e => setSrc(e.target.value)}>
+            <option value="">choose…</option>
+            {sources.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+          </Select>
+        </Field>
+        {err && <span className="text-[11px] text-short">{err}</span>}
+      </div>
+      {acct && src && res && (
+        <div className="px-4 pb-4 text-[11px]">
+          {!r ? (
+            <span className="text-warn">No enabled strategy matches this pair — the global
+              defaults apply.</span>
+          ) : (
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge tone="beacon">{r.label || `strategy #${r.id}`}</Badge>
+              <span className="num text-muted">
+                scope ({r.account_id ?? "any"}, {r.source_id ?? "any"}) · v{r.version}
+              </span>
+              {["entry_policy", "entry_filters", "exit_policy"].map(k => (
+                <Badge key={k} tone={r[k] && Object.keys(r[k]).length ? "muted" : "warn"}>
+                  {k.replace("_", " ")}: {r[k] && Object.keys(r[k]).length ? "set" : "inherited"}
+                </Badge>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </Card>
   );
 }
