@@ -236,8 +236,11 @@ def test_the_compose_entry_holds_no_broker_credentials():
 
 
 def test_the_service_declares_the_tables_it_may_write():
+    """`replay_jobs` is the portal's request queue (#183). It is in the SAME
+    schema and under the same role — the harness still cannot write anything in
+    `public`, which is the property this list exists to pin."""
     from harness.models import REPLAY_TABLES
-    assert REPLAY_TABLES == ("replay_runs", "replay_results")
+    assert REPLAY_TABLES == ("replay_runs", "replay_results", "replay_jobs")
 
 
 def test_the_one_way_rule_holds_in_the_other_direction_too():

@@ -93,6 +93,34 @@ services:
           cpus: "2.0"
           memory: 2G
 
+  # The ONE long-running piece of the research half (#183). It exists so the
+  # portal can drive backtesting without an SSH session, and it keeps every
+  # isolation property the batch job had: no broker credentials, a SELECT-only
+  # role on the trading schema, writes confined to `replay.*`, `nice -19` from
+  # the image ENTRYPOINT, and a hard CPU/memory ceiling. It drains a queue one
+  # job at a time, so N impatient clicks are N queued jobs, not N sweeps
+  # competing with `monitor` for the box that manages open positions.
+  #
+  # NOT behind the `research` profile: a queue with no consumer is a portal
+  # whose Launch button silently does nothing.
+  replay-worker:
+    build:
+      context: .
+      dockerfile: services/replay/Dockerfile
+      args:
+        GIT_SHA: "${GIT_SHA:-}"
+    restart: unless-stopped
+    command: ["python", "main.py", "worker"]
+    environment:
+      REPLAY_DATABASE_URL: ${REPLAY_DATABASE_URL}
+    volumes:
+      - ./services/replay/runs:/app/runs
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 2G
+
   frontend:
     build:
       context: ./frontend

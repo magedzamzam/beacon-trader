@@ -7,10 +7,18 @@ SELECT-only DB role, and that property is load-bearing — it is what keeps a
 `services/replay/tests/test_isolation.py`. What was missing is not an HTTP
 surface on the harness but a READ PATH on the one that already exists.
 
-So: three GETs, no POST, and deliberately **no route that can start, queue or
-schedule a run**. The page's empty state names the CLI command instead, exactly
-as the Analysis page does for the excursion recompute. A replay a browser can
-launch is a research job a browser can use to starve the trading path.
+THE ONE RULE THAT MATTERS: **this API never executes a sweep.** It originally
+had no write at all, on the grounds that a browser-startable 400k-bar replay is
+a research job that can starve the trading path. The operator asked for the
+portal to drive backtesting end to end, so the guarantee is now enforced by
+ARCHITECTURE rather than by absence: `POST /replay/jobs` appends a row to a
+queue, and a separate nice'd, CPU-capped worker claims one job at a time and
+runs it. Nothing here forks, sweeps, or blocks — and a portal full of impatient
+clicks becomes a queue rather than N concurrent sweeps competing with `monitor`.
+
+The write surface is deliberately narrow: INSERT/UPDATE on `replay_jobs` only,
+and SELECT-only on `replay_runs` / `replay_results`. The platform may REQUEST a
+run; it may never edit what the simulator produced.
 
 THE ONE-WAY RULE (#60 ADR). Research may read prod; prod must NEVER import
 research. This module therefore reads the `replay.*` TABLES through a small
@@ -57,14 +65,22 @@ REPLAY_SCHEMA = "replay"
 
 # The CLI that produces data. Quoted in the empty state so the operator is never
 # left with "no runs" and no way to make one.
+# Kept for the empty state and for anyone driving the harness from a shell — the
+# portal is a second front door onto this command, not a replacement for it.
 RUN_COMMAND = ("docker compose run --rm --no-deps replay "
                "python main.py run --config runs/<your-run>.json")
+WORKER_COMMAND = "docker compose up -d replay-worker"
 
 GRANT_SQL = (
     f"GRANT USAGE ON SCHEMA {REPLAY_SCHEMA} TO <api_role>; "
     f"GRANT SELECT ON ALL TABLES IN SCHEMA {REPLAY_SCHEMA} TO <api_role>; "
     f"ALTER DEFAULT PRIVILEGES IN SCHEMA {REPLAY_SCHEMA} "
-    "GRANT SELECT ON TABLES TO <api_role>;")
+    "GRANT SELECT ON TABLES TO <api_role>; "
+    # The one write the platform gets: it may ASK for a run. Results stay
+    # SELECT-only, so a stored result is never something the platform can edit.
+    f"GRANT INSERT, UPDATE ON {REPLAY_SCHEMA}.replay_jobs TO <api_role>; "
+    f"GRANT USAGE, SELECT ON SEQUENCE {REPLAY_SCHEMA}.replay_jobs_id_seq "
+    "TO <api_role>;")
 
 PROMOTION_BANNER = (
     "Replay results are HYPOTHESIS-GENERATING, not promotion-grade. The live "
@@ -131,6 +147,30 @@ RESULTS = Table(
     Column("created_at", DateTime(timezone=True)),
     schema=REPLAY_SCHEMA,
 )
+
+
+JOBS = Table(
+    "replay_jobs", _md,
+    Column("id", Integer, primary_key=True),
+    Column("label", String(96)),
+    Column("config", JSON),
+    Column("status", String(16)),
+    Column("requested_by", String(64)),
+    Column("claimed_at", DateTime(timezone=True)),
+    Column("started_at", DateTime(timezone=True)),
+    Column("finished_at", DateTime(timezone=True)),
+    Column("run_id", Integer),
+    Column("error", Text),
+    Column("progress", String(160)),
+    Column("created_at", DateTime(timezone=True)),
+    schema=REPLAY_SCHEMA,
+)
+
+# The portal may REQUEST a run. It may never execute one here, and it may never
+# edit a stored result — see the module docstring. These bound what a request is
+# allowed to ask for, so a browser cannot queue an unbounded sweep.
+MAX_QUEUED = 5
+MAX_VARIANTS = 24
 
 
 def _unavailable(exc: Exception) -> dict:
@@ -267,6 +307,98 @@ def _run_row(r, index: dict = None) -> dict:
         "validation": _validation_of(r, index),
         **_headline_of(r.summary or {}),
     }
+
+
+@router.post("/jobs", status_code=202)
+async def enqueue_job(body: dict, db: AsyncSession = Depends(get_db),
+                      user=Depends(require_token)):
+    """Queue a replay run. Returns 202 — ACCEPTED, not executed.
+
+    THIS ROUTE DOES NOT RUN ANYTHING. It appends a row; a separate nice'd,
+    CPU-capped worker claims it and runs one job at a time. That is what keeps
+    the original guarantee intact: a 400k-bar sweep still never executes inside
+    the API process, and a portal full of impatient clicks becomes a queue
+    rather than N sweeps competing with `monitor` for the box that manages open
+    positions.
+
+    The config is the SAME JSON the CLI takes, so the portal is a second front
+    door onto the existing command rather than a second implementation of it."""
+    cfg = (body or {}).get("config")
+    if not isinstance(cfg, dict) or not cfg:
+        raise HTTPException(400, "config must be a non-empty object")
+    variants = cfg.get("variants")
+    if not isinstance(variants, list) or not variants:
+        raise HTTPException(400, "config.variants must be a non-empty list")
+    if len(variants) > MAX_VARIANTS:
+        # Best-of-N is upward-biased by construction; an unbounded grid from a
+        # browser is a false-discovery machine with a submit button.
+        raise HTTPException(400, f"at most {MAX_VARIANTS} variants per run "
+                                 f"(asked for {len(variants)})")
+    try:
+        queued = int((await db.execute(
+            select(func.count()).select_from(JOBS)
+            .where(JOBS.c.status.in_(("queued", "running"))))).scalar() or 0)
+        if queued >= MAX_QUEUED:
+            raise HTTPException(429, f"{queued} jobs already queued or running "
+                                     f"(limit {MAX_QUEUED}) — wait for the worker")
+        res = await db.execute(JOBS.insert().values(
+            label=str((body or {}).get("label") or cfg.get("label") or "")[:96] or None,
+            config=cfg, status="queued",
+            requested_by=str(getattr(user, "username", None) or "portal")[:64],
+        ).returning(JOBS.c.id))
+        job_id = res.scalar_one()
+        await db.commit()
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        await _rollback(db)
+        return {**_unavailable(exc), "job_id": None}
+    return {"available": True, "job_id": job_id, "status": "queued",
+            "note": ("Queued. A separate worker runs it — nothing executes in "
+                     "the API. Poll GET /replay/jobs for progress.")}
+
+
+@router.get("/jobs")
+async def list_jobs(limit: int = 25, db: AsyncSession = Depends(get_db)):
+    """The queue, newest first, so the portal can show progress and failures."""
+    limit = max(1, min(int(limit or 25), 100))
+    try:
+        rows = (await db.execute(select(JOBS).order_by(JOBS.c.id.desc())
+                                 .limit(limit))).all()
+    except SQLAlchemyError as exc:
+        await _rollback(db)
+        return {**_unavailable(exc), "jobs": []}
+    return {"available": True, "jobs": [{
+        "id": r.id, "label": r.label, "status": r.status,
+        "requested_by": r.requested_by, "run_id": r.run_id,
+        "progress": r.progress, "error": r.error,
+        "created_at": _iso(r.created_at), "started_at": _iso(r.started_at),
+        "finished_at": _iso(r.finished_at),
+        "n_variants": len((r.config or {}).get("variants") or []),
+    } for r in rows]}
+
+
+@router.post("/jobs/{job_id}/cancel")
+async def cancel_job(job_id: int, db: AsyncSession = Depends(get_db)):
+    """Cancel a job that has not started. A RUNNING job is left alone — killing
+    a sweep mid-write would leave a half-populated run, and the worker's stale-job
+    reaper is what handles a worker that dies."""
+    try:
+        row = (await db.execute(select(JOBS).where(JOBS.c.id == job_id))).first()
+        if row is None:
+            raise HTTPException(404, f"job {job_id} not found")
+        if row.status != "queued":
+            raise HTTPException(409, f"job {job_id} is {row.status}; only a "
+                                     "queued job can be cancelled")
+        await db.execute(JOBS.update().where(JOBS.c.id == job_id)
+                         .values(status="cancelled"))
+        await db.commit()
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        await _rollback(db)
+        return _unavailable(exc)
+    return {"available": True, "job_id": job_id, "status": "cancelled"}
 
 
 @router.get("/runs")

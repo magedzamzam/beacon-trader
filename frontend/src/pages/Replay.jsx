@@ -1,18 +1,22 @@
 import { useEffect, useState } from "react";
 import { FlaskConical, ShieldAlert, TriangleAlert } from "lucide-react";
 import { Card, Table, Th, Td, Badge, Empty } from "../components/ui";
-import { ErrorNote, Button } from "../components/form";
+import { ErrorNote, Button, Field, Input } from "../components/form";
 import HelpHint from "../components/HelpHint";
 import { api } from "../lib/api";
 
 /**
- * Replay workbench (#183) — read the offline backtest harness's output.
+ * Replay workbench (#183) — build, launch and compare backtests from the portal.
  *
- * READ-ONLY BY CONSTRUCTION. There is no button here that starts a run, and
- * there is no API route that could serve one: a 400k-bar portfolio replay is a
- * CLI act (`services/replay`, compose `research` profile), and keeping it there
- * is what stops a research job competing with `monitor` for CPU. The empty
- * state names the command instead.
+ * NOTHING RUNS HERE, AND NOTHING RUNS IN THE API. Launching queues a job; a
+ * separate nice'd, CPU-capped worker claims one at a time and executes it. That
+ * is what keeps the original objection answered — a 400k-bar sweep must never
+ * compete with `monitor` for the box that manages open positions — while still
+ * letting the operator drive backtesting without an SSH session. A page full of
+ * impatient clicks becomes a queue, not N concurrent sweeps.
+ *
+ * The platform can REQUEST a run and can never edit one: INSERT/UPDATE on the
+ * job queue, SELECT-only on runs and results.
  *
  * THE GUARDRAILS ARE THE PAGE, not a footnote on it. #169 §8 exists because a
  * variant sweep is a false-discovery machine, and a table that lets the eye read
@@ -46,12 +50,30 @@ export default function Replay() {
   const [run, setRun] = useState(null);
   const [runErr, setRunErr] = useState(null);
   const [variant, setVariant] = useState("");
+  const [jobs, setJobs] = useState(null);
+  const [tick, setTick] = useState(0);
 
+  const reloadRuns = () => api.replayRuns(50)
+    .then(d => { setRuns(d); if (d.runs?.length && !runId) setRunId(d.runs[0].id); })
+    .catch(e => setErr(e.message));
+
+  useEffect(() => { reloadRuns(); /* eslint-disable-next-line */ }, [tick]);
+
+  // Poll the queue while anything is in flight. A sweep takes minutes, and a
+  // page that shows a job as "queued" forever is indistinguishable from a
+  // worker that is not running.
   useEffect(() => {
-    api.replayRuns(50)
-      .then(d => { setRuns(d); if (d.runs?.length) setRunId(d.runs[0].id); })
-      .catch(e => setErr(e.message));
-  }, []);
+    let alive = true;
+    const load = () => api.replayJobs(25).then(d => alive && setJobs(d)).catch(() => {});
+    load();
+    const busy = (jobs?.jobs || []).some(j => j.status === "queued" || j.status === "running");
+    const id = setInterval(() => {
+      load();
+      if (busy) setTick(t => t + 1);          // a finished job means a new run
+    }, busy ? 4000 : 15000);
+    return () => { alive = false; clearInterval(id); };
+    /* eslint-disable-next-line */
+  }, [jobs?.jobs?.map(j => j.status).join(","), tick]);
 
   useEffect(() => {
     if (!runId) return;
@@ -68,6 +90,8 @@ export default function Replay() {
       <PromotionBanner />
       {err && <ErrorNote>{err}</ErrorNote>}
       {runs && runs.available === false && <NotGranted info={runs} />}
+      <LaunchCard onQueued={() => setTick(t => t + 1)} />
+      <QueueCard jobs={jobs} onChanged={() => setTick(t => t + 1)} />
       {runs && runs.available !== false && !runs.runs.length && <NoRuns cmd={runs.run_command} />}
       {runs && !!runs.runs?.length && (
         <RunPicker runs={runs.runs} runId={runId} onPick={setRunId} />
@@ -97,7 +121,8 @@ function PromotionBanner() {
         <b className="text-warn">Replay results are hypothesis-generating, not promotion-grade.</b>{" "}
         The live frozen-week A/B/C on a frozen config remains the only thing that promotes a
         config. Nothing on this page changes what trades — the harness has no broker credentials
-        and a SELECT-only database role, and this screen cannot start a run.
+        and cannot write a trading table, and a queued sweep runs in a CPU-capped worker,
+        never in the API and never more than one at a time.
       </div>
     </div>
   );
@@ -114,6 +139,133 @@ function NotGranted({ info }) {
         <pre className="num text-[11px] bg-panel2 rounded p-2 whitespace-pre-wrap">{info.grant_sql}</pre>
         <div className="text-muted">Reported by the database: <span className="num">{info.reason}</span></div>
       </div>
+    </Card>
+  );
+}
+
+// --- launching a run from the portal ------------------------------------------
+// The operator asked for backtesting to be fully front-end driven. This QUEUES;
+// a separate nice'd, CPU-capped worker executes one job at a time, so a page
+// full of impatient clicks becomes a queue rather than N concurrent 400k-bar
+// sweeps competing with `monitor` for the box that manages open positions.
+const LADDERS = {
+  be_at_tp1: [{ trigger: { type: "tp_hit", index: 1 }, action: { type: "move_sl_to", target: "entry" } },
+              { trigger: { type: "tp_hit", index: 2 }, action: { type: "move_sl_to", target: "previous_tp" } }],
+  be_at_tp2: [{ trigger: { type: "tp_hit", index: 2 }, action: { type: "move_sl_to", target: "entry" } },
+              { trigger: { type: "tp_hit", index: 3 }, action: { type: "move_sl_to", target: "previous_tp" } }],
+  // An EMPTY sl_rules list is treated as UNSET and cascades to the default
+  // ladder, so a true control has to be a rule that can never fire.
+  runner_no_ratchet: [{ trigger: { type: "tp_hit", index: 99 }, action: { type: "move_sl_to", target: "entry" } }],
+};
+
+function LaunchCard({ onQueued }) {
+  const [label, setLabel] = useState("exit ladder A/B/C");
+  const [from, setFrom] = useState("2026-07-05");
+  const [to, setTo] = useState("2026-07-30");
+  const [holdout, setHoldout] = useState("2026-07-22");
+  const [arms, setArms] = useState(Object.keys(LADDERS));
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [err, setErr] = useState(null);
+
+  const toggle = (a) => setArms(s => s.includes(a) ? s.filter(x => x !== a) : [...s, a]);
+
+  const launch = async () => {
+    setBusy(true); setMsg(null); setErr(null);
+    try {
+      const config = {
+        label, symbol: "XAUUSD", timeframe: "1m",
+        from: from ? `${from}T00:00:00Z` : undefined,
+        to: to ? `${to}T23:59:59Z` : undefined,
+        // Without a holdout the headline is IN-SAMPLE and is a description of
+        // the past, not an edge — so it is a first-class field, not an option.
+        holdout_from: holdout ? `${holdout}T00:00:00Z` : undefined,
+        signal_source: "historical",
+        workers: 2,
+        variants: arms.map(name => ({ name, _ladder: name })),
+      };
+      const res = await api.replayEnqueue(label, config);
+      setMsg(`Queued as job #${res.job_id}. A worker runs it — nothing executes in the API.`);
+      onQueued?.();
+    } catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <Card>
+      <div className="px-4 py-3 border-b border-edge text-sm font-medium flex items-center gap-2">
+        <FlaskConical className="w-4 h-4 text-beacon" /> Launch a backtest
+        <Badge tone="muted">queued · one at a time</Badge>
+      </div>
+      <div className="px-4 py-2 text-[11px] text-muted border-b border-edge">
+        Queues a sweep over the stored signal history using the live account, risk and
+        instrument config. It does <b>not</b> run here — a separate CPU-capped worker picks it
+        up, so this never competes with the monitor. Results are
+        <b> hypothesis-generating</b>; the live frozen-week A/B/C is still the only thing that
+        promotes a config.
+      </div>
+      <div className="px-4 py-3 grid gap-3 md:grid-cols-2">
+        <Field label="Label"><Input value={label} onChange={e => setLabel(e.target.value)} /></Field>
+        <Field label="Exit ladders to compare">
+          <div className="flex flex-wrap gap-1">
+            {Object.keys(LADDERS).map(a => (
+              <Button key={a} variant={arms.includes(a) ? "primary" : "ghost"}
+                onClick={() => toggle(a)}>{a}</Button>
+            ))}
+          </div>
+        </Field>
+        <Field label="From (UTC)"><Input type="date" value={from} onChange={e => setFrom(e.target.value)} /></Field>
+        <Field label="To (UTC)"><Input type="date" value={to} onChange={e => setTo(e.target.value)} /></Field>
+        <Field label="Held-out from" hint="Everything before this date is in-sample. Without it the headline is not an edge.">
+          <Input type="date" value={holdout} onChange={e => setHoldout(e.target.value)} />
+        </Field>
+      </div>
+      <div className="px-4 py-3 border-t border-edge flex items-center gap-3 flex-wrap">
+        <Button onClick={launch} disabled={busy || !arms.length}>
+          {busy ? "Queueing…" : `Queue ${arms.length} variant${arms.length === 1 ? "" : "s"}`}</Button>
+        {!arms.length && <span className="text-[11px] text-warn">Pick at least one ladder.</span>}
+        {msg && <span className="text-[11px] text-beacon">{msg}</span>}
+        {err && <span className="text-[11px] text-short">{err}</span>}
+        <span className="text-[11px] text-muted">
+          Best-of-N is upward-biased: {arms.length} arms searched carries real luck.
+        </span>
+      </div>
+    </Card>
+  );
+}
+
+const JOB_TONE = { queued: "muted", running: "beacon", done: "long",
+                   failed: "short", cancelled: "warn" };
+
+function QueueCard({ jobs, onChanged }) {
+  const rows = jobs?.jobs || [];
+  if (jobs && jobs.available === false) return null;
+  if (!rows.length) return null;
+  const cancel = async (id) => { try { await api.replayCancelJob(id); onChanged?.(); } catch {} };
+  return (
+    <Card>
+      <div className="px-4 py-3 border-b border-edge text-sm font-medium">
+        Queue<span className="text-muted font-normal text-xs"> · the worker runs one at a time</span>
+      </div>
+      <Table minW={760}>
+        <thead><tr className="border-b border-edge">
+          <Th>Job</Th><Th>Status</Th><Th>Progress</Th><Th right>Variants</Th><Th>Run</Th><Th></Th>
+        </tr></thead>
+        <tbody>
+          {rows.map(j => (
+            <tr key={j.id} className="border-b border-edge/60">
+              <Td><span className="num text-xs">#{j.id}</span> {j.label || "(unlabelled)"}
+                <span className="block text-[10px] text-muted">{dt(j.created_at)} · {j.requested_by}</span></Td>
+              <Td><Badge tone={JOB_TONE[j.status] || "muted"}>{j.status}</Badge></Td>
+              <Td><span className="text-[11px] text-muted">{j.error || j.progress || "—"}</span></Td>
+              <Td right mono>{j.n_variants}</Td>
+              <Td mono>{j.run_id ? `#${j.run_id}` : "—"}</Td>
+              <Td>{j.status === "queued" &&
+                <Button variant="ghost" onClick={() => cancel(j.id)}>cancel</Button>}</Td>
+            </tr>
+          ))}
+        </tbody>
+      </Table>
     </Card>
   );
 }

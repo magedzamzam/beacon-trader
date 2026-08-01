@@ -323,6 +323,97 @@ async def cmd_run(args) -> int:
     return 0
 
 
+async def cmd_worker(args) -> int:
+    """Drain the job queue the portal appends to (#183).
+
+    THE ONE LONG-RUNNING THING IN THIS SERVICE, and it stays inside the same
+    isolation: no broker credentials, a SELECT-only role on the trading schema,
+    write access only to `replay.*`, `nice -19` from the image ENTRYPOINT and a
+    hard CPU/memory ceiling from compose. What it adds is that a sweep can be
+    requested from a browser instead of an SSH session; what it does not add is
+    a sweep running inside the API, or more than one running at a time.
+
+    ONE JOB AT A TIME, deliberately. A portal full of impatient clicks becomes a
+    queue rather than N concurrent 400k-bar sweeps competing with `monitor` for
+    the box that manages open positions. That was the whole objection to a
+    browser-startable replay, and serialising is what answers it.
+
+    A failed job fails ITS OWN row and the loop continues — one bad config must
+    not stop the queue — and a job left RUNNING by a killed worker is marked
+    failed rather than silently retried, since a partial sweep may already have
+    written a run."""
+    await store.init_replay_tables()
+    log = print
+    log(json.dumps({"worker": "started", "poll_seconds": args.poll,
+                    "git_sha": R.git_sha()}, default=str))
+    while True:
+        try:
+            async with store.Session()() as session:
+                n = await store.requeue_stale_running_jobs(session)
+                if n:
+                    log(json.dumps({"worker": "reaped_stale_jobs", "n": n}))
+                job = await store.claim_next_job(session)
+            if job is None:
+                await asyncio.sleep(args.poll)
+                continue
+            log(json.dumps({"worker": "claimed", "job": job.id,
+                            "label": job.label}, default=str))
+            await _execute_job(job)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:                 # the loop never dies on one job
+            log(json.dumps({"worker": "loop_error", "error": str(exc)[:300]}))
+            await asyncio.sleep(args.poll)
+        if args.once:
+            return 0
+
+
+async def _execute_job(job) -> None:
+    """Run one queued job to completion and record what happened to it."""
+    cfg = dict(job.config or {})
+    try:
+        async with store.Session()() as session:
+            await store.set_job_progress(session, job, "loading candles and signals")
+            (spec, series, signals, sources, symbol, tf, frm, to,
+             gen_stats) = await _load(session, cfg)
+            if not len(series):
+                await store.finish_job(session, job, status="failed",
+                                       error=f"no usable candles for {symbol} {tf}")
+                return
+            await store.set_job_progress(
+                session, job,
+                f"{len(spec.variants)} variant(s) over {len(signals)} signals")
+            out = R.sweep(spec, series, signals, sources_by_id=sources,
+                          generator_stats=gen_stats)
+            reports = out["variants"]
+            summary = {"run": out["run"], "variants": reports,
+                       "ranking": R.compare_variants(reports)}
+            cdig = await store.candle_digest(session, symbol=symbol, timeframe=tf)
+            _warn_unattributable()
+            run = await store.create_run(
+                session, label=spec.label or job.label, signal_source=spec.signal_source,
+                symbol=symbol, timeframe=tf, frm=frm, to=to,
+                holdout_from=spec.holdout_from, n_variants=len(spec.variants),
+                git_sha=R.git_sha(), code_version=R.CODE_VERSION,
+                config_digest=spec.digest(), candle_digest=cdig, config=cfg,
+                coverage=series.coverage())
+            rows = []
+            for name, res in sorted(out["results"].items()):
+                rows.extend(store.result_rows(run.id, name, res,
+                                              holdout_from=spec.holdout_from))
+            await store.write_results(session, rows)
+            await store.finish_run(session, run, summary=summary,
+                                   coverage=series.coverage())
+            await store.finish_job(session, job, status="done", run_id=run.id,
+                                   progress=f"{len(rows)} rows")
+    except Exception as exc:
+        async with store.Session()() as session:
+            fresh = await session.get(type(job), job.id)
+            if fresh is not None:
+                await store.finish_job(session, fresh, status="failed",
+                                       error=str(exc)[:2000])
+
+
 async def cmd_validate(args) -> int:
     """Section 5: replay the ACTUAL live configs over the ACTUAL signals and
     reconcile against broker truth. Exits NON-ZERO when the gate fails — a
@@ -540,6 +631,13 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--timeframe", default="1m")
     c.add_argument("--since", default="2026-07-05T00:00:00Z")
 
+    w = sub.add_parser("worker", help="drain the portal's replay job queue "
+                                      "(the only long-running command)")
+    w.add_argument("--poll", type=float, default=5.0,
+                   help="seconds between queue polls when idle")
+    w.add_argument("--once", action="store_true",
+                   help="handle at most one job, then exit (for testing)")
+
     k = sub.add_parser("check", help="validate a run config offline (no DB)")
     k.add_argument("--config", required=True)
     return p
@@ -550,7 +648,8 @@ def main(argv=None) -> int:
     if args.cmd == "check":
         return cmd_check(args)
     fn = {"init": cmd_init, "scaffold": cmd_scaffold, "run": cmd_run,
-          "validate": cmd_validate, "coverage": cmd_coverage}[args.cmd]
+          "validate": cmd_validate, "coverage": cmd_coverage,
+          "worker": cmd_worker}[args.cmd]
     return asyncio.run(fn(args))
 
 

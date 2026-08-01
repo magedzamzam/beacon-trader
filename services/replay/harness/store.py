@@ -408,3 +408,64 @@ def sim_legs_for_validation(res) -> tuple:
 
 def _f(v) -> float:
     return float(v)
+
+
+# --- the job queue (#183) -----------------------------------------------------
+# The portal appends here; the worker drains it. The API holds INSERT/UPDATE on
+# THIS table and SELECT-only on runs/results, so the platform can request a run
+# and can still never edit what the simulator produced.
+async def claim_next_job(session):
+    """Claim the oldest queued job, or None.
+
+    `SKIP LOCKED` so two workers can never take the same job — one worker is the
+    intended deployment, but a queue whose correctness depends on there being
+    exactly one consumer is a queue that breaks the first time someone scales it
+    or restarts during a run."""
+    from .models import QUEUED, RUNNING, ReplayJob
+    row = (await session.execute(
+        select(ReplayJob).where(ReplayJob.status == QUEUED)
+        .order_by(ReplayJob.id).limit(1).with_for_update(skip_locked=True))
+    ).scalars().first()
+    if row is None:
+        return None
+    row.status = RUNNING
+    row.claimed_at = dt.datetime.now(dt.timezone.utc)
+    row.started_at = row.claimed_at
+    await session.commit()
+    return row
+
+
+async def finish_job(session, job, *, status, run_id=None, error=None,
+                     progress=None) -> None:
+    job.status = status
+    job.run_id = run_id
+    job.error = (error or None) and str(error)[:2000]
+    job.progress = progress
+    job.finished_at = dt.datetime.now(dt.timezone.utc)
+    await session.commit()
+
+
+async def set_job_progress(session, job, message: str) -> None:
+    """A long sweep that reports nothing is indistinguishable from a hung one."""
+    job.progress = (message or "")[:160]
+    await session.commit()
+
+
+async def requeue_stale_running_jobs(session, *, older_than_minutes: int = 120) -> int:
+    """A job left RUNNING by a killed worker is stuck forever otherwise.
+
+    Marked FAILED rather than re-queued: the sweep may have written a partial
+    run, and silently retrying something that already half-executed is how you
+    get two runs claiming to be the same job."""
+    from .models import FAILED, RUNNING, ReplayJob
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=older_than_minutes)
+    rows = (await session.execute(select(ReplayJob).where(
+        ReplayJob.status == RUNNING, ReplayJob.claimed_at < cutoff))).scalars().all()
+    for r in rows:
+        r.status = FAILED
+        r.error = (f"worker died or stalled: claimed at {r.claimed_at} and still "
+                   f"RUNNING after {older_than_minutes} minutes")
+        r.finished_at = dt.datetime.now(dt.timezone.utc)
+    if rows:
+        await session.commit()
+    return len(rows)

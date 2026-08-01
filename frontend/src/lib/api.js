@@ -185,6 +185,11 @@ export const api = {
   // replay workbench (#183) — READ-ONLY by construction. There is deliberately
   // no client call that starts a run: a 400k-bar sweep is a CLI act, not
   // something a browser can queue behind the monitor's tick loop.
+  // Queue a run from the portal. This ENQUEUES — a separate nice'd worker
+  // executes it, one job at a time. Nothing runs inside the API.
+  replayEnqueue: (label, config) => post("/replay/jobs", { label, config }),
+  replayJobs: (limit = 25) => req(`/replay/jobs?limit=${limit}`),
+  replayCancelJob: (id) => post(`/replay/jobs/${id}/cancel`, {}),
   replayRuns: (limit = 50) => req(`/replay/runs?limit=${limit}`),
   replayRun: (id) => req(`/replay/runs/${id}`),
   replayResults: (id, { variant = "", sourceId = "", taken = null, reason = "",

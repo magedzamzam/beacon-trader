@@ -160,3 +160,11 @@ SELECT pg_get_userbyid(defaclrole) AS granting_role,
 --   GRANT USAGE ON SCHEMA replay TO beacon_app;
 --   GRANT SELECT ON ALL TABLES IN SCHEMA replay TO beacon_app;
 --   ALTER DEFAULT PRIVILEGES IN SCHEMA replay GRANT SELECT ON TABLES TO beacon_app;
+
+-- The portal's job queue (#183). The API role may APPEND a request and update
+-- its own row; it stays SELECT-only on replay_runs / replay_results, because a
+-- result the platform can edit is not a record of what the simulator produced.
+-- Run AS beacon_replay, which owns the tables:
+--
+--   GRANT INSERT, UPDATE ON replay.replay_jobs TO beacon_app;
+--   GRANT USAGE, SELECT ON SEQUENCE replay.replay_jobs_id_seq TO beacon_app;

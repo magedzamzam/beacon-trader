@@ -31,6 +31,11 @@ EXPECTED = {
     ("GET", "/replay/runs"),
     ("GET", "/replay/runs/{run_id}"),
     ("GET", "/replay/runs/{run_id}/results"),
+    # The portal drives backtesting end to end now. These ENQUEUE; a separate
+    # worker executes. See `test_the_api_enqueues_and_never_executes`.
+    ("POST", "/replay/jobs"),
+    ("GET", "/replay/jobs"),
+    ("POST", "/replay/jobs/{job_id}/cancel"),
 }
 
 
@@ -47,22 +52,43 @@ def test_router_serves_exactly_the_expected_surface():
     assert _served() == EXPECTED
 
 
-def test_there_is_no_write_route_and_nothing_that_starts_a_run():
-    """No POST/PUT/PATCH/DELETE anywhere. The harness is a CLI batch job and
-    must stay one — this is the property that keeps a research sweep off the
-    trading box's CPU on someone's click."""
-    assert {m for m, _p in _served()} == {"GET"}
+def test_the_api_enqueues_and_never_executes():
+    """The guarantee, restated for the queue.
 
+    The original rule was "no write route at all", because a browser-startable
+    400k-bar sweep is a research job that can starve the trading path. The
+    operator asked for portal-driven backtesting, so the rule is now enforced by
+    architecture: the API may APPEND to a queue and nothing else. It must never
+    import the harness, spawn a process, or run a sweep in-process — a separate
+    nice'd worker does that, one job at a time.
 
-def test_the_router_issues_no_write_statement():
-    """A grant can be widened by an operator; the code must not be able to use
-    it. Checked over the source so a future INSERT is a CI failure, not a row in
-    a table that is supposed to be a record of what the simulator produced."""
+    Anything here that could execute would put a sweep in the API's event loop,
+    which is the failure this whole design exists to prevent."""
     src = Path(R.__file__).read_text(encoding="utf-8")
-    body = "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
-    for verb in ("insert(", "update(", "delete(", "INSERT ", "UPDATE ",
-                 "DELETE ", "db.add", "db.commit"):
-        assert verb not in body, f"the replay router must never {verb.strip()}"
+    body = " ".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+    for forbidden in ("subprocess", "multiprocessing", "ProcessPool", "ThreadPool",
+                      "os.system", "os.fork", "os.exec", "popen",
+                      "PortfolioSim", "R.sweep", "run_variant", "asyncio.create_task"):
+        assert forbidden not in body, (
+            f"the replay router must never {forbidden} — it enqueues, the worker runs")
+
+
+def test_the_only_writes_are_to_the_job_queue():
+    """Results stay immutable to the platform. A result the platform can edit is
+    not a record of what the simulator produced; a queue it can append to is
+    just a queue."""
+    src = Path(R.__file__).read_text(encoding="utf-8")
+    body = " ".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+    for table in ("RUNS", "RESULTS"):
+        for verb in (".insert()", ".update()", ".delete()"):
+            assert f"{table}{verb}" not in body, f"{table}{verb} must never appear"
+    assert "JOBS.insert()" in body and "JOBS.update()" in body
+
+
+def test_the_write_surface_is_only_the_queue():
+    writes = {(m, p) for m, p in _served() if m != "GET"}
+    assert writes == {("POST", "/replay/jobs"),
+                      ("POST", "/replay/jobs/{job_id}/cancel")}
 
 
 def test_the_read_model_is_not_attached_to_the_trading_metadata():
@@ -72,7 +98,8 @@ def test_the_read_model_is_not_attached_to_the_trading_metadata():
     from beacon_core.db.base import Base
 
     assert R._md is not Base.metadata
-    assert set(R._md.tables) == {"replay.replay_runs", "replay.replay_results"}
+    assert set(R._md.tables) == {"replay.replay_runs", "replay.replay_results",
+                                 "replay.replay_jobs"}
     for name in Base.metadata.tables:
         assert not name.startswith("replay.")
 
@@ -104,19 +131,21 @@ def test_every_replay_path_the_client_builds_is_served():
     js = API_JS.read_text(encoding="utf-8")
     paths = set(re.findall(r"[\"`](/replay/[^\"`?]*)", js))
     assert paths, "the client should call the replay API"
-    served = {p for _m, p in _served()}
+    # Both sides collapse to `{}` — hardcoding one param name meant a route with
+    # a differently-named param (job_id) read as unserved.
+    served = {re.sub(r"\{[^}]+\}", "{}", p).rstrip("/") for _m, p in _served()}
     for p in paths:
-        norm = re.sub(r"\$\{[^}]+\}", "{run_id}", p).rstrip("/")
-        assert norm in served, (p, norm)
+        norm = re.sub(r"\$\{[^}]+\}", "{}", p).rstrip("/")
+        assert norm in served, (p, norm, sorted(served))
 
 
-def test_the_client_has_no_call_that_could_start_a_run():
-    """A POST to /replay from api.js would 404 today, but the point is that it
-    must never be written — the empty state names the CLI instead."""
+def test_the_client_can_queue_but_not_delete():
+    """The portal may request and cancel. It may never DELETE a run or a result —
+    those are the record of what the simulator produced."""
     js = API_JS.read_text(encoding="utf-8")
-    block = js.split("replayRuns:", 1)[1].split("// brokers", 1)[0]
-    for verb in ("post(", "patch(", "del("):
-        assert verb not in block, f"the replay client must never {verb}"
+    block = js.split("replayEnqueue:", 1)[1].split("// brokers", 1)[0]
+    assert "post(" in block, "the portal must be able to queue a run"
+    assert "del(" not in block, "the replay client must never DELETE"
 
 
 def test_the_empty_state_names_the_command_that_produces_data():
@@ -141,10 +170,12 @@ def test_the_page_renders_every_guardrail_without_interaction():
         assert field in page, f"the replay page must surface {field}"
 
 
-def test_the_page_has_no_control_that_starts_a_run():
+def test_the_page_can_launch_a_run():
+    """The operator asked for backtesting to be fully front-end driven: no SSH,
+    no CLI. The page must actually be able to queue one."""
     page = REPLAY_PAGE.read_text(encoding="utf-8")
-    for forbidden in ("api.post", "replayStart", "startRun", "queueRun"):
-        assert forbidden not in page
+    assert "replayEnqueue" in page
+    assert "replayJobs" in page
 
 
 # --- the guardrail fold-up, unit-tested ---------------------------------------

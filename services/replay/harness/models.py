@@ -141,7 +141,62 @@ class ReplayResult(ReplayBase):
 # Every table this service is allowed to write, unqualified. Asserted by the
 # isolation test, so a future model added to the wrong Base — or to the wrong
 # schema — fails CI rather than production.
-REPLAY_TABLES = ("replay_runs", "replay_results")
+REPLAY_TABLES = ("replay_runs", "replay_results", "replay_jobs")
 
 # The same set as `create_all` sees them: schema-qualified.
 QUALIFIED_TABLES = tuple(f"{REPLAY_SCHEMA}.{t}" for t in REPLAY_TABLES)
+
+
+class ReplayJob(ReplayBase):
+    """A REQUEST for a run, queued from the portal (#183).
+
+    THE ISOLATION SPLIT THIS PRESERVES. The original design gave the platform no
+    write of any kind here, on the grounds that a 400k-bar sweep must not be
+    startable from a browser. What actually mattered in that argument was two
+    things: a sweep must never execute inside the API process, and a stored
+    RESULT must never be editable by the platform. Both still hold. What changes
+    is that requesting a run is now a row, not an SSH session.
+
+    So the grant splits: the API gets INSERT/UPDATE on THIS table only, and stays
+    SELECT-only on `replay_runs` / `replay_results`. A result the platform can
+    edit is not a record of what the simulator produced; a queue it can append to
+    is just a queue.
+
+    The worker — a separate, nice'd, CPU-capped process — is what executes. One
+    job at a time, so a portal full of impatient clicks becomes a queue rather
+    than N sweeps competing with `monitor` for the box.
+    """
+    __tablename__ = "replay_jobs"
+    __table_args__ = (
+        Index("ix_replay_jobs_status", "status", "id"),
+        {"schema": REPLAY_SCHEMA},
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    label: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    # The run config as authored, exactly the JSON the CLI takes. Same schema,
+    # same validation, same `check` path — the portal is a second front door onto
+    # the existing command, not a second implementation of it.
+    config: Mapped[dict] = mapped_column(JSON, default=dict)
+    # queued -> running -> done | failed | cancelled
+    status: Mapped[str] = mapped_column(String(16), default="queued")
+    requested_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Set by the worker when it claims the job, so a crashed worker's job is
+    # visibly stuck rather than silently gone.
+    claimed_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    started_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    # The run this job produced. Nullable until it finishes — and still nullable
+    # on failure, which is why `error` is separate.
+    run_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    progress: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=_now)
+
+
+QUEUED, RUNNING, DONE, FAILED, CANCELLED = (
+    "queued", "running", "done", "failed", "cancelled")
+TERMINAL_JOB = (DONE, FAILED, CANCELLED)
