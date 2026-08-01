@@ -183,7 +183,79 @@ def _generator_account_ids(cfg: dict, spec: R.RunSpec) -> tuple:
     return tuple(ids)
 
 
+# Exit ladders the portal can ask for by NAME. The browser must not be able to
+# author sl_rules JSON: a malformed ladder there produces a run that completes,
+# reports rows, and takes zero trades — which is what the first portal-launched
+# sweep did (1,873 signals evaluated, `unknown_account` on 1,761 of them).
+PORTAL_LADDERS = {
+    "be_at_tp1": [
+        {"trigger": {"type": "tp_hit", "index": 1},
+         "action": {"type": "move_sl_to", "target": "entry"}},
+        {"trigger": {"type": "tp_hit", "index": 2},
+         "action": {"type": "move_sl_to", "target": "previous_tp"}}],
+    "be_at_tp2": [
+        {"trigger": {"type": "tp_hit", "index": 2},
+         "action": {"type": "move_sl_to", "target": "entry"}},
+        {"trigger": {"type": "tp_hit", "index": 3},
+         "action": {"type": "move_sl_to", "target": "previous_tp"}}],
+    # An EMPTY sl_rules list reads as UNSET and cascades to the default ladder,
+    # so a true control has to be a rule that can never fire.
+    "runner_no_ratchet": [
+        {"trigger": {"type": "tp_hit", "index": 99},
+         "action": {"type": "move_sl_to", "target": "entry"}}],
+}
+DEFAULT_PORTAL_EQUITY = 10000.0
+
+
+async def _expand_scaffold(session, cfg: dict) -> dict:
+    """Turn a portal request into a full run config, from the LIVE tables.
+
+    A queued job carries a high-level ask — window, holdout, which exit ladders —
+    and the accounts, risk, risk_limits, instrument and session windows are read
+    from the database here, exactly as `scaffold` does for the validation
+    baseline. The browser never authors them.
+
+    That is not tidiness. The first portal-launched sweep sent variants with a
+    name and nothing else, so every account lookup missed and all 5,619 rows were
+    `not_taken`. The run said `done`. Building the config where the live config
+    actually lives makes that unrepresentable, and keeps a portal sweep in step
+    with production instead of with whatever the page last hardcoded."""
+    if not cfg.get("scaffold"):
+        return cfg
+    names = [n for n in (cfg.get("ladders") or []) if n in PORTAL_LADDERS]
+    if not names:
+        raise ValueError("scaffold run needs at least one known ladder: "
+                         + ", ".join(sorted(PORTAL_LADDERS)))
+    symbol = str(cfg.get("symbol") or "XAUUSD")
+    equity = float(cfg.get("equity") or DEFAULT_PORTAL_EQUITY)
+    base = await store.load_live_config(
+        session, symbol=symbol, equity=equity, frm=_dt(cfg.get("from")),
+        to=_dt(cfg.get("to")), holdout_from=_dt(cfg.get("holdout_from")))
+    live = (base.get("variants") or [{}])[0]
+
+    variants = []
+    for name in names:
+        import copy
+        v = copy.deepcopy(live)
+        v["name"] = name
+        for st in v.get("strategies", []):
+            ep = st.setdefault("exit_policy", {})
+            if st.get("account_id") is None and st.get("source_id") is None:
+                ep["sl_rules"] = copy.deepcopy(PORTAL_LADDERS[name])
+                st["label"] = name
+            else:
+                # Let the base layer win uniformly, or the arms would differ by
+                # a mix of two changes and neither would be attributable.
+                ep.pop("sl_rules", None)
+        variants.append(v)
+    return {**base, "label": cfg.get("label") or base.get("label"),
+            "from": cfg.get("from"), "to": cfg.get("to"),
+            "holdout_from": cfg.get("holdout_from"),
+            "signal_source": "historical", "workers": 2, "variants": variants}
+
+
 async def _load(session, cfg: dict):
+    cfg = await _expand_scaffold(session, cfg)
     symbol = str(cfg.get("symbol") or "XAUUSD")
     timeframe = str(cfg.get("timeframe") or "1m")
     frm, to = _dt(cfg.get("from")), _dt(cfg.get("to"))

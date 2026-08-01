@@ -148,22 +148,21 @@ function NotGranted({ info }) {
 // a separate nice'd, CPU-capped worker executes one job at a time, so a page
 // full of impatient clicks becomes a queue rather than N concurrent 400k-bar
 // sweeps competing with `monitor` for the box that manages open positions.
-const LADDERS = {
-  be_at_tp1: [{ trigger: { type: "tp_hit", index: 1 }, action: { type: "move_sl_to", target: "entry" } },
-              { trigger: { type: "tp_hit", index: 2 }, action: { type: "move_sl_to", target: "previous_tp" } }],
-  be_at_tp2: [{ trigger: { type: "tp_hit", index: 2 }, action: { type: "move_sl_to", target: "entry" } },
-              { trigger: { type: "tp_hit", index: 3 }, action: { type: "move_sl_to", target: "previous_tp" } }],
-  // An EMPTY sl_rules list is treated as UNSET and cascades to the default
-  // ladder, so a true control has to be a rule that can never fire.
-  runner_no_ratchet: [{ trigger: { type: "tp_hit", index: 99 }, action: { type: "move_sl_to", target: "entry" } }],
-};
+// Ladder NAMES only. The browser deliberately does not author `sl_rules`, or
+// accounts, or risk — the worker scaffolds all of it from the live tables (see
+// `_expand_scaffold`). The first version of this form sent `{name}` and nothing
+// else, and the resulting sweep evaluated 1,873 signals, took ZERO, and still
+// reported `done` with 5,619 rows: every account lookup missed. A config the
+// page invents is a config that can drift from production silently.
+const LADDERS = ["be_at_tp1", "be_at_tp2", "runner_no_ratchet"];
 
 function LaunchCard({ onQueued }) {
   const [label, setLabel] = useState("exit ladder A/B/C");
   const [from, setFrom] = useState("2026-07-05");
   const [to, setTo] = useState("2026-07-30");
   const [holdout, setHoldout] = useState("2026-07-22");
-  const [arms, setArms] = useState(Object.keys(LADDERS));
+  const [arms, setArms] = useState([...LADDERS]);
+  const [equity, setEquity] = useState(10000);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
   const [err, setErr] = useState(null);
@@ -173,16 +172,22 @@ function LaunchCard({ onQueued }) {
   const launch = async () => {
     setBusy(true); setMsg(null); setErr(null);
     try {
+      // A high-level ASK. The worker reads accounts, risk, risk_limits, the
+      // instrument and the session windows from the live tables and expands
+      // this into the full run config, so a portal sweep is always in step with
+      // production rather than with whatever this page last hardcoded.
       const config = {
-        label, symbol: "XAUUSD", timeframe: "1m",
+        scaffold: true,
+        label, symbol: "XAUUSD", equity: Number(equity) || 10000,
+        ladders: arms,
         from: from ? `${from}T00:00:00Z` : undefined,
         to: to ? `${to}T23:59:59Z` : undefined,
         // Without a holdout the headline is IN-SAMPLE and is a description of
         // the past, not an edge — so it is a first-class field, not an option.
         holdout_from: holdout ? `${holdout}T00:00:00Z` : undefined,
-        signal_source: "historical",
-        workers: 2,
-        variants: arms.map(name => ({ name, _ladder: name })),
+        // The enqueue route requires a non-empty `variants` list as its bound;
+        // the worker replaces it with the scaffolded arms.
+        variants: arms.map(name => ({ name })),
       };
       const res = await api.replayEnqueue(label, config);
       setMsg(`Queued as job #${res.job_id}. A worker runs it — nothing executes in the API.`);
@@ -198,8 +203,9 @@ function LaunchCard({ onQueued }) {
         <Badge tone="muted">queued · one at a time</Badge>
       </div>
       <div className="px-4 py-2 text-[11px] text-muted border-b border-edge">
-        Queues a sweep over the stored signal history using the live account, risk and
-        instrument config. It does <b>not</b> run here — a separate CPU-capped worker picks it
+        Queues a sweep over the stored signal history. The accounts, risk, limits and
+        instrument are read from the <b>live tables</b> by the worker — this form only picks
+        the window and which exit ladders to compare, so a run cannot drift from production. It does <b>not</b> run here — a separate CPU-capped worker picks it
         up, so this never competes with the monitor. Results are
         <b> hypothesis-generating</b>; the live frozen-week A/B/C is still the only thing that
         promotes a config.
@@ -208,7 +214,7 @@ function LaunchCard({ onQueued }) {
         <Field label="Label"><Input value={label} onChange={e => setLabel(e.target.value)} /></Field>
         <Field label="Exit ladders to compare">
           <div className="flex flex-wrap gap-1">
-            {Object.keys(LADDERS).map(a => (
+            {LADDERS.map(a => (
               <Button key={a} variant={arms.includes(a) ? "primary" : "ghost"}
                 onClick={() => toggle(a)}>{a}</Button>
             ))}
@@ -218,6 +224,9 @@ function LaunchCard({ onQueued }) {
         <Field label="To (UTC)"><Input type="date" value={to} onChange={e => setTo(e.target.value)} /></Field>
         <Field label="Held-out from" hint="Everything before this date is in-sample. Without it the headline is not an edge.">
           <Input type="date" value={holdout} onChange={e => setHoldout(e.target.value)} />
+        </Field>
+        <Field label="Equity per account" hint="Sizing is only comparable to live if the budget is. Equity lives at the broker, not the ledger.">
+          <Input type="number" value={equity} onChange={e => setEquity(e.target.value)} />
         </Field>
       </div>
       <div className="px-4 py-3 border-t border-edge flex items-center gap-3 flex-wrap">

@@ -137,3 +137,56 @@ def test_validate_exits_non_zero_on_a_failed_gate():
             (SERVICE_ROOT / "main.py").read_text(encoding="utf-8")))
         if isinstance(n, ast.AsyncFunctionDef) and n.name == "cmd_validate"))
     assert "return 1 if failed else 0" in src
+
+
+# --- the portal's scaffolded launch (#183) ------------------------------------
+def test_the_portal_ladders_are_named_not_authored_by_the_browser():
+    """The launch form sends ladder NAMES. It sent `{name}` and nothing else
+    once, and the sweep evaluated 1,873 signals, took ZERO, and still reported
+    `done` with 5,619 rows — every account lookup missed because the browser had
+    invented a variant with no accounts, risk or instrument.
+
+    Naming the ladders server-side makes that unrepresentable."""
+    import main
+    assert set(main.PORTAL_LADDERS) == {"be_at_tp1", "be_at_tp2", "runner_no_ratchet"}
+    for name, rules in main.PORTAL_LADDERS.items():
+        assert rules and all("trigger" in r and "action" in r for r in rules), name
+
+
+def test_the_control_arm_is_a_rule_that_can_never_fire():
+    """An EMPTY sl_rules list reads as UNSET and cascades to the default ladder,
+    so a control expressed as `[]` would silently be BE@TP1."""
+    import main
+    runner = main.PORTAL_LADDERS["runner_no_ratchet"]
+    assert runner[0]["trigger"]["index"] == 99
+
+
+def test_the_page_sends_names_and_never_sl_rules():
+    """If the page ever starts authoring exit rules again, this fails."""
+    page = (SERVICE_ROOT.parents[1] / "frontend/src/pages/Replay.jsx").read_text(
+        encoding="utf-8")
+    block = page.split("function LaunchCard", 1)[1].split("function ", 1)[0]
+    assert "scaffold: true" in block
+    assert "sl_rules" not in block, "the browser must not author exit rules"
+    assert "move_sl_to" not in block
+
+
+def test_a_scaffold_request_with_no_known_ladder_is_refused():
+    """Silently running zero arms is how the first one produced a `done` job with
+    nothing in it."""
+    import asyncio
+
+    import main
+    for cfg in ({"scaffold": True, "ladders": []},
+                {"scaffold": True, "ladders": ["not_a_ladder"]}):
+        with pytest.raises(ValueError) as exc:
+            asyncio.run(main._expand_scaffold(None, cfg))
+        assert "ladder" in str(exc.value)
+
+
+def test_a_non_scaffold_config_passes_through_untouched():
+    import asyncio
+
+    import main
+    cfg = {"label": "hand-written", "variants": [{"name": "x"}]}
+    assert asyncio.run(main._expand_scaffold(None, cfg)) is cfg
