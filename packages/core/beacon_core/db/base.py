@@ -35,6 +35,8 @@ ADDITIVE_MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE trades "
     "ADD COLUMN IF NOT EXISTS strategy_id INTEGER",        # ExecutionStrategy attribution (#84)
     "ALTER TABLE trades "
+    "ADD COLUMN IF NOT EXISTS deployed_risk numeric(18,6)",  # risk the FILLS put on (#188)
+    "ALTER TABLE trades "
     "ADD COLUMN IF NOT EXISTS cluster_id VARCHAR(48)",     # correlation-cluster tag (#106)
     "ALTER TABLE trades "
     "ADD COLUMN IF NOT EXISTS cluster_alloc JSON",         # cluster budgeter record (#106)

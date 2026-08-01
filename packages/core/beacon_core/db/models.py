@@ -103,6 +103,19 @@ class Trade(Base):
     direction: Mapped[str] = mapped_column(String(4))
     status: Mapped[str] = mapped_column(String(16), default="open")  # open|closed|partial
     planned_risk: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)
+    # What sizing INTENDED to lose at the original stop is `planned_risk`; this
+    # is what the fills actually put on (#188). An arm that does not deploy its
+    # plan — `entry_style="staged"` by construction — gets a mechanically better
+    # R = pl/planned_risk in a losing week with no entry skill at all, and the
+    # A/B ruling instrument could not tell that from selection. Measured to the
+    # ORIGINAL stop (legs.sl is ratcheted in place), account currency, same
+    # arithmetic as `risk_cash`. NULL on historical rows and excluded from the
+    # deployed metrics rather than read as zero.
+    #
+    # SCHEMA GOTCHA: `create_all` does NOT add columns to an existing table
+    # (CLAUDE.md 6), so this needs an explicit ALTER on deploy:
+    #   ALTER TABLE trades ADD COLUMN IF NOT EXISTS deployed_risk NUMERIC(18,6);
+    deployed_risk: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)
     realized_pl: Mapped[Decimal] = mapped_column(NUM, default=Decimal("0"))
     # Execution-strategy attribution (#83/#84): the exit sl_rules this trade
     # actually ran under, SNAPSHOT at entry (point-in-time — immune to later

@@ -32,6 +32,7 @@ from beacon_core.execution import staging as STG
 from beacon_core.brokers import build_adapter, symbol_map
 from beacon_core.brokers.types import (AuthError, ModifyPositionRequest, OrderSide,
                                        OrderStatus, OrderType, PlaceOrderRequest)
+from beacon_core.risk.sizing import deployed_risk_from_planned
 from beacon_core.strategy.rules import (PositionCtx, entry_basis, evaluate,
                                         levels_reached, next_mfe, DEFAULT_SL_RULES)
 from beacon_core.settings_store import get_setting, set_setting
@@ -414,7 +415,44 @@ async def _drive_staged(session, trade, adapter, smap, mid, ttl_min) -> None:
                  placed, decision.reason)
 
 
+async def _record_deployed_risk(session, trade) -> None:
+    """Persist what the fills ACTUALLY put on, to the ORIGINAL stop (#188).
+
+    Recomputed from every leg each tick rather than accumulated incrementally:
+    idempotent, so a restart, a re-tick or a late fill all converge on the same
+    number instead of double-counting. Cheap — the legs are already loaded by
+    the caller's own query path.
+
+    The original stop comes from `signals.sl`, NOT `legs.sl`: the ratchet engine
+    mutates the leg stop in place, so a trade that moved to breakeven would
+    otherwise record ~0 deployed risk and flatter the very ratio this exists to
+    measure.
+
+    Measurement only — nothing reads this on the trading path."""
+    sig = await session.get(Signal, trade.signal_id)
+    if sig is None or sig.sl is None:
+        return
+    legs = (await session.execute(select(Leg).where(
+        Leg.trade_id == trade.id))).scalars().all()
+    planned = [(l.lot, l.entry, sig.sl) for l in legs]
+    filled = [(l.lot, l.fill_price, sig.sl) for l in legs
+              if l.fill_price is not None]
+    try:
+        dep = deployed_risk_from_planned(planned_risk=trade.planned_risk,
+                                         planned_legs=planned, filled_legs=filled)
+    except (ArithmeticError, TypeError, ValueError):
+        return                       # a measurement must never break the monitor
+    if dep is not None:
+        trade.deployed_risk = dep
+
+
 async def _process_trade(session, trade, ai_cfg=None) -> None:
+    # Measurement first: it must be recorded even on the tick that closes the
+    # trade, and the close path below returns early.
+    try:
+        await _record_deployed_risk(session, trade)
+    except Exception as exc:                     # never let telemetry stop the loop
+        log.debug("deployed_risk skipped for trade %s: %s", trade.id, exc)
     legs = (await session.execute(select(Leg).where(
         Leg.trade_id == trade.id, Leg.status.in_(OPEN_LEG)))).scalars().all()
     # A staged trade stays alive while any tranche is still pending — even if its

@@ -86,16 +86,23 @@ async def synthesis(date_from: str = None, date_to: str = None,
 
 @router.get("/execution-geometry")
 async def execution_geometry(date_from: str = None, date_to: str = None,
-                             source_id: int = None,
+                             source_id: int = None, control_account_id: int = None,
                              db: AsyncSession = Depends(get_db)):
     """Payoff-geometry A/B in R-multiples (#80/#85): per-arm (account) avg R,
     payoff ratio, profit factor, breakeven-leg rate and %-winners-reaching-≥TP3,
     with win-rate credible intervals. R = realized_pl / planned_risk is scale-free,
     so it compares arms trading different nominal sizes (equity-parity confound).
     Optional date range (anchored on signal time) and per-channel `source_id`
-    scope. Shadow / read-only — judge only at N≥30 closed per arm."""
+    scope. Shadow / read-only — judge only at N≥30 closed per arm.
+
+    Carries the #188 `delever` block: an arm that simply risks less posts a
+    better R with no selection skill, so every non-control arm is tested against
+    a de-lever null and reported as NO_SKILL_DEMONSTRATED when its observed dR
+    falls inside it. `control_account_id` names the control arm; it defaults to
+    the lowest account id present, which is Arm A by convention."""
     return await execution_geometry_ab_report(
-        db, parse_iso_utc(date_from), parse_iso_utc(date_to), source_id=source_id)
+        db, parse_iso_utc(date_from), parse_iso_utc(date_to), source_id=source_id,
+        control_account_id=control_account_id)
 
 
 @router.get("/shadow-strategies")

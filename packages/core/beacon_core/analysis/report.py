@@ -223,7 +223,8 @@ async def channel_regime_report(session, frm=None, to=None) -> dict:
 
 
 async def execution_geometry_ab_report(session, frm=None, to=None,
-                                       source_id=None) -> dict:
+                                       source_id=None,
+                                       control_account_id=None) -> dict:
     """Payoff-geometry A/B read (#80 item 3 / #85 action 2), normalized to
     **R-multiples** so the arms are comparable even when they trade different
     nominal sizes.
@@ -260,7 +261,8 @@ async def execution_geometry_ab_report(session, frm=None, to=None,
     from ..db.models import Trade, Signal, Account, ExecutionStrategy, Leg
 
     q = (select(Trade.id, Trade.account_id, Account.name, Trade.realized_pl,
-                Trade.planned_risk, Trade.strategy_id, ExecutionStrategy.label)
+                Trade.planned_risk, Trade.strategy_id, ExecutionStrategy.label,
+                Trade.signal_id, Signal.created_at, Trade.deployed_risk)
          .join(Signal, Signal.id == Trade.signal_id)
          .outerjoin(Account, Account.id == Trade.account_id)
          .outerjoin(ExecutionStrategy, ExecutionStrategy.id == Trade.strategy_id)
@@ -272,8 +274,10 @@ async def execution_geometry_ab_report(session, frm=None, to=None,
     if to is not None:
         q = q.where(Signal.created_at < to)
     trows = [{"trade_id": tid, "account_id": aid, "account": aname,
-              "realized_pl": pl, "planned_risk": pr, "strategy_label": slabel}
-             for tid, aid, aname, pl, pr, sid, slabel in (await session.execute(q)).all()]
+              "realized_pl": pl, "planned_risk": pr, "strategy_label": slabel,
+              "signal_id": sigid, "signal_at": sat, "deployed_risk": dep}
+             for tid, aid, aname, pl, pr, sid, slabel, sigid, sat, dep
+             in (await session.execute(q)).all()]
 
     tids = [t["trade_id"] for t in trows]
     lrows = []
@@ -281,7 +285,58 @@ async def execution_geometry_ab_report(session, frm=None, to=None,
         lq = select(Leg.trade_id, Leg.outcome, Leg.tp_index).where(Leg.trade_id.in_(tids))
         lrows = [{"trade_id": tid, "outcome": outcome, "tp_index": tp_index}
                  for tid, outcome, tp_index in (await session.execute(lq)).all()]
-    return geometry_ab_rollup(trows, lrows, source_id=source_id)
+    out = geometry_ab_rollup(trows, lrows, source_id=source_id)
+    # #188: the de-lever verdict per arm, against the control. Emitted BESIDE the
+    # existing keys — never in place of them; the weeklies grep those names.
+    out["delever"] = delever_report(trows, control_account_id=control_account_id)
+    return out
+
+
+def delever_report(trades, *, control_account_id=None) -> dict:
+    """Per-arm de-lever verdict against one control arm (#188).
+
+    Pairs on SIGNAL, because both arms fan out from the same signals and only a
+    signal traded by both says anything about the difference between them. The
+    control defaults to the lowest account id present, which is the A/B's Arm A
+    by convention; pass it explicitly when that is not true."""
+    by_signal = {}
+    for t in trades:
+        sig = t.get("signal_id")
+        if sig is None:
+            continue
+        by_signal.setdefault(sig, {})[t.get("account_id")] = t
+    accounts = sorted({t.get("account_id") for t in trades
+                       if t.get("account_id") is not None})
+    if not accounts:
+        return {"control_account_id": None, "arms": {}}
+    control = control_account_id if control_account_id in accounts else accounts[0]
+
+    def _r(t):
+        pr, pl = t.get("planned_risk"), t.get("realized_pl")
+        if pr in (None, 0) or pl is None or float(pr) == 0:
+            return None
+        return float(pl) / abs(float(pr))
+
+    arms = {}
+    for acct in accounts:
+        if acct == control:
+            continue
+        pairs = []
+        for sig, per_acct in by_signal.items():
+            c, a = per_acct.get(control), per_acct.get(acct)
+            if c is None or a is None:
+                continue
+            cr = _r(c)
+            at = c.get("signal_at")
+            pairs.append({
+                "day": at.date().isoformat() if hasattr(at, "date") else str(at)[:10],
+                "control_r": cr, "arm_r": _r(a),
+                "control_deployed": c.get("deployed_risk"),
+                "arm_deployed": a.get("deployed_risk"),
+                "control_win": (cr is not None and cr > 0),
+            })
+        arms[str(acct)] = delever_null(pairs)
+    return {"control_account_id": control, "arms": arms}
 
 
 # Leg outcomes that represent a resolved close (counted in the leg denominator).
@@ -301,7 +356,11 @@ def geometry_ab_rollup(trades, legs, source_id=None) -> dict:
         return {"n": 0, "wins": 0, "net": 0.0, "n_r": 0, "n_no_risk": 0,
                 "sum_r": 0.0, "sum_win_r": 0.0, "sum_loss_r": 0.0,
                 "n_win_r": 0, "n_loss_r": 0, "labels": set(),
-                "legs": 0, "be_legs": 0, "winners": 0, "winners_tp3": 0}
+                "legs": 0, "be_legs": 0, "winners": 0, "winners_tp3": 0,
+                # #188: the DEPLOYED side. `planned` is what sizing intended;
+                # an arm that does not deploy its plan gets a better R for free.
+                "sum_planned": 0.0, "sum_deployed": 0.0, "n_deployed": 0,
+                "sum_r_deployed": 0.0, "n_r_deployed": 0}
 
     arms = defaultdict(_arm)
     trade_arm = {}          # trade_id -> account_id
@@ -335,6 +394,18 @@ def geometry_ab_rollup(trades, legs, source_id=None) -> dict:
         r = None
         if prisk is not None and float(prisk) != 0:
             r = pl / abs(float(prisk))
+        # #188: deployed risk rides alongside. NULL is EXCLUDED, never read as
+        # zero — a historical row with no measurement is not a row that deployed
+        # nothing, and averaging it in as 0 would understate every ratio.
+        dep = t.get("deployed_risk")
+        if dep is not None and prisk is not None and float(prisk) != 0:
+            dep = float(dep)
+            a["sum_deployed"] += dep
+            a["sum_planned"] += abs(float(prisk))
+            a["n_deployed"] += 1
+            if dep != 0:
+                a["sum_r_deployed"] += pl / abs(dep)
+                a["n_r_deployed"] += 1
         if r is None:
             a["n_no_risk"] += 1
         else:
@@ -393,6 +464,16 @@ def geometry_ab_rollup(trades, legs, source_id=None) -> dict:
             "n_legs": a["legs"], "n_breakeven_legs": a["be_legs"],
             "pct_winners_reach_tp3": round(a["winners_tp3"] / a["winners"], 4) if a["winners"] else None,
             "net_nominal": round(a["net"], 2),
+            # --- #188: deployed-risk view -------------------------------------
+            # `deployed_ratio` is SUM(deployed)/SUM(planned) — the ratio of
+            # TOTALS, not the mean of per-trade ratios. They disagree (0.267 vs
+            # 0.74 this week) because the shortfall concentrates in the largest
+            # trades, and the totals ratio is the one that governs P&L.
+            "n_deployed": a["n_deployed"],
+            "deployed_ratio": (round(a["sum_deployed"] / a["sum_planned"], 4)
+                               if a["sum_planned"] else None),
+            "avg_R_deployed": (round(a["sum_r_deployed"] / a["n_r_deployed"], 4)
+                               if a["n_r_deployed"] else None),
         }
 
     by_arm = [_fmt(acct_id, a) for acct_id, a in arms.items()]
@@ -1355,3 +1436,143 @@ async def turtle_exit_report(session, adapter, broker_epic: str, *,
                 "worst_trades": sorted(rows, key=lambda r: r["delta_r"])[:25],
                 "sample_trades": sorted(rows, key=lambda r: r["trade_id"])[:25]})
     return out
+
+
+# --- #188: telling selection skill from de-levering ---------------------------
+# The promote bar is high because a type-I error compounds permanently into the
+# control with no automatic rollback. An arm that merely risks less posts a
+# better R = pl/planned_risk in a losing week, passes every robustness check in
+# the manual, and would be promoted as skill. These functions make that case
+# fail loudly instead.
+NO_SKILL = "NO_SKILL_DEMONSTRATED"
+SKILL_POSSIBLE = "OUTSIDE_DELEVER_NULL"
+UNDECIDABLE = "UNDECIDABLE"
+
+# Day-block bootstrap: resample whole DAYS, not trades. Trades inside a day share
+# the session, the news and often the signal, so trade-level resampling assumes an
+# independence that does not hold and returns intervals that are far too tight.
+DEFAULT_BOOT = 2000
+DEFAULT_SEED = 20260801
+
+
+def _pct(sorted_vals, q):
+    if not sorted_vals:
+        return None
+    i = min(len(sorted_vals) - 1, max(0, int(round(q * (len(sorted_vals) - 1)))))
+    return sorted_vals[i]
+
+
+def day_block_bootstrap(values_by_day, *, n_boot=DEFAULT_BOOT, seed=DEFAULT_SEED,
+                        lo=0.05, hi=0.95) -> dict:
+    """Mean + percentile CI, resampling whole days with replacement.
+
+    Deterministic by construction (seeded, sorted day keys): a ruling that moves
+    when you re-run it is not a ruling. Reports `n_blocks`, because a single
+    block has zero between-block variance and yields a degenerate interval — the
+    exact trap that made this week's post-changeover dR unusable (#186)."""
+    days = sorted(values_by_day)
+    flat = [v for d in days for v in values_by_day[d]]
+    if not flat:
+        return {"n": 0, "n_blocks": 0, "mean": None, "ci_low": None,
+                "ci_high": None, "degenerate": True}
+    import random
+    rng = random.Random(seed)
+    means = []
+    for _ in range(n_boot):
+        picked = [values_by_day[days[rng.randrange(len(days))]] for _ in days]
+        vals = [v for blk in picked for v in blk]
+        if vals:
+            means.append(sum(vals) / len(vals))
+    means.sort()
+    return {
+        "n": len(flat), "n_blocks": len(days),
+        "mean": round(sum(flat) / len(flat), 4),
+        "ci_low": round(_pct(means, lo), 4) if means else None,
+        "ci_high": round(_pct(means, hi), 4) if means else None,
+        # One block => zero between-block variance => the interval collapses to a
+        # point and means nothing. Say so rather than reporting [x, x] as tight.
+        "degenerate": len(days) < 2,
+    }
+
+
+def delever_null(pairs, *, n_boot=DEFAULT_BOOT, seed=DEFAULT_SEED) -> dict:
+    """Is an arm's paired dR explained by it simply risking less? (#188)
+
+    `pairs`: dicts {day, control_r, arm_r, control_deployed, arm_deployed,
+    control_win}. One per signal traded by BOTH arms — an unmatched signal says
+    nothing about the difference between them.
+
+    THE NULL. Take the control's own P&L, scale it by the measured
+    `deployed_ratio`, and call that the arm. That is a pure de-lever with zero
+    selection skill: R is linear in P&L, so the null arm's R is just
+    `control_r * ratio`. Bootstrap the paired dR of that fiction. If the arm's
+    OBSERVED dR lands inside the band, a strategy with no skill whatsoever
+    reproduces its result and the arm has demonstrated nothing.
+
+    CAPTURE is the second, independent test. If staging really were selecting,
+    it would deploy less on losers than on winners — an ASYMMETRY. Symmetric
+    capture means it is just a smaller version of the control."""
+    pairs = [p for p in pairs if p.get("control_r") is not None
+             and p.get("arm_r") is not None]
+    if not pairs:
+        return {"n": 0, "verdict": UNDECIDABLE,
+                "reason": "no matched pairs with R on both arms"}
+
+    c_dep = sum(float(p.get("control_deployed") or 0) for p in pairs)
+    a_dep = sum(float(p.get("arm_deployed") or 0) for p in pairs)
+    ratio = (a_dep / c_dep) if c_dep else None
+
+    def _cap(want_win):
+        cs = sum(float(p.get("control_deployed") or 0) for p in pairs
+                 if bool(p.get("control_win")) is want_win)
+        as_ = sum(float(p.get("arm_deployed") or 0) for p in pairs
+                  if bool(p.get("control_win")) is want_win)
+        n = sum(1 for p in pairs if bool(p.get("control_win")) is want_win)
+        return (round(as_ / cs, 4) if cs else None), n
+
+    win_capture, n_win = _cap(True)
+    loss_capture, n_loss = _cap(False)
+    asym = (round(win_capture - loss_capture, 4)
+            if (win_capture is not None and loss_capture is not None) else None)
+
+    obs_by_day, null_by_day = {}, {}
+    for p in pairs:
+        d = str(p.get("day") or "")
+        obs_by_day.setdefault(d, []).append(float(p["arm_r"]) - float(p["control_r"]))
+        if ratio is not None:
+            null_by_day.setdefault(d, []).append(
+                float(p["control_r"]) * ratio - float(p["control_r"]))
+    observed = day_block_bootstrap(obs_by_day, n_boot=n_boot, seed=seed)
+    null = day_block_bootstrap(null_by_day, n_boot=n_boot, seed=seed)
+
+    verdict, reason = UNDECIDABLE, "deployed risk not measured on both arms"
+    if ratio is not None and observed["mean"] is not None and null["ci_low"] is not None:
+        inside = null["ci_low"] <= observed["mean"] <= null["ci_high"]
+        if observed["degenerate"] or null["degenerate"]:
+            verdict = UNDECIDABLE
+            reason = ("single day-block: the bootstrap has zero between-block "
+                      "variance and its interval is a point, not a range")
+        elif inside:
+            verdict = NO_SKILL
+            reason = (f"observed dR {observed['mean']} lies inside the de-lever "
+                      f"null [{null['ci_low']}, {null['ci_high']}] — scaling the "
+                      f"control's own P&L by {round(ratio, 4)} reproduces it with "
+                      "zero selection skill")
+        else:
+            verdict = SKILL_POSSIBLE
+            reason = (f"observed dR {observed['mean']} lies outside the de-lever "
+                      f"null [{null['ci_low']}, {null['ci_high']}]")
+
+    return {
+        "n": len(pairs), "deployed_ratio": round(ratio, 4) if ratio else None,
+        "win_capture": win_capture, "n_win": n_win,
+        "loss_capture": loss_capture, "n_loss": n_loss,
+        "capture_asymmetry": asym,
+        "observed_dR": observed, "delever_null_dR": null,
+        "verdict": verdict, "reason": reason,
+        "note": ("An arm inside its own de-lever null has NOT demonstrated "
+                 "selection skill, however robust its dR looks: leave-one-out "
+                 "and a CI excluding zero are both satisfied by simply risking "
+                 "less. Symmetric capture (win ~ loss) is the corroborating "
+                 "sign — a selecting arm would deploy less on losers."),
+    }

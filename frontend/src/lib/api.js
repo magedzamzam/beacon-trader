@@ -136,6 +136,21 @@ export const api = {
   analyticsConfig: () => req("/analytics/config"),
   saveAnalyticsConfig: (c) => req("/analytics/config", { method: "PUT", body: JSON.stringify(c) }),
   analyticsSynthesis: (range = {}) => req(`/analytics/synthesis${_perfQs("", range)}`),
+  // Payoff-geometry A/B in R-multiples (#80/#85) + the de-lever verdict (#188).
+  // This is the instrument the weekly promote/hold ruling is made from, and it
+  // had no client at all until now — the route existed and nothing called it.
+  executionGeometry: (range = {}, sourceId = "", controlAccountId = "") => {
+    const p = new URLSearchParams();
+    if (range.from) p.set("date_from", range.from);
+    if (range.to) p.set("date_to", range.to);
+    if (sourceId) p.set("source_id", sourceId);
+    if (controlAccountId) p.set("control_account_id", controlAccountId);
+    const qs = p.toString();
+    // Concatenated, not a nested template literal: `test_analytics_routes`
+    // parses these path literals to prove the client cannot call an unserved
+    // route, and a `${...}` containing another `${...}` defeats that parser.
+    return req("/analytics/execution-geometry" + (qs ? "?" + qs : ""));
+  },
   analyticsShadowStrategies: (range = {}) => req(`/analytics/shadow-strategies${_perfQs("", range)}`),
   // On demand: costs one ranged bar fetch from the broker, so it is not loaded
   // with the page (#170).

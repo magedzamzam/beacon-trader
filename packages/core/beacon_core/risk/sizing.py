@@ -170,3 +170,80 @@ def cap_total_risk(legs: List[PlannedLeg], *, cap: Decimal, instrument: Instrume
         distance = abs(leg.entry - leg.sl)
         leg.risk_cash = (lot * distance * instrument.value_per_point) / fx_factor
     return plan_total_risk(legs)
+
+
+def deployed_risk(fills, *, original_sl: Decimal, instrument: InstrumentSpec,
+                  fx_factor: Decimal = Decimal(1)) -> Decimal:
+    """Risk ACTUALLY put on at the fills, in ACCOUNT currency (#188).
+
+    `planned_risk` is what sizing intended to lose at the original stop. An arm
+    that does not deploy its plan — which is exactly what `entry_style="staged"`
+    does by construction — gets a mechanically better `R = pl / planned_risk` in
+    a losing week without any entry-selection skill. Measuring the deployed side
+    is what lets the two be told apart; without it, a 0.267x de-lever reads as a
+    winning arm and, under the compounding rule, promotes permanently.
+
+    Deliberately the SAME arithmetic as `size_legs` writes into `risk_cash`
+    (`lot * distance * value_per_point / fx_factor`), so `deployed / planned` is
+    a ratio of like for like rather than of two different units.
+
+    Measured to the ORIGINAL stop, which the caller must supply: `legs.sl` is
+    mutated in place by the ratchet engine, so a trade that ratcheted to
+    breakeven would otherwise report a deployed risk near zero and flatter the
+    ratio exactly where it matters most.
+
+    `fills` is an iterable of `(lot, fill_price)`. Unfilled legs contribute
+    nothing — an entry that never filled put no risk on."""
+    total = Decimal(0)
+    for lot, fill_price in fills:
+        if lot is None or fill_price is None:
+            continue
+        lot, fill_price = Decimal(str(lot)), Decimal(str(fill_price))
+        if lot <= 0 or fill_price <= 0:
+            continue                       # fill_price 0 is UNKNOWN, not free (#159)
+        distance = abs(fill_price - Decimal(str(original_sl)))
+        total += (lot * distance * instrument.value_per_point) / (fx_factor or Decimal(1))
+    return total
+
+
+def risk_units(legs) -> Decimal:
+    """Sum of `lot * |price - stop|` over `(lot, price, stop)` triples.
+
+    The instrument-and-currency-free half of a risk figure: everything else in
+    `risk_cash` is the constant `value_per_point / fx_factor`."""
+    total = Decimal(0)
+    for lot, price, stop in legs:
+        if lot is None or price is None or stop is None:
+            continue
+        lot, price, stop = (Decimal(str(lot)), Decimal(str(price)), Decimal(str(stop)))
+        if lot <= 0 or price <= 0:
+            continue                       # a 0 fill_price is UNKNOWN, not free (#159)
+        total += lot * abs(price - stop)
+    return total
+
+
+def deployed_risk_from_planned(*, planned_risk, planned_legs, filled_legs) -> Decimal | None:
+    """Deployed risk in ACCOUNT currency, derived from the persisted plan (#188).
+
+    `deployed = planned * (deployed_units / planned_units)`.
+
+    Both sides carry the same `value_per_point / fx_factor`, so it CANCELS — which
+    is the point. The monitor can therefore record deployed risk without an FX
+    lookup, and an FX lookup on a per-tick loop is exactly the kind of broker call
+    that should not exist on the path that manages open positions. It is also
+    exact rather than approximate: the constants really are identical, because
+    `planned_risk` was computed with them.
+
+    `planned_legs` / `filled_legs` are `(lot, price, stop)` triples — the stop
+    being the ORIGINAL one on both sides, since `legs.sl` is ratcheted in place
+    and using the moved stop would report a de-levered trade as risking nothing.
+
+    Returns None when it cannot be measured (no plan, no fills, zero planned
+    units). None means "not measured" and is excluded downstream — never zero,
+    which would read as "deployed nothing" and flatter the ratio."""
+    if planned_risk is None:
+        return None
+    planned_units = risk_units(planned_legs)
+    if planned_units <= 0:
+        return None
+    return (Decimal(str(planned_risk)) * risk_units(filled_legs)) / planned_units
