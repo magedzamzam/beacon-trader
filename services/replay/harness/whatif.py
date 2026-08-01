@@ -196,58 +196,88 @@ def _travel(t) -> str:
     return "ranged"
 
 
-def summarise(res, *, label: str) -> dict:
-    """Plain counts for one arm. Everything here is something a person asked for
-    in the brief — signals, executed, skipped and why, money, the TP ladder, and
-    how price actually moved."""
-    trades = list(res.trades)
-    filled = [t for t in trades if t.ever_filled]
-    pl = sum(float(t.realized_pl) for t in filled)
-    wins = sum(1 for t in filled if float(t.realized_pl) > 0)
+def _is_rule(reason: str) -> bool:
+    return reason.startswith("filtration") or reason.startswith("whatif")
 
-    # COUNTED PER TRADE, not per leg. A staged entry is several legs on one
-    # signal, so counting legs reported 172 stop-outs against 78 executed
-    # trades — a number that cannot be read, next to one that can.
+
+def summarise(res, *, label: str) -> dict:
+    """Plain counts for one arm, COUNTED PER SIGNAL.
+
+    The operator's question is "I had 100 signals from Quartz Elite — what if
+    we'd filtered by RSI?", so every count here is a count of SIGNALS.
+
+    That is not what the simulator produces. It emits one row per (signal,
+    account), and this book fans one signal out to three accounts — so summing
+    its rows reported 492 signals for a channel that sent 170. The caveat line
+    right underneath said 170, which is how it was caught.
+
+    Money is the exception and stays a total across accounts, because "would
+    that have made us profitable" is a question about the book, not about one
+    account's share of it."""
+    by_sig, skips = {}, {}
+    for t in res.trades:
+        by_sig.setdefault(t.signal_id, []).append(t)
+    for nt in res.not_taken:
+        skips.setdefault(nt.get("signal_id"), []).append(str(nt.get("reason")))
+
+    # Filled ANYWHERE counts as executed: the signal was traded, even if one
+    # account's risk cap turned it away.
+    executed = {sid for sid, ts in by_sig.items() if any(t.ever_filled for t in ts)}
+    all_ids = set(by_sig) | set(skips)
+    skipped = all_ids - executed
+
+    by_rule = sum(1 for sid in skipped if any(_is_rule(r) for r in skips.get(sid, ())))
+    no_fill = sum(1 for sid in skipped
+                  if not any(_is_rule(r) for r in skips.get(sid, ()))
+                  and by_sig.get(sid))
+    other = len(skipped) - by_rule - no_fill
+
+    # Money over every filled row; the ladder and the travel per SIGNAL, taking
+    # the best any account did with it — the geometry is identical across
+    # accounts, only the sizing differs.
     #
-    # Cumulative, because that is how the ladder is read out loud: a trade that
-    # reached TP2 also reached TP1. And `stopped_out` means the trade reached NO
-    # target and closed at the stop — a trade that banked TP1 and then stopped
-    # the runner is not what anyone means by "stopped out".
+    # Cumulative, because that is how a ladder is read out loud: a signal that
+    # reached TP2 also reached TP1. And `stopped_out` means it reached NO target
+    # — a signal that banked TP1 and then stopped the runner is not what anyone
+    # means by "stopped out".
+    pl, wins, losses, stopped = 0.0, 0, 0, 0
     tp = {1: 0, 2: 0, 3: 0}
-    stopped = 0
-    for t in filled:
-        best = max([leg.tp_index or 0 for leg in t.legs
+    travel = {}
+    for sid in executed:
+        ts = [t for t in by_sig[sid] if t.ever_filled]
+        money = sum(float(t.realized_pl) for t in ts)
+        pl += money
+        if money > 0:
+            wins += 1
+        else:
+            losses += 1
+        best = max([leg.tp_index or 0 for t in ts for leg in t.legs
                     if leg.outcome == "tp_hit"] or [0])
         for i in tp:
             if best >= i:
                 tp[i] += 1
         if not best and any(leg.outcome in ("sl_hit", "breakeven")
-                            for leg in t.legs):
+                            for t in ts for leg in t.legs):
             stopped += 1
+        k = _travel(ts[0])
+        travel[k] = travel.get(k, 0) + 1
 
     reasons = {}
-    for nt in res.not_taken:
-        reasons[str(nt.get("reason"))] = reasons.get(str(nt.get("reason")), 0) + 1
-    filtered = sum(v for k, v in reasons.items()
-                   if k.startswith("filtration") or k.startswith("whatif"))
-    never_filled = len(trades) - len(filled)
-
-    travel = {}
-    for t in filled:
-        k = _travel(t)
-        travel[k] = travel.get(k, 0) + 1
+    for rs in skips.values():
+        for r in rs:
+            reasons[r] = reasons.get(r, 0) + 1
 
     return {
         "label": label,
-        "signals": len(trades) + len(res.not_taken),
-        "executed": len(filled),
-        "skipped": len(res.not_taken) + never_filled,
-        "skipped_by_rule": filtered,
-        "skipped_no_fill": never_filled,
-        "skipped_other": len(res.not_taken) - filtered,
+        "signals": len(all_ids),
+        "executed": len(executed),
+        "skipped": len(skipped),
+        "skipped_by_rule": by_rule,
+        "skipped_no_fill": no_fill,
+        "skipped_other": other,
         "profit": round(pl, 2),
         "wins": wins,
-        "losses": len(filled) - wins,
+        "losses": losses,
         "tp1": tp[1], "tp2": tp[2], "tp3": tp[3],
         "stopped_out": stopped,
         "travel": travel,

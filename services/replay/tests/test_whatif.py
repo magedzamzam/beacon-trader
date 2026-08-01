@@ -164,12 +164,19 @@ class _Leg:
         self.fill_price, self.entry = fill_price, entry
 
 
+_NEXT_SIG = [0]
+
+
 class _Trade:
     def __init__(self, *, pl, mfe, entry=2000, sl=1990, direction="BUY",
-                 legs=None, filled=True):
+                 legs=None, filled=True, signal_id=None, account_id=1):
         self.realized_pl, self.mfe = pl, mfe
         self.initial_sl, self.direction, self.ever_filled = sl, direction, filled
         self.legs = legs if legs is not None else [_Leg(fill_price=entry)]
+        if signal_id is None:
+            _NEXT_SIG[0] += 1
+            signal_id = _NEXT_SIG[0]
+        self.signal_id, self.account_id = signal_id, account_id
 
 
 class _Res:
@@ -202,13 +209,15 @@ def test_travel_says_unknown_rather_than_guessing():
 def test_the_summary_counts_what_the_operator_asked_to_see():
     res = _Res(
         trades=[
-            _Trade(pl=120, mfe=2012, legs=[_Leg("tp_hit", 1, fill_price=2000),
-                                           _Leg("tp_hit", 2, fill_price=2000)]),
-            _Trade(pl=-80, mfe=2002, legs=[_Leg("sl_hit", fill_price=2000)]),
-            _Trade(pl=0, mfe=None, filled=False, legs=[_Leg()]),
+            _Trade(signal_id=1, pl=120, mfe=2012,
+                   legs=[_Leg("tp_hit", 1, fill_price=2000),
+                         _Leg("tp_hit", 2, fill_price=2000)]),
+            _Trade(signal_id=2, pl=-80, mfe=2002,
+                   legs=[_Leg("sl_hit", fill_price=2000)]),
+            _Trade(signal_id=3, pl=0, mfe=None, filled=False, legs=[_Leg()]),
         ],
-        not_taken=[{"reason": "filtration:RSI at or above 70"},
-                   {"reason": "unknown_account"}])
+        not_taken=[{"signal_id": 4, "reason": "filtration:RSI at or above 70"},
+                   {"signal_id": 5, "reason": "unknown_account"}])
     s = W.summarise(res, label="x")
     assert s["signals"] == 5                 # 3 simulated + 2 never simulated
     assert s["executed"] == 2
@@ -223,12 +232,40 @@ def test_the_summary_counts_what_the_operator_asked_to_see():
     assert s["travel"] == {"ran_to_target": 1, "straight_to_sl": 1}
 
 
-def test_the_ladder_is_counted_per_trade_not_per_leg():
+def test_one_signal_on_three_accounts_is_one_signal():
+    """THE BUG THIS EXISTS FOR. The simulator emits one row per (signal,
+    account), and this book fans one signal out to three accounts — so summing
+    its rows reported 492 signals for a channel that sent 170. The caveat line
+    directly underneath said 170, which is how it was caught.
+
+    Money is the exception: it stays a total across accounts, because "would
+    that have made us profitable" is a question about the book."""
+    res = _Res(trades=[
+        _Trade(signal_id=1, account_id=a, pl=50, mfe=2012,
+               legs=[_Leg("tp_hit", 1, fill_price=2000)]) for a in (5, 7, 8)])
+    s = W.summarise(res, label="x")
+    assert s["signals"] == 1 and s["executed"] == 1 and s["wins"] == 1
+    assert s["tp1"] == 1
+    assert s["profit"] == 150.0            # the book, not one account's share
+
+
+def test_a_signal_filled_on_one_account_and_blocked_on_another_was_traded():
+    """A risk cap turning one account away does not make the signal a skip —
+    it was traded. Counting it in both columns would double it."""
+    res = _Res(
+        trades=[_Trade(signal_id=1, account_id=5, pl=50, mfe=2012,
+                       legs=[_Leg("tp_hit", 1, fill_price=2000)])],
+        not_taken=[{"signal_id": 1, "reason": "risk_blocked"}])
+    s = W.summarise(res, label="x")
+    assert s["signals"] == 1 and s["executed"] == 1 and s["skipped"] == 0
+
+
+def test_the_ladder_is_counted_per_signal_not_per_leg():
     """A staged entry is several legs on ONE signal. Counting legs reported 172
     stop-outs against 78 executed trades — a number that cannot be read sitting
     next to one that can.
 
-    Cumulative, because that is how a ladder is read out loud: a trade that
+    Cumulative, because that is how a ladder is read out loud: a signal that
     reached TP2 also reached TP1."""
     t = _Trade(pl=50, mfe=2012, legs=[_Leg("tp_hit", 1, fill_price=2000),
                                       _Leg("tp_hit", 1, fill_price=2000),
@@ -237,9 +274,9 @@ def test_the_ladder_is_counted_per_trade_not_per_leg():
     assert (s["tp1"], s["tp2"], s["tp3"]) == (1, 1, 0)
 
 
-def test_a_trade_that_banked_tp1_then_stopped_is_not_a_stop_out():
-    """"Stopped out" has to mean the trade reached NO target. A runner stopped
-    at breakeven after TP1 is a different outcome, and lumping them together is
+def test_a_signal_that_banked_tp1_then_stopped_is_not_a_stop_out():
+    """"Stopped out" has to mean it reached NO target. A runner stopped at
+    breakeven after TP1 is a different outcome, and lumping them together is
     what makes the exit question unanswerable."""
     banked = _Trade(pl=40, mfe=2012, legs=[_Leg("tp_hit", 1, fill_price=2000),
                                            _Leg("breakeven", fill_price=2000)])
@@ -254,7 +291,8 @@ def test_a_geometry_skip_is_counted_as_a_rule_skip_not_as_an_error():
     filter to attribute them to. If `summarise` did not recognise the prefix they
     would land in "other", and the operator would see a filter that removed
     nothing while the numbers moved."""
-    s = W.summarise(_Res([], [{"reason": "whatif:min_stop_atr"}]), label="x")
+    s = W.summarise(_Res([], [{"signal_id": 1, "reason": "whatif:min_stop_atr"}]),
+                    label="x")
     assert s["skipped_by_rule"] == 1 and s["skipped_other"] == 0
 
 
