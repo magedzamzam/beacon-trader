@@ -262,6 +262,27 @@ async def cmd_scaffold(args) -> int:
     return 0
 
 
+def _warn_stale_candles(series, to=None) -> None:
+    """Say so when the bars end well before now (#190).
+
+    The candle store is a manual import and nothing in the repo refreshes it. A
+    sweep over a stale store does not fail — it marks late trades
+    `horizon_capped`, which reads as a patient variant rather than as missing
+    data. Loud beats subtly wrong."""
+    import datetime as _dt
+    last = series.last_ts
+    if last is None:
+        return
+    age_h = (_dt.datetime.now(_dt.timezone.utc) - last).total_seconds() / 3600.0
+    if age_h <= 24:
+        return
+    print(f"WARNING: candle store ends {last.isoformat()} "
+          f"({age_h:.1f}h ago). Trades after that cannot resolve and will be "
+          f"reported horizon-capped, which is missing data rather than a "
+          f"patient variant. See #190 — candles are imported manually and "
+          f"nothing refreshes them.", file=sys.stderr)
+
+
 def _warn_unattributable() -> None:
     """Say so, on stderr, when a run cannot name the code that produced it.
 
@@ -304,6 +325,7 @@ async def cmd_run(args) -> int:
 
         cdig = await store.candle_digest(session, symbol=symbol, timeframe=tf)
         _warn_unattributable()
+        _warn_stale_candles(series, to)
         run = await store.create_run(
             session, label=spec.label, signal_source=spec.signal_source,
             symbol=symbol, timeframe=tf, frm=frm, to=to,
@@ -405,6 +427,7 @@ async def _execute_job(job_id: int) -> str:
                        "ranking": R.compare_variants(reports)}
             cdig = await store.candle_digest(session, symbol=symbol, timeframe=tf)
             _warn_unattributable()
+            _warn_stale_candles(series, to)
             run = await store.create_run(
                 session, label=spec.label or job.label, signal_source=spec.signal_source,
                 symbol=symbol, timeframe=tf, frm=frm, to=to,
@@ -489,6 +512,7 @@ async def cmd_validate(args) -> int:
         if not args.dry_run:
             cdig = await store.candle_digest(session, symbol=symbol, timeframe=tf)
             _warn_unattributable()
+            _warn_stale_candles(series, to)
             run = await store.create_run(
                 session, label=(spec.label or "validation gate"),
                 signal_source=spec.signal_source, symbol=symbol, timeframe=tf,

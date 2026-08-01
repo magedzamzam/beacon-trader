@@ -964,7 +964,7 @@ async def excursion_gate(session, *, basis: str = "signal", frm=None, to=None) -
     rows (#187). No recompute — this is a read."""
     from sqlalchemy import func, select
     from ..db.models import Leg, Signal, SignalExcursion, Trade
-    from .excursion_store import GATE_MIN_AGREEMENT
+    from .excursion_store import GATE_MIN_AGREEMENT, candle_freshness
 
     q = (select(SignalExcursion.signal_id, SignalExcursion.race,
                 SignalExcursion.horizon_capped, SignalExcursion.same_bar_ambiguous)
@@ -1029,6 +1029,9 @@ async def excursion_gate(session, *, basis: str = "signal", frm=None, to=None) -
         "horizon_capped": sum(1 for v in by_sig.values() if v[1]),
         "same_bar_ambiguous": sum(1 for v in by_sig.values() if v[2]),
         "n_rows": len(by_sig),
+        # #190: the usual cause of a lagging tail is the candle store, not the
+        # recompute. Reported here so the two are never confused again.
+        "candles": await candle_freshness(session),
     }
 
 

@@ -352,6 +352,7 @@ function GateStrip({ gate }) {
             NO ladder row — absent, not unresolved</b>
         )}
       </div>
+      <CandleFreshness candles={gate.candles} />
       {!ok && <div className="mt-1"><b>Below the bar — do not argue an exit change from
         this ladder yet.</b></div>}
     </div>
@@ -427,5 +428,25 @@ function StopGeometryCard({ data }) {
       </div>
       <div className="px-4 py-2 text-[11px] text-muted border-t border-edge">{data.note}</div>
     </Card>
+  );
+}
+
+
+// #190: the candle store is a MANUAL import and nothing in the repo refreshes
+// it. When it goes stale the ladder stops covering recent signals and replay
+// marks late trades horizon-capped — both silently. This is the one place that
+// says so, because the alternative is reading a truncated ladder as current.
+function CandleFreshness({ candles }) {
+  if (!candles) return null;
+  const stale = candles.is_stale;
+  return (
+    <div className={`mt-1 num ${stale ? "text-warn" : "text-muted"}`}>
+      candles {String(candles.last).slice(0, 16)}
+      {candles.age_hours != null && ` · ${candles.age_hours}h old`}
+      {" · "}{Number(candles.n_bars).toLocaleString()} bars
+      {candles.sources?.length ? ` · ${candles.sources.join(", ")}` : ""}
+      {stale && <b> — STALE (&gt;{candles.stale_after_hours}h). The ladder cannot cover
+        signals newer than this, and it is imported manually: nothing refreshes it.</b>}
+    </div>
   );
 }

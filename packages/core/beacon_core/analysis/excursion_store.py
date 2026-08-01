@@ -384,3 +384,58 @@ async def labels_by_signal(session, *, basis: str = BASIS_SIGNAL,
                           "tp1_r": _f(r.tp1_r), "race": r.race,
                           "horizon_capped": bool(r.horizon_capped)}
             for r in (await session.execute(q)).scalars().all()}
+
+
+# --- candle freshness (#190) --------------------------------------------------
+# The candle store is a MANUAL import (`db/models.py`: "loaded by the operator
+# from CSV"), pulled from Capital.com by `history_price.py`. That is a deliberate
+# choice and fine as such. What is not fine is that nothing notices when it stops
+# being current: `services/collector` was reverted, nothing in the tree writes
+# `candles`, and both consumers degrade SILENTLY —
+#
+#   * replay marks unresolvable trades `horizon_capped`, which reads as "the
+#     variant was patient" rather than "there is no data";
+#   * the #182 R-ladder simply stops covering recent signals, with nothing on
+#     the page saying so (which is what #187's coverage gap actually was).
+#
+# Freshness that depends on a human remembering is not a schedule — the same
+# lesson as #173, where claims only linked when someone opened the Reconciler.
+STALE_AFTER_HOURS = 24
+
+
+async def candle_freshness(session, *, symbol: str = "XAUUSD",
+                           timeframe: str = "1m",
+                           stale_after_hours: int = STALE_AFTER_HOURS) -> dict:
+    """How current the candle store is, and whether that is a problem yet."""
+    import datetime as _dt
+
+    from sqlalchemy import func, select
+
+    from ..db.models import Candle
+
+    row = (await session.execute(
+        select(func.max(Candle.ts), func.min(Candle.ts), func.count(),
+               func.max(Candle.ingested_at))
+        .where(Candle.symbol == symbol, Candle.timeframe == timeframe,
+               Candle.quality == "ok"))).one()
+    last, first, n, ingested = row
+    now = _dt.datetime.now(_dt.timezone.utc)
+    age_h = ((now - last).total_seconds() / 3600.0) if last else None
+    sources = [r[0] for r in (await session.execute(
+        select(Candle.source).where(Candle.symbol == symbol).distinct())).all()]
+    return {
+        "symbol": symbol, "timeframe": timeframe, "n_bars": int(n or 0),
+        "first": first.isoformat() if first else None,
+        "last": last.isoformat() if last else None,
+        "last_ingested_at": ingested.isoformat() if ingested else None,
+        "age_hours": round(age_h, 1) if age_h is not None else None,
+        "stale_after_hours": stale_after_hours,
+        "is_stale": bool(age_h is not None and age_h > stale_after_hours),
+        "sources": sorted(s for s in sources if s),
+        "note": ("Candles are imported MANUALLY (history_price.py -> CSV -> DB); "
+                 "nothing in the repo writes this table, so it does not refresh "
+                 "on its own. A stale store makes replay label trades "
+                 "`horizon_capped` and makes the R-ladder stop covering recent "
+                 "signals — both silently, which is why the age is reported "
+                 "rather than left to be noticed (#190)."),
+    }
