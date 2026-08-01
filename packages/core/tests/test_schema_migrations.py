@@ -73,6 +73,23 @@ def test_signal_claims_override_columns_have_alters():
     assert {"override_outcome", "override_note", "override_at"} <= added
 
 
+def test_signal_provenance_columns_have_alters():
+    # #192: `signals` is long-lived, so the provenance columns need ALTERs or the
+    # replay loader's `backfilled IS NOT true` filter 500s on the live box.
+    added = _added_columns("signals")
+    assert {"signal_at", "backfilled"} <= added
+
+
+def test_backfilled_defaults_to_false_on_existing_rows():
+    # The 856 rows already there predate the flag. The ALTER must give them a
+    # value — a NULL-filled column would leave "is this history?" unanswerable
+    # for the whole book, which is the bug this column exists to end.
+    stmt = next(s for s in B.ADDITIVE_MIGRATIONS
+                if re.search(r"ALTER\s+TABLE\s+signals\b.*\bbackfilled\b", s,
+                             re.IGNORECASE))
+    assert re.search(r"DEFAULT\s+FALSE", stmt, re.IGNORECASE), stmt
+
+
 def test_market_structure_range_columns_have_alters():
     # #113/#137/#138: the dealing-range columns must be covered on deploy.
     added = _added_columns("market_structure")

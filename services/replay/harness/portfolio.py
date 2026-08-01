@@ -58,6 +58,10 @@ class SignalRow:
     source_id: Optional[int] = None
     source_name: Optional[str] = None
     account_ids: tuple = ()
+    # Imported history rather than a signal the account was offered live (#192).
+    # Carried on the row so a caller that opted INTO backfilled signals can still
+    # label them; the default is False, which is what a generated signal is.
+    backfilled: bool = False
 
 
 @dataclass

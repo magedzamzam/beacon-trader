@@ -158,6 +158,19 @@ filtered, risk-blocked or never filled are still evaluated — the only way to
 score what a filter rejected. Each one ends in exactly one bucket (`taken`, or a
 named `not_taken` reason) and every bucket is a row in `replay_results`.
 
+**Skipped is not the same as never offered (#192).** `signals.created_at` is
+*ingest* time, so a channel's onboarding backlog lands in a single moment — 230
+of 856 rows on the current book share a 15-minute window, and none of the 179 in
+the biggest one ever produced a trade. Those rows carry `signals.backfilled`, and
+`load_signals` **excludes them by default**: replaying them prices opportunities
+the account never had. `replay coverage` is the one caller that opts in
+(`include_backfilled=True`) — it reports `n_signals_backfilled` and
+`unmarked_bursts`, the windows of 10+ signals nobody has flagged yet. The what-if
+page keeps declaring an unmarked burst in words, because the flag is
+retrospective and the next onboarding arrives before anyone marks it.
+`signals.signal_at` carries a source's own timestamp where it has one and is what
+a row is replayed at; it is NULL today, and it is never guessed.
+
 Risk caps and the daily-loss breaker are **simulated**, and a run reports how
 many signals each variant's caps blocked. This is why the job atom is
 `(variant × account)` — a full portfolio replay — rather than the

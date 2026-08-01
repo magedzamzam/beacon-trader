@@ -95,6 +95,7 @@ from sqlalchemy import text
 from beacon_core.execution import strategy as ST
 
 from harness import bars as B
+from harness import provenance as P
 from harness import runner as R
 from harness import scaffold, store, validate
 from harness import signal_sources as SS
@@ -712,7 +713,14 @@ async def cmd_coverage(args) -> int:
                                          timeframe=args.timeframe)
         frm = _dt(args.since)
         over = sum(1 for b in series.bars if frm is None or b.ts >= frm)
-        signals = await store.load_signals(session, symbol=args.symbol, frm=frm)
+        # The ONE opt-in to backfilled history (#192). This command reports what
+        # the candle store covers, not what the account earned — hiding imported
+        # rows here would understate the window the bars have to span, and the
+        # backfilled count is itself worth seeing. Every P&L path takes the
+        # live-only default.
+        signals = await store.load_signals(session, symbol=args.symbol, frm=frm,
+                                           include_backfilled=True)
+        backfilled = [s for s in signals if s.backfilled]
         last_bar = series.last_ts
         # Signals the candle store does not reach are EXCLUSIONS, and they are
         # counted here rather than discovered as `no_candle_coverage` rows after
@@ -729,6 +737,14 @@ async def cmd_coverage(args) -> int:
             "last_signal": max((s.at for s in signals), default=None),
             "n_signals_after_last_candle": len(uncovered),
             "n_signals_evaluable": len(signals) - len(uncovered),
+            # What a P&L run would actually replay: this command includes
+            # imported history, every other caller excludes it (#192).
+            "n_signals_backfilled": len(backfilled),
+            "n_signals_live": len(signals) - len(backfilled),
+            "unmarked_bursts": {k.isoformat(): n for k, n
+                                in sorted(P.bursts(
+                                    [s for s in signals if not s.backfilled]
+                                ).items())},
             "candle_lag_behind_last_signal": (
                 str(max((s.at for s in signals), default=last_bar) - last_bar)
                 if last_bar and signals else None),
@@ -739,7 +755,11 @@ async def cmd_coverage(args) -> int:
                      "as a caveat. Signals after the last candle are EXCLUDED, "
                      "not scored — bound the run with `to` (or scaffold --to) to "
                      "keep them out of the comparison rather than counting as "
-                     "trades the harness failed to reproduce."),
+                     "trades the harness failed to reproduce. "
+                     "n_signals_backfilled is imported history: counted here, "
+                     "EXCLUDED from every P&L run. unmarked_bursts are windows "
+                     "of 10+ signals that are NOT flagged backfilled — either a "
+                     "new onboarding to mark, or a genuinely busy window."),
         }, indent=2, default=str))
     return 0
 

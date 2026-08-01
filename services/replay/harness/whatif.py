@@ -26,6 +26,8 @@ from __future__ import annotations
 import copy
 from typing import List, Optional
 
+from . import provenance as P
+
 # --- the change vocabulary ----------------------------------------------------
 # Small on purpose. Every entry is something an operator can say out loud, and
 # each maps onto config the engine already understands — nothing here is a new
@@ -295,23 +297,16 @@ def summarise(res, *, label: str) -> dict:
 # is "a fifth of your history has no usable time for an indicator to be read at".
 # The filter is not broken and the number is not wrong; the question is partly
 # unanswerable on that block, which is a different thing and has to be said.
-BULK_BAR_MINUTES = 15
-BULK_MIN_SIGNALS = 10
-
-
-def _bar_key(at):
-    return at.replace(minute=(at.minute // BULK_BAR_MINUTES) * BULK_BAR_MINUTES,
-                      second=0, microsecond=0)
-
-
-def _bursts(signals) -> dict:
-    counts = {}
-    for s in signals:
-        try:
-            counts[_bar_key(s.at)] = counts.get(_bar_key(s.at), 0) + 1
-        except (AttributeError, TypeError, ValueError):
-            continue
-    return {k: n for k, n in counts.items() if n >= BULK_MIN_SIGNALS}
+#
+# The detector itself now lives in `provenance.py` (#192) so the loader that
+# EXCLUDES backfilled history and the caveat that DECLARES an unmarked burst
+# agree on what a burst is. This page keeps declaring: once the known rows carry
+# `backfilled`, `load_signals` drops them and this text stops firing for them —
+# but it still fires for the next onboarding, which nobody has marked yet.
+BULK_BAR_MINUTES = P.BULK_BAR_MINUTES
+BULK_MIN_SIGNALS = P.BULK_MIN_SIGNALS
+_bar_key = P.bar_key
+_bursts = P.bursts
 
 
 def bulk_ingest_caveats(signals, changes: dict) -> List[str]:

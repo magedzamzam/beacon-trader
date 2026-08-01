@@ -28,6 +28,15 @@ ADDITIVE_MIGRATIONS: tuple[str, ...] = (
     "ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT FALSE",
     "ALTER TABLE signals "
     "ADD COLUMN IF NOT EXISTS reinitiated_from INTEGER",   # re-initiate clone link (#66)
+    # Signal provenance (#192): `created_at` is INGEST time, so an imported
+    # backlog shares one moment. `signal_at` carries the source's own time where
+    # it has one; `backfilled` marks history the account never traded, so a P&L
+    # replay can exclude it. NOT NULL DEFAULT FALSE — existing rows read as live
+    # until the operator marks the known bursts.
+    "ALTER TABLE signals "
+    "ADD COLUMN IF NOT EXISTS signal_at TIMESTAMPTZ",
+    "ALTER TABLE signals "
+    "ADD COLUMN IF NOT EXISTS backfilled BOOLEAN NOT NULL DEFAULT FALSE",
     "ALTER TABLE signal_claims "
     "ADD COLUMN IF NOT EXISTS claim_confidence numeric(4,3)",  # claim link confidence (#63)
     "ALTER TABLE trades "

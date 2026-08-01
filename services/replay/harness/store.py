@@ -174,12 +174,26 @@ async def candle_digest(session, *, symbol: str, timeframe: str, frm=None,
 
 async def load_signals(session, *, symbol: str = "XAUUSD", frm=None, to=None,
                        source_ids=None, account_ids=None,
-                       strict_accounts: bool = False) -> List[SignalRow]:
+                       strict_accounts: bool = False,
+                       include_backfilled: bool = False) -> List[SignalRow]:
     """Every signal in the window as a `SignalRow` — including ones we skipped,
     filtered, risk-blocked or never filled. That is the §6 requirement: replaying
     from the signal's STATED entry takes the evaluable set from the filled trades
     to the whole signal history, and it is the only way to score what a filter
-    rejected."""
+    rejected.
+
+    Skipped-but-real is not the same as never-offered, though. `include_backfilled`
+    (#192) defaults to **False**: rows flagged `signals.backfilled` are imported
+    history — an onboarding backlog the account was never in a position to take,
+    and on the current book none of the 179 in the biggest burst produced a
+    trade. Replaying them prices opportunities that did not exist and reports the
+    total as the book's own past. A caller that genuinely wants the whole table
+    (a coverage diagnostic, a signal-supply study) opts in explicitly.
+
+    The window is bounded on INGEST time either way. `signal_at` is the source's
+    own timestamp where it has one and is what the row is REPLAYED at, but
+    filtering on it would move rows in and out of a window the operator picked
+    off the signals list, and it is NULL on exactly the rows that need it most."""
     q = select(Signal).where(Signal.symbol == symbol)
     if frm is not None:
         q = q.where(Signal.created_at >= frm)
@@ -187,6 +201,11 @@ async def load_signals(session, *, symbol: str = "XAUUSD", frm=None, to=None,
         q = q.where(Signal.created_at < to)
     if source_ids:
         q = q.where(Signal.source_id.in_(list(source_ids)))
+    if not include_backfilled:
+        # IS NOT TRUE rather than "= False": a row written before the migration
+        # can still be NULL, and a signal with no provenance is a live signal,
+        # not a discard.
+        q = q.where(Signal.backfilled.is_not(True))
     rows = (await session.execute(q.order_by(Signal.id))).scalars().all()
 
     srcs = {s.id: s for s in (await session.execute(select(Source))).scalars().all()}
@@ -215,7 +234,13 @@ async def load_signals(session, *, symbol: str = "XAUUSD", frm=None, to=None,
                     continue
                 mapped = tuple(account_ids)
         out.append(SignalRow(
-            id=s.id, at=s.created_at, source_id=s.source_id,
+            # `signal_at` when the source gave us one, else ingest time (#192).
+            # NULL is the norm today, so this is inert until a source starts
+            # carrying its own timestamp — at which point the replay reads the
+            # market at the moment the signal was ISSUED, which is the point.
+            id=s.id, at=(getattr(s, "signal_at", None) or s.created_at),
+            backfilled=bool(getattr(s, "backfilled", False)),
+            source_id=s.source_id,
             source_name=src.name if src else None, account_ids=mapped,
             parsed=ParsedSignal(
                 symbol=s.symbol, direction=s.direction,

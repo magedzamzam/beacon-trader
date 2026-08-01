@@ -89,7 +89,25 @@ class Signal(Base):
     dedupe_hash: Mapped[str] = mapped_column(String(64), index=True)
     reinitiated_from: Mapped[int | None] = mapped_column(               # clone audit trail (#66)
         ForeignKey("signals.id"), nullable=True)
+    # INGEST time — when this arrived at Beacon, NOT when the signal was issued
+    # (#192). A channel's backlog is imported in one burst, so a block of rows
+    # can share a single moment; the two columns below disambiguate.
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # The signal's OWN time, where the source carries one (#192). NULL means the
+    # source gave us none and `created_at` is the only time we have — readers
+    # fall back to it. Never guessed: an inferred issue time would be
+    # indistinguishable from a real one for every downstream consumer.
+    signal_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    # TRUE = imported as history, not received live (#192). 230 of 856 rows on
+    # the current book sit in 15-minute onboarding bursts and the 179 in the
+    # biggest never produced a trade, so a replay that includes them simulates
+    # opportunities the account never had and reports it as the book's own past.
+    # Default FALSE — a live signal is not backfilled.
+    #
+    # SCHEMA GOTCHA: `create_all` does NOT add columns to an existing table
+    # (CLAUDE.md §6) — both of these need their ALTER in ADDITIVE_MIGRATIONS.
+    backfilled: Mapped[bool] = mapped_column(Boolean, default=False)
     trades: Mapped[list["Trade"]] = relationship(back_populates="signal")
 
 
