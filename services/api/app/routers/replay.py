@@ -345,6 +345,13 @@ async def enqueue_job(body: dict, db: AsyncSession = Depends(get_db),
             label=str((body or {}).get("label") or cfg.get("label") or "")[:96] or None,
             config=cfg, status="queued",
             requested_by=str(getattr(user, "username", None) or "portal")[:64],
+            # Set EXPLICITLY, and server-side. The harness's ORM model defaults
+            # this in Python, but this router inserts through its own Core
+            # read-model which has no such default, so the column arrived NULL
+            # and violated NOT NULL. `func.now()` also stamps the queue from the
+            # DATABASE rather than from whichever container wrote the row, so the
+            # API and the worker cannot disagree about ordering.
+            created_at=func.now(),
         ).returning(JOBS.c.id))
         job_id = res.scalar_one()
         await db.commit()
