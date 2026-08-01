@@ -223,6 +223,34 @@ signals each variant is ranked on.
 > Capital.com bars over an overlapping day, since high/low decide fill/TP/SL.
 > That needs the broker, so it is an operator step this harness cannot do.
 
+#### Result, 2026-08-01: it is neither the feed nor the ordering
+
+```
+n_sim_never_filled_live_did      80      (not 34 — see below)
+n_expired_on_a_fillable_bar       0      -> within-bar ordering: RULED OUT
+median_miss_points             2.88      max 15.35
+n_missed_by_under_0.5_points      1  of 75   -> the spread: RULED OUT
+live_outcome_of_the_missed     tp_hit 36 · breakeven 29 · sl_hit 15
+```
+
+A 2.88-point median miss is an order of magnitude past a gold spread, and not one
+order was lost to the expiry-before-fill ordering. Two of the three original
+hypotheses are dead, and the feed-provenance diff drops down the priority list.
+
+**It is 80 legs, not the 34 the confusion matrix shows.** The other ~46 are legs
+`cancel_pending_on_stop` retired, which carry `outcome = None` — so they are
+absent from the agreement rate *and* from the R comparison, while still changing
+which signals each variant is ranked on. That gap is the reason `under_fill` is
+its own block rather than a row in the confusion matrix.
+
+The remaining candidate is the **entry model**: the sim resting a LIMIT at the
+signalled level where live took a MARKET/chase fill beyond it (`build_plan`'s
+bounded market-on-receipt, #67). 2.88 points is the right order of magnitude for
+a 0.25R chase tolerance on a typical gold signal. `live_fill_beyond_entry` now
+measures it directly — adverse-signed, so a systematic chase cannot average to
+zero — and the verdict distinguishes it from the TTL, which the sign of that
+distribution is the only thing that can do.
+
 **Defect B is now selectable rather than assumed.** `ratchet_timing` on a
 variant:
 
@@ -245,13 +273,40 @@ docker compose run --rm --no-deps replay python main.py validate \
   --config runs/live-config.json --ratchet-timing same_bar   # the alternative
 ```
 
-Keep whichever brings **mean ΔR** closer to zero while agreement holds, and
-document the loser's residual. The flag overrides the variants themselves, not
-just `defaults` — a baseline that already stated a timing would otherwise win and
-you would be comparing a run against itself. The setting is recorded on every
-result (`settings.ratchet_timing`), printed on the gate output, and changes the
-variant digest: two runs under different exit models are not comparable and must
-not share a fingerprint.
+Keep whichever brings **mean ΔR** closer to zero while agreement holds. The flag
+overrides the variants themselves, not just `defaults` — a baseline that already
+stated a timing would otherwise win and you would be comparing a run against
+itself. The setting is recorded on every result (`settings.ratchet_timing`),
+printed on the gate output, and changes the variant digest: two runs under
+different exit models are not comparable and must not share a fingerprint.
+
+#### Result, 2026-08-01: `next_bar` kept
+
+Both models run over the same 918 filled legs / 452 trades:
+
+| | `next_bar` | `same_bar` |
+|---|---|---|
+| outcome agreement | **0.9216** | 0.9172 |
+| disagreements | **72** | 76 |
+| `sim=tp_hit live=breakeven` | 21 | **19** |
+| `sim=breakeven live=tp_hit` | **8** | 15 |
+| mean ΔR | 0.0599 | **0.0448** |
+
+`same_bar` fixed **2** of the 21 target cases and created **7** new ones in the
+mirror cell. The bias improvement is not the defect being fixed — it is an
+over-correction in the same direction, bought by adding net errors. The
+pre-registered rule was "closer to zero **while agreement holds**"; agreement
+fell, so `next_bar` stays the default.
+
+**The loser's residual, and what it means.** `same_bar` ratchets off the bar's
+*favourable* extreme and then tests the moved stop against that same bar's
+*adverse* extreme — it assumes high-then-low on **every** bar. `next_bar`
+assumes never. A 1m bar cannot say which, so the truth lies between them and the
+two numbers bracket it: **the residual mean ΔR is ~0.045–0.060R, and that band
+is a same-bar ordering ambiguity, not a late ratchet.** It is the same limitation
+that makes same-bar TP+SL score as the stop, and it is not closable without
+sub-minute data. Treat 0.06R as the harness's optimism floor rather than as a bug
+with a fix pending.
 
 ## 7. Phase 2 — generated signals (#184)
 

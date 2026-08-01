@@ -94,6 +94,8 @@ def compare(sim_legs: Sequence[dict], live_legs: Sequence[dict]) -> dict:
     # disagreements sit here, and the CAUSE is not readable from the count.
     under_fill_misses: List[float] = []
     under_fill_by_live_outcome: dict = {}
+    under_fill_by_order_type: dict = {}
+    under_fill_beyond: List[float] = []
     n_under_fill = n_under_fill_ttl = 0
     outcome_n = outcome_ok = 0
     label_mismatch = 0
@@ -129,6 +131,19 @@ def compare(sim_legs: Sequence[dict], live_legs: Sequence[dict]) -> dict:
                 n_under_fill_ttl += 1
             lo = str(lv.get("outcome"))
             under_fill_by_live_outcome[lo] = under_fill_by_live_outcome.get(lo, 0) + 1
+            ot = str(s.get("order_type") or "?")
+            under_fill_by_order_type[ot] = under_fill_by_order_type.get(ot, 0) + 1
+            # How far LIVE's fill sat beyond the level the simulator was resting
+            # at, in the adverse direction. Positive = live paid worse than the
+            # sim's level, i.e. live CHASED in while the sim waited passively.
+            # This is the discriminator between "the TTL was too short" and "the
+            # entry MODEL diverged" — see `_under_fill_block`.
+            lvl = _num(s.get("entry"))
+            if lvl is not None:
+                beyond = _adverse_delta(s.get("direction") or lv.get("direction"),
+                                        lf, lvl)
+                if beyond is not None:
+                    under_fill_beyond.append(beyond)
         agree = None
         if lf is not None:                       # only filled legs have an outcome
             agree = _same_outcome(s.get("outcome"), lv.get("outcome"))
@@ -180,7 +195,9 @@ def compare(sim_legs: Sequence[dict], live_legs: Sequence[dict]) -> dict:
             "than live got, which flatters every variant it ranks."),
         "under_fill": _under_fill_block(under_fill_misses, n_under_fill,
                                         n_under_fill_ttl,
-                                        under_fill_by_live_outcome),
+                                        under_fill_by_live_outcome,
+                                        under_fill_by_order_type,
+                                        under_fill_beyond),
         "rows": rows,
     }
 
@@ -191,30 +208,44 @@ SPREAD_SCALE_POINTS = 0.5
 
 
 def _under_fill_block(misses: List[float], n: int, n_ttl: int,
-                      by_live_outcome: dict) -> dict:
+                      by_live_outcome: dict, by_order_type: dict = None,
+                      beyond: List[float] = None) -> dict:
     """Name the cause of `sim=expired, live=filled` instead of guessing it (#185).
 
-    Three candidates, and they have three different fixes:
+    Four candidates, and they have four different fixes:
 
       * THE FEED — a candle source whose spread prints wider than Capital.com's
         was. The simulated ask never reaches a level the real ask did, so the
         order expires on TTL. Signature: misses clustered at a fraction of a
         point, i.e. inside a spread.
-      * THE TTL / THE WINDOW — the resolved entry TTL differing from what live
-        used, or the replay window clipping the order's life. Signature: large
-        misses, or none at all where the sim simply ran out of bars.
       * WITHIN-BAR ORDERING — `_expire_working` runs before `_fill_working`, so
         an order whose TTL lapsed on a bar it would have filled in is lost.
         Isolated exactly, as `n_expired_on_a_fillable_bar`; no inference needed.
+      * THE ENTRY MODEL — the sim rested a LIMIT at the signalled level where
+        LIVE took a MARKET/chase fill beyond it (`build_plan`'s bounded
+        market-on-receipt, #67). Live is then in a trade at a price the level
+        never returned to, and the sim waits for a level that was never coming
+        back. Signature: `live_fill_beyond_entry` systematically POSITIVE and of
+        the order of the chase tolerance (0.25R by default) — which is a very
+        different number from a spread.
+      * THE TTL / THE WINDOW — the resolved entry TTL differing from live's, or
+        the replay window clipping the order's life. This is what is LEFT when
+        the three above are ruled out, so it is deliberately the last verdict
+        rather than the default one.
 
-    The verdict here is a POINTER, not a conclusion. It says which hypothesis the
-    distribution favours so the next hour is spent on the right one — the
-    feed-provenance diff against Capital.com bars is still the thing that settles
-    the first candidate, and this cannot do it."""
+    The order of the tests matters: `live_fill_beyond_entry` is checked before
+    falling through to the TTL, because a large miss is equally consistent with
+    both and only the sign of that distribution separates them.
+
+    The verdict here is a POINTER, not a conclusion."""
+    by_order_type = by_order_type or {}
+    beyond = sorted(beyond or [])
     misses = sorted(misses)
     m = len(misses)
     med = median(misses) if m else None
     near = sum(1 for x in misses if x <= SPREAD_SCALE_POINTS)
+    med_beyond = median(beyond) if beyond else None
+    n_chased = sum(1 for x in beyond if x > SPREAD_SCALE_POINTS)
     if n == 0:
         verdict = "none — the simulator filled every entry live filled"
     elif n_ttl and n_ttl >= 0.5 * n:
@@ -224,9 +255,16 @@ def _under_fill_block(misses: List[float], n: int, n_ttl: int,
         verdict = (f"feed-shaped: {near}/{m} missed by <= {SPREAD_SCALE_POINTS} "
                    "points, which is inside a spread — diff the candle source "
                    "against Capital.com bars on high/low before anything else")
+    elif beyond and n_chased >= 0.5 * len(beyond):
+        verdict = (f"entry-model-shaped: live filled BEYOND the level the "
+                   f"simulator was resting at on {n_chased}/{len(beyond)} of "
+                   f"these (median {round(med_beyond, 3)} points adverse), so "
+                   "live took a MARKET/chase fill where the sim planned a LIMIT. "
+                   "Compare the harness's entry-time price context against the "
+                   "live quote and the chase tolerance (#67) — NOT the TTL")
     elif m:
-        verdict = ("not spread-shaped: the misses are large, so look at the "
-                   "resolved entry TTL and the replay window first")
+        verdict = ("not spread-shaped and not chase-shaped: look at the resolved "
+                   "entry TTL and the replay window")
     else:
         verdict = ("no distance recorded — these entries were MARKET orders or "
                    "were never placed, not levels the market failed to reach")
@@ -237,6 +275,17 @@ def _under_fill_block(misses: List[float], n: int, n_ttl: int,
         "max_miss_points": round(misses[-1], 5) if m else None,
         f"n_missed_by_under_{SPREAD_SCALE_POINTS}_points": near,
         "n_expired_on_a_fillable_bar": n_ttl,
+        "sim_order_type_of_the_missed": dict(sorted(by_order_type.items())),
+        "live_fill_beyond_entry": {
+            "n": len(beyond),
+            "median_points": round(med_beyond, 5) if med_beyond is not None else None,
+            "n_beyond_the_level": n_chased,
+            "label": ("how far LIVE's fill sat beyond the level the simulator "
+                      "was resting at, adverse-signed. POSITIVE = live paid "
+                      "worse than the sim's level, i.e. live chased in while the "
+                      "sim waited. A median of the order of the chase tolerance "
+                      "(0.25R) is the entry model diverging, not the TTL."),
+        },
         "live_outcome_of_the_missed": dict(sorted(by_live_outcome.items())),
         "verdict": verdict,
         "note": ("An entry the simulator never took is a trade it never scored. "

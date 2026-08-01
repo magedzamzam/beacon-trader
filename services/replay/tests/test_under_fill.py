@@ -186,12 +186,43 @@ def test_misses_inside_a_spread_point_at_the_feed():
     assert uf["n_missed_by_under_0.5_points"] >= 3
 
 
-def test_large_misses_point_somewhere_else():
-    sims = [_sim_leg(signal_id=i, closest_approach=15.0 + i) for i in range(6)]
-    lives = [_live_leg(signal_id=i) for i in range(6)]
+def test_large_misses_with_live_chasing_in_point_at_the_entry_model():
+    """A large miss is equally consistent with a short TTL and with live having
+    taken a MARKET/chase fill the sim planned as a LIMIT. Only the SIGN of
+    `live_fill_beyond_entry` separates them, so it is tested before the TTL."""
+    sims = [_sim_leg(signal_id=i, closest_approach=15.0 + i, entry=4000.0)
+            for i in range(6)]
+    # Live paid 4003 for a BUY the sim was resting at 4000 -> live chased in.
+    lives = [_live_leg(signal_id=i, fill_price=4003.0) for i in range(6)]
     uf = V.compare(sims, lives)["under_fill"]
-    assert "not spread-shaped" in uf["verdict"]
+    assert "entry-model-shaped" in uf["verdict"]
+    assert uf["live_fill_beyond_entry"]["median_points"] == pytest.approx(3.0)
+    assert uf["live_fill_beyond_entry"]["n_beyond_the_level"] == 6
+    assert uf["sim_order_type_of_the_missed"] == {"LIMIT": 6}
+
+
+def test_large_misses_with_live_filling_at_the_level_point_at_the_ttl():
+    """Same miss size, opposite sign: live filled AT the sim's level, so the
+    level WAS reached and the simulator simply was not around for it."""
+    sims = [_sim_leg(signal_id=i, closest_approach=15.0 + i, entry=4000.0)
+            for i in range(6)]
+    lives = [_live_leg(signal_id=i, fill_price=4000.0) for i in range(6)]
+    uf = V.compare(sims, lives)["under_fill"]
+    assert "not spread-shaped and not chase-shaped" in uf["verdict"]
     assert uf["n_missed_by_under_0.5_points"] == 0
+
+
+def test_a_sell_that_live_chased_is_signed_the_same_way_as_a_buy():
+    """A BUY pays and a SELL receives. Pooling the raw difference would let a
+    systematic chase average to zero — the one thing this measurement exists to
+    catch (same re-signing as `fill_adverse`)."""
+    sims = [_sim_leg(signal_id=i, direction="SELL", closest_approach=9.0,
+                     entry=4000.0) for i in range(4)]
+    lives = [_live_leg(signal_id=i, direction="SELL", fill_price=3997.0)
+             for i in range(4)]
+    uf = V.compare(sims, lives)["under_fill"]
+    assert uf["live_fill_beyond_entry"]["median_points"] == pytest.approx(3.0)
+    assert "entry-model-shaped" in uf["verdict"]
 
 
 def test_the_within_bar_ordering_cause_is_named_outright_not_inferred():
