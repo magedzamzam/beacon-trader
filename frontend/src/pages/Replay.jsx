@@ -634,7 +634,16 @@ function Trades({ runId }) {
   }, [open, arm, runId]);
 
   if (!runId) return null;
-  const taken = (rows || []).filter(r => r.taken);
+  // TRADES FIRST. Stored order is by row id, which on this book puts the
+  // onboarding backfill — 33 signals that never filled — at the top and buries
+  // every real trade below them. The spot-check is worthless if you have to
+  // scroll past 33 blanks to reach something that happened.
+  const rank = (r) => (r.taken && r.ever_filled ? 0 : r.taken ? 1 : 2);
+  const sorted = (rows || []).slice().sort(
+    (a, b) => rank(a) - rank(b) || String(a.signal_at || "").localeCompare(String(b.signal_at || "")));
+  const filled = sorted.filter(r => r.taken && r.ever_filled).length;
+  const unfilled = sorted.filter(r => r.taken && !r.ever_filled).length;
+  const skipped = sorted.length - filled - unfilled;
 
   return (
     <div className="border-t border-edge">
@@ -658,10 +667,10 @@ function Trades({ runId }) {
           {rows && !!rows.length && (
             <>
               <div className="text-[11px] text-muted">
-                {taken.length} traded · {rows.length - taken.length} skipped
+                {filled} traded · {unfilled} never filled · {skipped} skipped
               </div>
               <div className="divide-y divide-edge/40 rounded-lg bg-panel2/30">
-                {rows.map(row => {
+                {sorted.map(row => {
                   const o = tradeLine(row);
                   const isOpen = expanded === row.id;
                   const size = lots(row);
@@ -675,12 +684,16 @@ function Trades({ runId }) {
                         <span className="num text-muted w-24 shrink-0">
                           {String(row.signal_at || "").slice(5, 16).replace("T", " ")}</span>
                         <span className={`flex-1 ${TONE[o.tone]}`}>{o.what}</span>
-                        {row.taken && (<>
-                          <span className={`num w-20 text-right ${row.realized_pl >= 0 ? "text-long" : "text-short"}`}>
-                            {money(row.realized_pl)}</span>
-                          <span className="num w-14 text-right text-muted">
-                            {size ? size.toFixed(2) : "—"} lots</span>
-                        </>)}
+                        {/* Money only where there WAS money. A never-filled
+                            row showed "+0.00", which reads as a flat trade
+                            rather than as no trade at all. Its size still
+                            shows — that is what we would have traded. */}
+                        <span className={`num w-20 text-right ${
+                          !row.ever_filled ? "text-muted"
+                            : row.realized_pl >= 0 ? "text-long" : "text-short"}`}>
+                          {row.ever_filled ? money(row.realized_pl) : ""}</span>
+                        <span className="num w-16 text-right text-muted">
+                          {size ? `${size.toFixed(2)} lot` : ""}</span>
                       </button>
                       {isOpen && !!(row.legs || []).length && (
                         <div className="px-3 pb-2 space-y-1">
