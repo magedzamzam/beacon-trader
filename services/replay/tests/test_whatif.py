@@ -179,6 +179,32 @@ def test_a_filter_replaces_what_was_there_rather_than_stacking_on_it():
     assert rules[0]["when"]["not"]["all"][0]["type"] == "adx_regime"
 
 
+def test_a_scoped_layer_cannot_shadow_the_filters_into_nothing():
+    """THE CASCADE BUG, caught live.
+
+    `resolve_entry_filters` returns the first TRUTHY block walking most-specific
+    first — and `{"rules": []}` is truthy. Writing that placeholder onto the
+    scoped layer made it win the cascade, so the arm ran with NO filtration at
+    all: a FVG + order-block condition that skips 40 of GOLD VIP's 120 signals
+    in isolation skipped 0 in the run, and the report attributed the difference
+    to a filter that never fired.
+
+    The scoped layer must be FALSY so the cascade continues to the base."""
+    from beacon_core.execution.strategy import resolve_entry_filters
+
+    out = W.apply_changes(_live(), {"conditions": [{"kind": "regime",
+                                                    "trending": True}]})
+    scoped, base = out["strategies"][1], out["strategies"][0]
+    assert not scoped["entry_filters"], "a truthy scoped block wins the cascade"
+
+    class _S:
+        def __init__(self, d):
+            self.entry_filters = d.get("entry_filters") or {}
+
+    eff = resolve_entry_filters([_S(scoped), _S(base)])
+    assert len(eff.get("rules") or []) == 1, "the base layer's rules must survive"
+
+
 def test_a_free_form_ladder_reaches_the_arm():
     out = W.apply_changes(_live(), {"exit_steps": [
         {"when": {"kind": "points", "points": 30},
@@ -253,6 +279,33 @@ def test_a_built_ladder_reads_as_steps():
         {"when": {"kind": "tp", "index": 2}, "then": {"kind": "previous_tp"}}]})
     assert text == ("when price moves 30 in our favour, move the stop to breakeven"
                     " then when TP2 is hit, move the stop to the previous target")
+
+
+def test_a_zero_distance_trigger_is_refused():
+    """`price_move` at 0 fires the moment price is not losing, so the ladder
+    becomes an instant breakeven stop. Measured on GOLD VIP when the page sent a
+    trigger whose default was only ever displayed: stop-outs went 27 -> 72 and
+    the verdict blamed the exit the operator thought they had built."""
+    assert W.trigger_of({"kind": "points", "points": 0}) is None
+    assert W.trigger_of({"kind": "points"}) is None
+    assert W.trigger_of({"kind": "r", "r": 0}) is None
+    assert W.trigger_of({"kind": "points", "points": 30})["points"] == 30
+    assert W.step_rule({"when": {"kind": "points"},
+                        "then": {"kind": "breakeven"}}) is None
+
+
+def test_conditions_that_turn_away_nothing_are_called_out():
+    """What would have caught the cascade bug from the report alone: conditions
+    were stated and not one signal was skipped, so whatever moved the numbers,
+    it was not the filter."""
+    v = W.verdict(_sum(1438, by_rule=31), _sum(2857, by_rule=0),
+                  {"conditions": [{"kind": "indicator", "id": "fvg",
+                                   "field": "present", "op": "is_true"}]})
+    assert "turned away NOTHING" in v["headline"]
+    # ...and stays quiet when they did bite.
+    v2 = W.verdict(_sum(1438, by_rule=0), _sum(900, by_rule=40),
+                   {"conditions": [{"kind": "regime", "trending": True}]})
+    assert "turned away NOTHING" not in v2["headline"]
 
 
 def test_an_r_trigger_reads_in_r():
@@ -444,13 +497,25 @@ def test_a_thin_result_is_labelled_a_hint():
 
 
 def test_a_filter_that_barely_applied_says_so_instead_of_reporting_the_delta():
-    """MEASURED, not hypothetical: an RSI-below-70 filter touched 2 of 114
-    Quartz Elite signals, because RSI is rarely that high when these channels
-    post. The delta was +80 on a -1,189 book. Reporting "Better by 79.91" and
-    stopping there invites acting on noise."""
-    v = W.verdict(_sum(-1189, by_rule=0), _sum(-1109, by_rule=0),
+    """MEASURED, not hypothetical: an RSI-below-70 filter touched 2 of Quartz
+    Elite's 78 executed signals, because RSI is rarely that high when these
+    channels post. The delta was +80 on a -1,189 book. Reporting "Better by
+    79.91" and stopping there invites acting on noise.
+
+    A PROPORTION, not "removed nothing" — removing nothing at all is a different
+    problem with a different message."""
+    v = W.verdict(_sum(-1189, by_rule=0, executed=78),
+                  _sum(-1109, by_rule=2, executed=76),
                   {"filters": [{"kind": "rsi_below", "value": 70}]})
-    assert "barely applied" in v["headline"]
+    assert "barely applied" in v["headline"] and "2 of 78" in v["headline"]
+
+
+def test_a_filter_that_bit_properly_gets_no_excuse_line():
+    v = W.verdict(_sum(-1189, by_rule=0, executed=78),
+                  _sum(-665, by_rule=17, executed=61),
+                  {"filters": [{"kind": "rsi_below", "value": 60}]})
+    assert "barely applied" not in v["headline"]
+    assert "turned away NOTHING" not in v["headline"]
 
 
 def test_a_filter_that_removed_nearly_everything_says_that_too():

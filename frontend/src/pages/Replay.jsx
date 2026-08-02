@@ -65,6 +65,19 @@ const ACTIONS = [
   { v: "previous_tp", label: "the previous target" },
   { v: "tp", label: "a target" },
 ];
+// Written INTO state when the trigger changes. A default that only ever reaches
+// the input's `value` ships as undefined, and the worker reads that as zero.
+const TRIGGER_DEFAULTS = { tp: { index: 1 }, points: { points: 30 }, r: { r: 1 } };
+
+// A step with a zero distance is refused by the API, so say so here rather than
+// letting the operator queue a run that 400s.
+const stepIsComplete = (s) => {
+  const t = s.when || {};
+  if (t.kind === "points") return Number(t.points) > 0;
+  if (t.kind === "r") return Number(t.r) > 0;
+  return true;
+};
+
 const EXIT_MODES = [
   { v: "", label: "Leave it as it is" },
   { v: "let_it_run", label: "Never move the stop" },
@@ -193,6 +206,7 @@ function NewBacktest({ sources, accounts, catalog, onQueued }) {
 
   const ready = scopeType === "manual" ||
     (scopeType === "source" && sourceId) || (scopeType === "account" && accountId);
+  const badStep = exitMode === "custom" && steps.some(s => !stepIsComplete(s));
   const nothingChanged = !conds.length && !atr && !risk &&
     !(exitMode === "let_it_run" || (exitMode === "custom" && steps.length));
 
@@ -282,8 +296,15 @@ function NewBacktest({ sources, accounts, catalog, onQueued }) {
                     onRemove={() => setSteps(ss => ss.filter((_, j) => j !== i))} />
                 ))}
                 <Button variant="ghost" onClick={() => setSteps(ss => [...ss,
-                  { when: { kind: "tp", index: 1 }, then: { kind: "breakeven" } }])}>
+                  { when: { kind: "tp", ...TRIGGER_DEFAULTS.tp },
+                    then: { kind: "breakeven" } }])}>
                   + add a step</Button>
+                {steps.some(s => !stepIsComplete(s)) && (
+                  <div className="text-[11px] text-warn">
+                    A step needs a distance above zero, or it fires the moment
+                    the trade stops losing.
+                  </div>
+                )}
                 {!steps.length && (
                   <div className="text-[11px] text-warn">
                     Add at least one step, or nothing changes.
@@ -309,7 +330,7 @@ function NewBacktest({ sources, accounts, catalog, onQueued }) {
       </div>
 
       <div className="px-4 py-3 border-t border-edge flex items-center gap-3 flex-wrap">
-        <Button onClick={run} disabled={busy || !ready || nothingChanged}>
+        <Button onClick={run} disabled={busy || !ready || nothingChanged || badStep}>
           {busy ? "Queueing…" : "Run it"}</Button>
         {!ready && <span className="text-[11px] text-warn">Pick what to test first.</span>}
         {ready && nothingChanged &&
@@ -403,25 +424,30 @@ function StepRow({ s, onChange, onRemove }) {
     <div className="flex flex-wrap items-center gap-2 text-sm bg-panel2/40 rounded-lg px-2 py-1.5">
       <span className="text-muted text-xs">when</span>
       <Select value={t.kind} onChange={e => {
+        // Seed the new trigger's default INTO state, never only into the input's
+        // display. A displayed-but-unwritten 30 shipped `points: undefined`,
+        // which the worker read as 0 — a stop that moves to breakeven the moment
+        // price is not losing. On GOLD VIP that took stop-outs from 27 to 72 and
+        // the verdict blamed the exit the operator thought they had built.
         const kind = e.target.value;
-        setWhen({ kind });
+        onChange({ when: { ...TRIGGER_DEFAULTS[kind], kind } });
         if (kind !== "tp" && a.kind === "previous_tp") setThen({ kind: "breakeven" });
       }}>
         {TRIGGERS.map(x => <option key={x.v} value={x.v}>{x.label}</option>)}
       </Select>
       {t.kind === "tp" && (
-        <Select value={t.index || 1}
+        <Select value={t.index ?? 1}
           onChange={e => setWhen({ index: Number(e.target.value) })}>
           {[1, 2, 3, 4, 5].map(i => <option key={i} value={i}>TP{i}</option>)}
         </Select>
       )}
       {t.kind === "points" && (
-        <input type="number" step="any" value={t.points ?? 30}
+        <input type="number" step="any" min="0.01" value={t.points ?? ""}
           onChange={e => setWhen({ points: Number(e.target.value) })}
           className="w-24 bg-panel border border-edge rounded px-2 py-1 num text-xs" />
       )}
       {t.kind === "r" && (
-        <input type="number" step="0.1" value={t.r ?? 1}
+        <input type="number" step="0.1" min="0.1" value={t.r ?? ""}
           onChange={e => setWhen({ r: Number(e.target.value) })}
           className="w-24 bg-panel border border-edge rounded px-2 py-1 num text-xs" />
       )}

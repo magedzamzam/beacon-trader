@@ -236,6 +236,14 @@ def _check_whatif(cfg: dict) -> None:
             raise HTTPException(400, "\"the previous target\" only works with a "
                                      "TP trigger — the engine reads the target "
                                      "off the TP that fired")
+        # A distance of ZERO fires the moment price is not losing, turning the
+        # ladder into an instant breakeven stop. Measured on GOLD VIP: stop-outs
+        # 27 -> 72, and the report blamed the exit the operator meant to build.
+        if when["kind"] == "points" and not (float(when.get("points") or 0) > 0):
+            raise HTTPException(400, "a price-move trigger needs a distance "
+                                     "above zero")
+        if when["kind"] == "r" and not (float(when.get("r") or 0) > 0):
+            raise HTTPException(400, "an R trigger needs a multiple above zero")
 
 
 def _unavailable(exc: Exception) -> dict:

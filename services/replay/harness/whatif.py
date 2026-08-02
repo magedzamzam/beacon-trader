@@ -215,13 +215,22 @@ def entry_rules(changes: dict) -> List[dict]:
 # `strategy/rules.py` fires on three triggers and moves the stop to four targets.
 # All of them are offered; nothing here extends the engine.
 def trigger_of(t: dict) -> Optional[dict]:
+    """One operator trigger -> one engine trigger, or None if it is unusable.
+
+    A distance of ZERO is refused rather than passed through. `price_move` with
+    0 points fires the moment price is not losing, so the ladder becomes an
+    instant breakeven stop — measured on GOLD VIP: stop-outs went 27 -> 72 and
+    the report blamed the exit the operator thought they had built. Same for
+    `be_lock_at_r` at 0R."""
     kind = (t or {}).get("kind")
     if kind == "tp":
         return {"type": "tp_hit", "index": int(t.get("index") or 1)}
     if kind == "points":
-        return {"type": "price_move", "points": float(t.get("points") or 0)}
+        pts = float(t.get("points") or 0)
+        return {"type": "price_move", "points": pts} if pts > 0 else None
     if kind == "r":
-        return {"type": "be_lock_at_r", "r": float(t.get("r") or 1.0)}
+        r = float(t.get("r") or 0)
+        return {"type": "be_lock_at_r", "r": r} if r > 0 else None
     return None
 
 
@@ -337,11 +346,21 @@ def apply_changes(variant: dict, changes: dict) -> dict:
     for st in v.get("strategies", []):
         base = st.get("account_id") is None and st.get("source_id") is None
         if rules:
-            ef = st.setdefault("entry_filters", {})
             # Replace rather than append: the operator is asking "what if we
             # filtered by THIS", not "what if we added it on top of whatever is
             # already there and could not see".
-            ef["rules"] = copy.deepcopy(rules) if base else []
+            #
+            # The scoped layer is EMPTIED, not set to `{"rules": []}`.
+            # `resolve_entry_filters` returns the first TRUTHY block walking
+            # most-specific first, and `{"rules": []}` is truthy — so the
+            # placeholder won the cascade and the arm ran with no filtration at
+            # all. Measured: a FVG + order-block condition that skips 40 of GOLD
+            # VIP's 120 signals in isolation skipped 0 in the run, and the report
+            # attributed the difference to a filter that never fired.
+            if base:
+                st.setdefault("entry_filters", {})["rules"] = copy.deepcopy(rules)
+            else:
+                st["entry_filters"] = {}          # falsy -> the cascade continues
         if exit_rules is not None:
             ep = st.setdefault("exit_policy", {})
             if base:
@@ -362,6 +381,7 @@ def apply_changes(variant: dict, changes: dict) -> dict:
 # are stated rather than tuned: a loser that never got 0.3R our way was never
 # working, and one that got a full R before reversing is a different problem
 # (the exit) from one that never moved (the entry).
+BARELY = 0.05          # a filter touching under 5% has not been tested
 STRAIGHT_TO_SL = 0.3
 WENT_OUR_WAY = 1.0
 
@@ -631,6 +651,7 @@ def verdict(base: dict, alt: dict, changes: dict) -> dict:
     """One sentence a person can act on, plus the two numbers behind it."""
     delta = round(alt["profit"] - base["profit"], 2)
     removed = alt["skipped_by_rule"] - base["skipped_by_rule"]
+    stated = bool(conditions_of(changes) or changes.get("filters"))
     lost_winners = max(0, base["wins"] - alt["wins"])
     change = describe(changes)
 
@@ -650,13 +671,27 @@ def verdict(base: dict, alt: dict, changes: dict) -> dict:
         parts.append(f"It took {abs(removed)} signal(s) you skipped before.")
     if base["executed"] and alt["executed"] == 0:
         parts.append("It skipped EVERYTHING — the filter is too strict to test.")
-    elif changes.get("filters") and removed <= 0:
+    elif stated and not alt["skipped_by_rule"]:
+        # THE CHECK THAT WOULD HAVE CAUGHT THE CASCADE BUG. Conditions were
+        # stated and not one signal was turned away, so whatever moved the
+        # numbers, it was not the filter. Either the conditions hold on every
+        # signal, or their inputs could not be read — and the difference matters
+        # far more than the delta printed above it.
+        parts.append("Your conditions turned away NOTHING — every signal still "
+                     "passed, so the difference below is not the filter. Check "
+                     "the indicator and timeframe are ones we can read at these "
+                     "signals' times.")
+    elif stated and 0 < removed <= BARELY * max(1, base["executed"]):
         # Measured: an RSI-below-70 filter touched 2 of 114 Quartz signals,
         # because RSI is rarely that high when these channels post. The delta
         # was +80 on a -1,189 book, and reading that as "the filter helps" is
         # reading noise. Say the filter barely applied instead.
-        parts.append("The filter barely applied — it changed almost nothing, so "
-                     "this says little either way. Try a tighter threshold.")
+        #
+        # A PROPORTION, not "removed nothing" — that case is the branch above,
+        # and it means something different.
+        parts.append(f"The filter barely applied — it turned away {removed} of "
+                     f"{base['executed']}, so this says little either way. Try a "
+                     "tighter threshold.")
     elif base["executed"] and removed >= 0.9 * base["executed"]:
         parts.append("It removed nearly everything, so what is left is a handful "
                      "of survivors rather than a strategy.")
