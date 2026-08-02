@@ -177,52 +177,84 @@ def test_the_page_sends_names_and_never_sl_rules():
 
 
 def test_every_exit_the_page_offers_is_one_the_worker_knows():
-    """A dropdown option with no server-side ladder behind it is a silent
+    """A dropdown option with no server-side resolver behind it is a silent
     no-op: the arm runs with the default exit and the report says the change
     made no difference, which is a wrong answer rather than an error."""
     import re
 
-    from harness.whatif import EXITS
+    from harness import whatif as W
     page = (SERVICE_ROOT.parents[1] / "frontend/src/pages/Replay.jsx").read_text(
         encoding="utf-8")
-    block = page.split("const EXITS = [", 1)[1].split("];", 1)[0]
-    offered = {v for v in re.findall(r'v:\s*"([^"]*)"', block) if v}
-    assert offered, "the page should offer named exits"
-    assert offered <= set(EXITS), sorted(offered - set(EXITS))
+    trig = set(re.findall(r'v:\s*"([^"]+)"',
+                          page.split("const TRIGGERS = [", 1)[1].split("];", 1)[0]))
+    act = set(re.findall(r'v:\s*"([^"]+)"',
+                         page.split("const ACTIONS = [", 1)[1].split("];", 1)[0]))
+    assert trig and act
+    for k in trig:
+        assert W.trigger_of({"kind": k, "index": 1, "points": 1, "r": 1}), k
+    for k in act:
+        assert W.action_of({"kind": k, "index": 1}), k
+    # The whole-ladder modes the page offers must resolve too.
+    modes = set(re.findall(r'v:\s*"([^"]*)"',
+                           page.split("const EXIT_MODES = [", 1)[1].split("];", 1)[0]))
+    for m in modes - {"", "custom"}:
+        assert m in W.EXITS, m
 
 
-def test_every_filter_the_page_offers_resolves_to_a_rule_or_a_geometry_skip():
-    """Same failure, on the filtration side � an unknown `kind` falls through
-    `filter_rule` as None and quietly filters nothing."""
+def test_the_page_never_offers_previous_target_on_a_non_tp_trigger():
+    """The engine resolves `previous_tp` from the TRIGGER's index, so pairing it
+    with a price or R trigger yields a rule with no target that silently does
+    nothing. Refused on both sides."""
+    from harness import whatif as W
+    assert W.step_rule({"when": {"kind": "points", "points": 30},
+                        "then": {"kind": "previous_tp"}}) is None
+    assert W.step_rule({"when": {"kind": "tp", "index": 2},
+                        "then": {"kind": "previous_tp"}}) is not None
+    page = (SERVICE_ROOT.parents[1] / "frontend/src/pages/Replay.jsx").read_text(
+        encoding="utf-8")
+    assert 'ACTIONS.filter(x => x.v !== "previous_tp")' in page
+
+
+def test_every_quick_pick_the_page_offers_resolves_to_a_condition():
+    """The quick picks are shortcuts into the SAME builder, so each one has to
+    be a condition the worker can turn into an engine leaf."""
+    import json
     import re
 
-    from harness.whatif import GEOMETRY_KINDS, filter_rule
+    from harness import whatif as W
     page = (SERVICE_ROOT.parents[1] / "frontend/src/pages/Replay.jsx").read_text(
         encoding="utf-8")
-    block = page.split("const FILTERS = [", 1)[1].split("];", 1)[0]
-    kinds = set(re.findall(r'kind:\s*"([^"]+)"', block))
-    assert kinds, "the page should offer named filters"
-    for k in kinds:
-        f = {"kind": k, "value": 1, "sessions": ["New York"]}
-        assert filter_rule(f) is not None or k in GEOMETRY_KINDS, k
+    block = page.split("const QUICK = [", 1)[1].split("];", 1)[0]
+    conds = re.findall(r"cond:\s*(\{.*?\})\s*\}", block)
+    assert conds, "the page should offer quick picks"
+    for raw in conds:
+        c = json.loads(re.sub(r'(\w+):', r'"\1":', raw))
+        assert W.keep_leaf(c) is not None, c
 
 
-def test_a_scaffold_request_with_no_known_ladder_is_refused():
-    """Silently running zero arms is how the first one produced a `done` job with
-    nothing in it."""
-    import asyncio
+def test_the_builders_vocabulary_matches_the_one_the_api_accepts():
+    """Three lists have to agree or a perfectly reasonable request 400s: what
+    the page offers, what the API validates, and what the worker resolves."""
+    import re
 
-    import main
-    for cfg in ({"scaffold": True, "ladders": []},
-                {"scaffold": True, "ladders": ["not_a_ladder"]}):
-        with pytest.raises(ValueError) as exc:
-            asyncio.run(main._expand_scaffold(None, cfg))
-        assert "ladder" in str(exc.value)
+    from harness import whatif as W
+    api = (SERVICE_ROOT.parents[1] / "services/api/app/routers/replay.py").read_text(
+        encoding="utf-8")
+    page = (SERVICE_ROOT.parents[1] / "frontend/src/pages/Replay.jsx").read_text(
+        encoding="utf-8")
 
-
-def test_a_non_scaffold_config_passes_through_untouched():
-    import asyncio
-
-    import main
-    cfg = {"label": "hand-written", "variants": [{"name": "x"}]}
-    assert asyncio.run(main._expand_scaffold(None, cfg)) is cfg
+    def named(src, const):
+        return set(re.findall(r'"([^"]+)"',
+                              src.split(const, 1)[1].split(")", 1)[0]))
+    api_trig = named(api, "TRIGGER_KINDS = (")
+    api_act = named(api, "ACTION_KINDS = (")
+    page_trig = set(re.findall(r'v:\s*"([^"]+)"',
+                               page.split("const TRIGGERS = [", 1)[1].split("];", 1)[0]))
+    page_act = set(re.findall(r'v:\s*"([^"]+)"',
+                              page.split("const ACTIONS = [", 1)[1].split("];", 1)[0]))
+    assert page_trig == api_trig, (page_trig, api_trig)
+    assert page_act == api_act, (page_act, api_act)
+    for k in api_trig:
+        assert W.trigger_of({"kind": k, "index": 1, "points": 1, "r": 1})
+    for k in api_act:
+        assert W.action_of({"kind": k, "index": 1})

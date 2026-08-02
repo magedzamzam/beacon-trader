@@ -179,6 +179,16 @@ MAX_VARIANTS = 24
 # empty or meaningless report from reaching the queue at all.
 WHATIF_SCOPES = ("source", "account", "manual")
 
+# The free-form builder's vocabulary, restated here so the API refuses a shape
+# the worker would silently drop. `indicator` covers the whole TA registry —
+# 45 of them, FVG and order blocks included — so the bound is on COUNT, not on
+# which indicator: the operator asked not to be limited to a fixed menu.
+CONDITION_KINDS = ("indicator", "session", "not_session", "regime")
+TRIGGER_KINDS = ("tp", "points", "r")
+ACTION_KINDS = ("breakeven", "previous_tp", "tp")
+MAX_CONDITIONS = 8
+MAX_EXIT_STEPS = 6
+
 
 def _check_whatif(cfg: dict) -> None:
     scope = cfg.get("scope")
@@ -193,10 +203,39 @@ def _check_whatif(cfg: dict) -> None:
         raise HTTPException(400, "changes must be an object")
     # Both arms would be byte-identical, and the report would confidently say the
     # change made no difference — a wrong answer, not an error, which is worse.
-    if not (ch.get("filters") or ch.get("exit") or ch.get("risk_percent")
+    if not (ch.get("filters") or ch.get("conditions") or ch.get("exit")
+            or ch.get("exit_steps") or ch.get("risk_percent")
             or ch.get("entry_style")):
         raise HTTPException(400, "changes must contain at least one change, "
                                  "otherwise both arms are identical")
+    # The builder is free-form, so the shapes are bounded here rather than
+    # trusted. A run is minutes of the worker's only thread; a request that can
+    # only produce an empty or meaningless report should never reach the queue.
+    conds = ch.get("conditions") or []
+    if not isinstance(conds, list) or len(conds) > MAX_CONDITIONS:
+        raise HTTPException(400, f"at most {MAX_CONDITIONS} entry conditions")
+    for c in conds:
+        if not isinstance(c, dict) or c.get("kind") not in CONDITION_KINDS:
+            raise HTTPException(400, f"condition.kind must be one of {CONDITION_KINDS}")
+        if c["kind"] == "indicator" and not (c.get("id") and c.get("op")):
+            raise HTTPException(400, "an indicator condition needs an id and an op")
+    steps = ch.get("exit_steps") or []
+    if not isinstance(steps, list) or len(steps) > MAX_EXIT_STEPS:
+        raise HTTPException(400, f"at most {MAX_EXIT_STEPS} exit steps")
+    for s in steps:
+        if not isinstance(s, dict):
+            raise HTTPException(400, "each exit step must be an object")
+        when, then = s.get("when") or {}, s.get("then") or {}
+        if when.get("kind") not in TRIGGER_KINDS:
+            raise HTTPException(400, f"exit trigger must be one of {TRIGGER_KINDS}")
+        if then.get("kind") not in ACTION_KINDS:
+            raise HTTPException(400, f"exit action must be one of {ACTION_KINDS}")
+        # `previous_tp` resolves off the TRIGGER's index in the engine, so on a
+        # price or R trigger it produces no target and the step does nothing.
+        if then["kind"] == "previous_tp" and when["kind"] != "tp":
+            raise HTTPException(400, "\"the previous target\" only works with a "
+                                     "TP trigger — the engine reads the target "
+                                     "off the TP that fired")
 
 
 def _unavailable(exc: Exception) -> dict:

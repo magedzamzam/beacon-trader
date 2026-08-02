@@ -39,25 +39,93 @@ def test_every_exit_has_a_label_a_person_can_read():
         assert label[0].islower(), label
 
 
-def test_an_rsi_ceiling_becomes_a_skip_on_the_complement():
-    """"Only take signals with RSI below 70" is a rule that fires — and SKIPS —
-    when RSI is at or above 70. Getting the polarity backwards would filter out
-    exactly the signals the operator wanted to keep, and the report would look
-    entirely plausible."""
-    r = W.filter_rule({"kind": "rsi_below", "value": 70})
-    assert r["action"] == "skip" and r["mode"] == "live"
-    assert r["when"]["op"] == "gte" and r["when"]["value"] == 70
-    r = W.filter_rule({"kind": "rsi_above", "value": 30})
-    assert r["when"]["op"] == "lte" and r["when"]["value"] == 30
+def test_an_rsi_ceiling_is_stated_as_what_to_KEEP():
+    """The operator says what must be true to take the trade; the skip is derived.
+
+    Stating each condition as its own skip rule would mean inverting every
+    operator by hand, and inverting `between` or a boolean field is exactly how
+    you end up filtering the wrong half of the book."""
+    leaf = W.keep_leaf({"kind": "indicator", "id": "rsi", "field": "value",
+                        "op": "lt", "value": 70, "timeframe": "15m"})
+    assert leaf == {"type": "indicator", "id": "rsi", "timeframe": "15m",
+                    "field": "value", "op": "lt", "value": 70}
 
 
-def test_only_trending_skips_when_not_trending():
-    assert W.filter_rule({"kind": "only_trending"})["when"]["trending"] is False
-    assert W.filter_rule({"kind": "only_ranging"})["when"]["trending"] is True
+def test_a_boolean_condition_carries_no_value():
+    """`is_true` on a field like `fvg.present` takes no bound. Sending one would
+    be read as a numeric compare against a boolean and evaluate to UNKNOWN."""
+    leaf = W.keep_leaf({"kind": "indicator", "id": "fvg", "field": "present",
+                        "op": "is_true", "timeframe": "15m"})
+    assert "value" not in leaf and leaf["op"] == "is_true"
 
 
-def test_a_geometry_filter_has_no_rule_because_the_engine_cannot_express_it():
-    assert W.filter_rule({"kind": "min_stop_atr", "value": 1.0}) is None
+def test_a_condition_can_compare_against_the_price():
+    """What makes "price is above the order block" expressible without a bespoke
+    rule type: the right-hand side is a reference, not a literal."""
+    leaf = W.keep_leaf({"kind": "indicator", "id": "order_block", "field": "top",
+                        "op": "lt", "ref": "price", "timeframe": "15m"})
+    assert leaf["ref"] == "price" and "value" not in leaf
+
+
+def test_structure_indicators_are_reachable_because_they_are_just_indicators():
+    """FVG and order blocks are registry entries like any other, so the builder
+    reaches them through the same leaf — there is no special case to maintain."""
+    for ind, field in (("fvg", "present"), ("order_block", "dist_pct"),
+                       ("support_resistance", "dist_support_pct"),
+                       ("bbands", "pct_b"), ("macd", "cross")):
+        leaf = W.keep_leaf({"kind": "indicator", "id": ind, "field": field,
+                            "op": "gt", "value": 0})
+        assert leaf["id"] == ind and leaf["field"] == field
+
+
+def test_the_regime_and_session_conditions_still_exist():
+    assert W.keep_leaf({"kind": "regime", "trending": True})["trending"] is True
+    assert W.keep_leaf({"kind": "session", "sessions": ["London"]}) == {
+        "type": "session_in", "sessions": ["London"]}
+
+
+def test_an_unknown_condition_kind_is_dropped_not_guessed():
+    assert W.keep_leaf({"kind": "vibes"}) is None
+    assert W.keep_leaf({"kind": "indicator", "id": "rsi"}) is None      # no op
+
+
+def test_every_condition_folds_into_ONE_skip_on_their_negation():
+    """The composition that makes an arbitrary number of conditions safe.
+
+    Kleene: `not UNKNOWN` is UNKNOWN, so a condition whose indicator could not be
+    computed leaves the whole rule UNKNOWN, which reads as "does not match" and
+    the signal is TAKEN. Fail-open survives composition, which is the entire
+    reason the grammar is three-valued."""
+    rules = W.entry_rules({"conditions": [
+        {"kind": "indicator", "id": "rsi", "field": "value", "op": "lt", "value": 60},
+        {"kind": "regime", "trending": True}]})
+    assert len(rules) == 1
+    r = rules[0]
+    assert r["action"] == "skip" and r["mode"] == "live" and r["enabled"] is True
+    assert list(r["when"]) == ["not"]
+    assert len(r["when"]["not"]["all"]) == 2
+
+
+def test_a_skip_session_preset_becomes_a_negated_keep():
+    """It is the one condition stated as a skip, so it inverts on the way in."""
+    rules = W.entry_rules({"filters": [{"kind": "skip_session",
+                                        "sessions": ["New York"]}]})
+    leaf = rules[0]["when"]["not"]["all"][0]
+    assert leaf == {"not": {"type": "session_in", "sessions": ["New York"]}}
+
+
+def test_no_conditions_means_no_rule_at_all():
+    """An empty rule list leaves the arm's filtration untouched. A rule with an
+    empty `all` would be UNKNOWN and inert, but shipping one invites the reader
+    to think something was applied."""
+    assert W.entry_rules({}) == []
+    assert W.entry_rules({"filters": [{"kind": "min_stop_atr", "value": 1.0}]}) == []
+
+
+def test_a_geometry_filter_never_becomes_an_engine_rule():
+    """There is no `when.type` for stop distance, so it is applied on the signal
+    set instead — and must not silently vanish into the condition list."""
+    assert W.conditions_of({"filters": [{"kind": "min_stop_atr", "value": 1.0}]}) == []
     assert "min_stop_atr" in W.GEOMETRY_KINDS
 
 
@@ -104,10 +172,20 @@ def test_a_filter_replaces_what_was_there_rather_than_stacking_on_it():
     """The operator is asking "what if we filtered by THIS", not "what if we
     added it on top of whatever is already configured and cannot see from this
     screen"."""
-    out = W.apply_changes(_live(), {"filters": [{"kind": "only_trending"}]})
-    base = out["strategies"][0]
-    names = [r["name"] for r in base["entry_filters"]["rules"]]
-    assert names == ["market not trending"]
+    out = W.apply_changes(_live(), {"conditions": [{"kind": "regime",
+                                                    "trending": True}]})
+    rules = out["strategies"][0]["entry_filters"]["rules"]
+    assert len(rules) == 1
+    assert rules[0]["when"]["not"]["all"][0]["type"] == "adx_regime"
+
+
+def test_a_free_form_ladder_reaches_the_arm():
+    out = W.apply_changes(_live(), {"exit_steps": [
+        {"when": {"kind": "points", "points": 30},
+         "then": {"kind": "breakeven"}}]})
+    assert out["strategies"][0]["exit_policy"]["sl_rules"] == [
+        {"trigger": {"type": "price_move", "points": 30.0},
+         "action": {"type": "move_sl_to", "target": "entry"}}]
 
 
 def test_a_scoped_override_cannot_survive_a_change_to_the_base_layer():
@@ -144,12 +222,43 @@ def test_no_change_leaves_the_variant_alone():
 
 # --- describing it ------------------------------------------------------------
 def test_the_change_reads_as_a_sentence_not_a_config():
-    assert W.describe({"filters": [{"kind": "rsi_below", "value": 70}]}) == \
-        "only take signals with RSI below 70"
+    """With a free-form builder in front of it, this is the only thing standing
+    between the operator and a column headed with a JSON blob."""
+    assert W.describe({"conditions": [
+        {"kind": "indicator", "id": "rsi", "field": "value", "op": "lt",
+         "value": 70, "timeframe": "15m"}]}) ==         "only trade when RSI on 15m is below 70"
     assert W.describe({"exit": "be_at_tp1"}) == "move stop to breakeven at TP1"
     assert W.describe({}) == "no change"
-    both = W.describe({"filters": [{"kind": "only_trending"}], "exit": "be_at_tp2"})
-    assert " + " in both
+
+
+def test_several_conditions_read_as_one_sentence():
+    text = W.describe({"conditions": [
+        {"kind": "indicator", "id": "fvg", "field": "present", "op": "is_true",
+         "timeframe": "15m"},
+        {"kind": "regime", "trending": True}]})
+    assert text == ("only trade when Fair Value Gap is there on 15m "
+                    "and the market is trending")
+
+
+def test_a_structure_field_is_named_in_the_sentence():
+    text = W.describe({"conditions": [
+        {"kind": "indicator", "id": "order_block", "field": "dist_pct",
+         "op": "lte", "value": 0.5, "timeframe": "15m"}]})
+    assert text == "only trade when Order Block dist pct on 15m is at or below 0.5"
+
+
+def test_a_built_ladder_reads_as_steps():
+    text = W.describe({"exit_steps": [
+        {"when": {"kind": "points", "points": 30}, "then": {"kind": "breakeven"}},
+        {"when": {"kind": "tp", "index": 2}, "then": {"kind": "previous_tp"}}]})
+    assert text == ("when price moves 30 in our favour, move the stop to breakeven"
+                    " then when TP2 is hit, move the stop to the previous target")
+
+
+def test_an_r_trigger_reads_in_r():
+    assert "profit reaches 1.5R" in W.describe(
+        {"exit_steps": [{"when": {"kind": "r", "r": 1.5},
+                         "then": {"kind": "breakeven"}}]})
 
 
 def test_a_session_skip_names_the_session():
@@ -309,7 +418,7 @@ def test_the_verdict_says_better_or_worse_in_money():
     assert "3,238" in v["headline"] and "Better" in v["headline"]
     assert "26 signal" in v["headline"]
     assert "4 of them were winners" in v["headline"]
-    assert v["change"] == "only take signals with RSI below 70"
+    assert v["change"] == "only trade when RSI on 15m is below 70"
 
 
 def test_a_worse_result_is_not_dressed_up():
@@ -531,8 +640,27 @@ def test_the_report_carries_both_arms_and_the_window():
 
 @pytest.mark.parametrize("kind", sorted(
     {"rsi_below", "rsi_above", "only_trending", "only_ranging", "skip_session",
-     "min_stop_atr"}))
-def test_every_offered_filter_is_either_a_rule_or_a_geometry_skip(kind):
+     "in_fvg", "at_order_block", "min_stop_atr"}))
+def test_every_preset_resolves_to_a_condition_or_a_geometry_skip(kind):
+    """A preset with nothing behind it is a silent no-op: the arm runs unchanged
+    and the report says the change made no difference."""
     f = {"kind": kind, "value": 1.0, "sessions": ["New York"]}
-    assert W.filter_rule(f) is not None or kind in W.GEOMETRY_KINDS
-    assert W.describe({"filters": [f]}) != kind, "every filter needs a phrase"
+    assert W.preset_leaf(f) is not None or kind in W.GEOMETRY_KINDS
+    assert W.describe({"filters": [f]}) != kind, "every preset needs a phrase"
+
+
+def test_every_preset_names_an_indicator_the_registry_actually_carries():
+    """The `macd.cross == "bull"` failure, generalised: an id or field the
+    registry does not carry evaluates to UNKNOWN on every bar, so the condition
+    silently never holds and the arm is the baseline wearing a new label."""
+    from beacon_core.ta import registry as TA
+    specs = {s["id"]: s for s in TA.catalog()["indicators"]}
+    for kind in W.PRESETS:
+        leaf = W.preset_leaf({"kind": kind, "value": 1.0})
+        if leaf.get("kind") != "indicator":
+            continue
+        spec = specs.get(leaf["id"])
+        assert spec, f"{kind} names an indicator that is not in the registry"
+        assert leaf["field"] in spec["outputs"], (
+            f"{kind} reads {leaf['field']}, but {leaf['id']} emits "
+            f"{spec['outputs']}")

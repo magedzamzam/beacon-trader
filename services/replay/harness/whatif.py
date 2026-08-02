@@ -56,43 +56,224 @@ EXIT_LABELS = {
     "let_it_run": "never move the stop",
 }
 
-# Filters that map onto the shipped `entry_filters` grammar. `mode: live` so they
-# actually skip in the simulation — this is a counterfactual, not a shadow.
+# --- entry: any condition the engine can evaluate -----------------------------
+# The operator states what must be TRUE to take the trade. Anything in the TA
+# registry (45 indicators, FVG and order blocks included), plus sessions and the
+# ADX regime read. Nothing here is a new execution feature — it is the shipped
+# `entry_filters` grammar with a form in front of it.
 _TF = "15m"
 
+OP_WORDS = {
+    "lt": "is below", "lte": "is at or below",
+    "gt": "is above", "gte": "is at or above",
+    "eq": "is", "ne": "is not",
+    "is_true": "is there", "is_false": "is not there",
+    "between": "is between", "outside": "is outside",
+}
+BOOL_OPS = ("is_true", "is_false")
 
-def _indicator(id_, field, op, value, timeframe=_TF):
-    return {"type": "indicator", "id": id_, "timeframe": timeframe,
-            "field": field, "op": op, "value": value}
+
+def _label(indicator_id: str) -> str:
+    """The registry's own display name, so the sentence the operator reads back
+    matches the one they built."""
+    try:
+        from beacon_core.ta import registry as TA
+        for spec in TA.catalog()["indicators"]:
+            if spec["id"] == indicator_id:
+                return spec["label"]
+    except Exception:                            # never break a report on a label
+        pass
+    return str(indicator_id)
 
 
-def filter_rule(f: dict) -> Optional[dict]:
-    """One what-if filter -> one `entry_filters` rule, or None if it is a
-    geometry filter this module applies itself (see `geometry_skip`)."""
-    kind = f.get("kind")
-    if kind == "rsi_below":
-        # We want to SKIP when RSI is at or above the ceiling, so the rule fires
-        # on the complement of the condition the operator described.
-        return {"enabled": True, "mode": "live", "action": "skip",
-                "name": f"RSI at or above {f.get('value')}",
-                "when": _indicator("rsi", "value", "gte", f.get("value"))}
-    if kind == "rsi_above":
-        return {"enabled": True, "mode": "live", "action": "skip",
-                "name": f"RSI at or below {f.get('value')}",
-                "when": _indicator("rsi", "value", "lte", f.get("value"))}
-    if kind == "only_trending":
-        return {"enabled": True, "mode": "live", "action": "skip",
-                "name": "market not trending",
-                "when": {"type": "adx_regime", "timeframe": "4h", "trending": False}}
-    if kind == "only_ranging":
-        return {"enabled": True, "mode": "live", "action": "skip",
-                "name": "market trending",
-                "when": {"type": "adx_regime", "timeframe": "4h", "trending": True}}
-    if kind == "skip_session":
-        return {"enabled": True, "mode": "live", "action": "skip",
-                "name": "in " + ", ".join(f.get("sessions") or []),
-                "when": {"type": "session_in", "sessions": f.get("sessions") or []}}
+def keep_leaf(c: dict) -> Optional[dict]:
+    """One operator condition -> one engine condition leaf.
+
+    These are KEEP conditions ("only trade when..."), not skip rules. They are
+    composed into a single `not(all(...))` skip in `entry_rules`, which is what
+    makes an arbitrary number of them behave: Kleene's `not UNKNOWN` is UNKNOWN,
+    so a condition whose indicator could not be computed still fails OPEN and
+    the signal is taken. A per-condition skip rule would have to invert each
+    operator by hand, and inverting `between` or a boolean field is exactly the
+    kind of thing that silently filters the wrong half of the book."""
+    kind = c.get("kind")
+    if kind == "indicator":
+        if not c.get("id") or not c.get("op"):
+            return None
+        leaf = {"type": "indicator", "id": c["id"],
+                "timeframe": c.get("timeframe") or _TF,
+                "field": c.get("field") or "value", "op": c["op"]}
+        if c.get("ref"):
+            leaf["ref"] = c["ref"]               # compare against price, or another band
+        elif c["op"] not in BOOL_OPS:
+            leaf["value"] = c.get("value")
+        return leaf
+    if kind == "session":
+        return {"type": "session_in", "sessions": c.get("sessions") or []}
+    if kind == "regime":
+        return {"type": "adx_regime", "timeframe": c.get("timeframe") or "4h",
+                "trending": bool(c.get("trending", True))}
     return None
+
+
+def describe_leaf(c: dict) -> str:
+    kind = c.get("kind")
+    if kind == "session":
+        return "it is " + (" or ".join(c.get("sessions") or []) or "any session")
+    if kind == "regime":
+        return ("the market is trending" if c.get("trending", True)
+                else "the market is ranging")
+    if kind != "indicator":
+        return str(kind)
+    what = _label(c.get("id"))
+    field = c.get("field") or "value"
+    if field not in ("value", "present"):
+        what += " " + field.replace("_", " ")
+    op = OP_WORDS.get(c.get("op"), c.get("op") or "")
+    tf = c.get("timeframe") or _TF
+    if c.get("op") in BOOL_OPS:
+        return f"{what} {op} on {tf}"
+    if c.get("ref") == "price":
+        return f"{what} {op} the price on {tf}"
+    v = c.get("value")
+    if isinstance(v, (list, tuple)):
+        v = " and ".join(str(x) for x in v)
+    return f"{what} on {tf} {op} {v}"
+
+
+# The presets are the same grammar with the values filled in — one click for the
+# question that gets asked most, not a second code path.
+PRESETS = {
+    "rsi_below": lambda f: {"kind": "indicator", "id": "rsi", "field": "value",
+                            "op": "lt", "value": f.get("value"),
+                            "timeframe": f.get("timeframe") or _TF},
+    "rsi_above": lambda f: {"kind": "indicator", "id": "rsi", "field": "value",
+                            "op": "gt", "value": f.get("value"),
+                            "timeframe": f.get("timeframe") or _TF},
+    "only_trending": lambda f: {"kind": "regime", "trending": True},
+    "only_ranging": lambda f: {"kind": "regime", "trending": False},
+    "in_fvg": lambda f: {"kind": "indicator", "id": "fvg", "field": "present",
+                         "op": "is_true", "timeframe": f.get("timeframe") or _TF},
+    "at_order_block": lambda f: {"kind": "indicator", "id": "order_block",
+                                 "field": "dist_pct", "op": "lte",
+                                 "value": f.get("value", 0.5),
+                                 "timeframe": f.get("timeframe") or _TF},
+}
+
+
+def preset_leaf(f: dict) -> Optional[dict]:
+    """A named preset -> the same operator condition a hand-built one produces.
+
+    `skip_session` is the one inversion: it is stated as a skip, so it becomes
+    "only trade when it is NOT one of these"."""
+    kind = f.get("kind")
+    if kind == "skip_session":
+        return {"kind": "not_session", "sessions": f.get("sessions") or []}
+    fn = PRESETS.get(kind)
+    return fn(f) if fn else None
+
+
+def _leaf_of(c: dict) -> Optional[dict]:
+    """Operator condition -> engine leaf, including the negated session case."""
+    if c.get("kind") == "not_session":
+        inner = {"type": "session_in", "sessions": c.get("sessions") or []}
+        return {"not": inner}
+    return keep_leaf(c)
+
+
+def conditions_of(changes: dict) -> List[dict]:
+    """Every "only trade when" condition the operator stated, presets and
+    free-form together, in the order they authored them."""
+    out = []
+    for f in (changes.get("filters") or []):
+        if f.get("kind") in GEOMETRY_KINDS:
+            continue                             # applied on the signal set instead
+        leaf = preset_leaf(f)
+        if leaf:
+            out.append(leaf)
+    for c in (changes.get("conditions") or []):
+        if keep_leaf(c) is not None or c.get("kind") == "not_session":
+            out.append(c)
+    return out
+
+
+def entry_rules(changes: dict) -> List[dict]:
+    """Every condition folded into ONE skip rule on the negation of all of them.
+
+    `mode: live` so it actually skips in the simulation — this is a
+    counterfactual, not a shadow."""
+    leaves = [_leaf_of(c) for c in conditions_of(changes)]
+    leaves = [x for x in leaves if x]
+    if not leaves:
+        return []
+    return [{"enabled": True, "mode": "live", "action": "skip",
+             "name": "does not meet the what-if entry conditions",
+             "when": {"not": {"all": leaves}}}]
+
+
+# --- exit: any ladder the engine can run --------------------------------------
+# `strategy/rules.py` fires on three triggers and moves the stop to four targets.
+# All of them are offered; nothing here extends the engine.
+def trigger_of(t: dict) -> Optional[dict]:
+    kind = (t or {}).get("kind")
+    if kind == "tp":
+        return {"type": "tp_hit", "index": int(t.get("index") or 1)}
+    if kind == "points":
+        return {"type": "price_move", "points": float(t.get("points") or 0)}
+    if kind == "r":
+        return {"type": "be_lock_at_r", "r": float(t.get("r") or 1.0)}
+    return None
+
+
+def action_of(a: dict) -> Optional[dict]:
+    kind = (a or {}).get("kind")
+    if kind == "breakeven":
+        return {"type": "move_sl_to", "target": "entry"}
+    if kind == "previous_tp":
+        return {"type": "move_sl_to", "target": "previous_tp"}
+    if kind == "tp":
+        return {"type": "move_sl_to", "target": "tp", "index": int(a.get("index") or 1)}
+    return None
+
+
+def step_rule(step: dict) -> Optional[dict]:
+    """One operator step -> one engine sl_rule, or None if it could never fire.
+
+    `previous_tp` is resolved from the TRIGGER's index (`rules.py::_target_sl`),
+    so pairing it with a price or R trigger yields a rule that evaluates to no
+    target and silently does nothing. Refused here rather than shipped."""
+    trig, act = trigger_of(step.get("when")), action_of(step.get("then"))
+    if not trig or not act:
+        return None
+    if act.get("target") == "previous_tp" and trig["type"] != "tp_hit":
+        return None
+    return {"trigger": trig, "action": act}
+
+
+def describe_step(step: dict) -> str:
+    t, a = step.get("when") or {}, step.get("then") or {}
+    when = ("TP" + str(t.get("index") or 1) + " is hit" if t.get("kind") == "tp"
+            else f"price moves {t.get('points')} in our favour" if t.get("kind") == "points"
+            else f"profit reaches {t.get('r')}R" if t.get("kind") == "r"
+            else "?")
+    then = ("breakeven" if a.get("kind") == "breakeven"
+            else "the previous target" if a.get("kind") == "previous_tp"
+            else "TP" + str(a.get("index") or 1) if a.get("kind") == "tp"
+            else "?")
+    return f"when {when}, move the stop to {then}"
+
+
+def exit_ladder(changes: dict) -> Optional[List[dict]]:
+    """The what-if arm's `sl_rules`, or None to leave the live ones alone.
+
+    An EMPTY list would read as UNSET and cascade to the DEFAULT ladder, so
+    "never move the stop" cannot be expressed as `[]` — it is a rule whose
+    trigger can never fire."""
+    steps = changes.get("exit_steps")
+    if isinstance(steps, list) and steps:
+        rules = [r for r in (step_rule(s) for s in steps) if r]
+        return rules or None
+    return EXITS.get(changes.get("exit"))
 
 
 # Filters the live filtration engine has no `when.type` for, so the harness has
@@ -124,19 +305,22 @@ def geometry_skip(f: dict, signal, atr_abs) -> bool:
 def describe(changes: dict) -> str:
     """The change, in one human phrase. Used as the what-if column header and in
     the verdict, so the reader never has to decode a config to know what was
-    tested."""
+    tested — and with a free-form builder in front of it, that is the only thing
+    standing between the operator and a column headed with a JSON blob."""
     bits = []
+    conds = conditions_of(changes)
+    if conds:
+        parts = [("it is not " + (" or ".join(c.get("sessions") or []))
+                  if c.get("kind") == "not_session" else describe_leaf(c))
+                 for c in conds]
+        bits.append("only trade when " + " and ".join(parts))
     for f in (changes.get("filters") or []):
-        k, v = f.get("kind"), f.get("value")
-        bits.append({
-            "rsi_below": f"only take signals with RSI below {v}",
-            "rsi_above": f"only take signals with RSI above {v}",
-            "only_trending": "only trade when the market is trending",
-            "only_ranging": "only trade when the market is ranging",
-            "skip_session": "skip " + ", ".join(f.get("sessions") or []),
-            "min_stop_atr": f"skip signals whose stop is under {v}x ATR",
-        }.get(k, str(k)))
-    if changes.get("exit") in EXIT_LABELS:
+        if f.get("kind") in GEOMETRY_KINDS:
+            bits.append(f"skip signals whose stop is under {f.get('value')}x ATR")
+    steps = changes.get("exit_steps")
+    if isinstance(steps, list) and steps:
+        bits.append(" then ".join(describe_step(s) for s in steps))
+    elif changes.get("exit") in EXIT_LABELS:
         bits.append(EXIT_LABELS[changes["exit"]])
     if changes.get("risk_percent"):
         bits.append(f"risk {changes['risk_percent']}% per trade")
@@ -148,9 +332,8 @@ def describe(changes: dict) -> str:
 def apply_changes(variant: dict, changes: dict) -> dict:
     """A live variant + the operator's change = the what-if arm."""
     v = copy.deepcopy(variant)
-    rules = [r for r in (filter_rule(f) for f in (changes.get("filters") or []))
-             if r]
-    exit_rules = EXITS.get(changes.get("exit"))
+    rules = entry_rules(changes)
+    exit_rules = exit_ladder(changes)
     for st in v.get("strategies", []):
         base = st.get("account_id") is None and st.get("source_id") is None
         if rules:
@@ -347,10 +530,29 @@ def bulk_ingest_caveats(signals, changes: dict) -> List[str]:
     return out
 
 
-# The TP index each named exit ratchets on. A ratchet at TP N only protects
-# something if a leg is still open AFTER TP N closes — i.e. the signal posted
-# more than N targets.
+# A ratchet at TP N only protects something if a leg is still open AFTER TP N
+# closes — i.e. the signal posted more than N targets.
 EXIT_TRIGGER = {"be_at_tp1": 1, "be_at_tp2": 2}
+
+
+def _needs_ladder_depth(changes: dict) -> Optional[int]:
+    """The shallowest ladder depth this exit needs to do anything, or None when
+    the question does not arise.
+
+    None for a price or R trigger — those fire on excursion and do not care how
+    many targets the channel posted — and None for `let_it_run`, whose trigger is
+    unreachable ON PURPOSE. Anything else reports the smallest TP index it
+    ratchets on, because that is the first step that could fire."""
+    steps = changes.get("exit_steps")
+    if isinstance(steps, list) and steps:
+        idxs = []
+        for s in steps:
+            t = s.get("when") or {}
+            if t.get("kind") != "tp":
+                return None          # something in the ladder fires without TPs
+            idxs.append(int(t.get("index") or 1))
+        return min(idxs) if idxs else None
+    return EXIT_TRIGGER.get(changes.get("exit"))
 
 
 def exit_reach_caveat(signals, changes: dict) -> Optional[str]:
@@ -364,7 +566,7 @@ def exit_reach_caveat(signals, changes: dict) -> Optional[str]:
     A change that cannot fire is the silent-no-op failure this module exists to
     refuse: nothing errors, the numbers move for a different reason, and the
     operator acts on an attribution that is wrong."""
-    idx = EXIT_TRIGGER.get(changes.get("exit"))
+    idx = _needs_ladder_depth(changes)
     if not idx:
         return None
     depths = []
@@ -378,7 +580,10 @@ def exit_reach_caveat(signals, changes: dict) -> Optional[str]:
     unreachable = sum(1 for d in depths if d <= idx)
     if unreachable < 0.9 * len(depths):
         return None
-    label = EXIT_LABELS.get(changes["exit"], changes["exit"])
+    steps = changes.get("exit_steps")
+    label = (" then ".join(describe_step(s) for s in steps)
+             if isinstance(steps, list) and steps
+             else EXIT_LABELS.get(changes.get("exit"), changes.get("exit")))
     every = ("Every one of these" if unreachable == len(depths)
              else f"{unreachable} of these")
     target = "target" if idx == 1 else "targets"

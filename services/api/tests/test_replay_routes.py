@@ -110,6 +110,70 @@ def test_a_whatif_is_validated_on_its_question_not_on_a_variants_list():
         assert needle in str(exc.value.detail)
 
 
+def test_a_free_form_entry_condition_is_accepted():
+    """The operator asked not to be limited to a fixed menu, so ANY registry
+    indicator is allowed — 45 of them, FVG and order blocks included. The bound
+    is on how many conditions, never on which."""
+    for cond in ({"kind": "indicator", "id": "fvg", "field": "present",
+                  "op": "is_true", "timeframe": "15m"},
+                 {"kind": "indicator", "id": "order_block", "field": "dist_pct",
+                  "op": "lte", "value": 0.5},
+                 {"kind": "session", "sessions": ["London"]},
+                 {"kind": "not_session", "sessions": ["New York"]},
+                 {"kind": "regime", "trending": False}):
+        R._check_whatif({"mode": "whatif", "scope": {"type": "manual"},
+                         "changes": {"conditions": [cond]}})
+
+
+def test_a_condition_the_worker_cannot_resolve_is_refused():
+    """An unknown kind, or an indicator with no operator, resolves to nothing —
+    the arm would run unfiltered and the report would call it a filtered run."""
+    for bad, needle in (({"kind": "vibes"}, "condition.kind"),
+                        ({"kind": "indicator", "id": "rsi"}, "op"),
+                        ({"kind": "indicator", "op": "lt"}, "id")):
+        with pytest.raises(HTTPException) as exc:
+            R._check_whatif({"mode": "whatif", "scope": {"type": "manual"},
+                             "changes": {"conditions": [bad]}})
+        assert exc.value.status_code == 400 and needle in str(exc.value.detail)
+
+
+def test_a_free_form_exit_ladder_is_accepted():
+    R._check_whatif({"mode": "whatif", "scope": {"type": "manual"},
+                     "changes": {"exit_steps": [
+                         {"when": {"kind": "points", "points": 30},
+                          "then": {"kind": "breakeven"}},
+                         {"when": {"kind": "tp", "index": 2},
+                          "then": {"kind": "previous_tp"}},
+                         {"when": {"kind": "r", "r": 1.5},
+                          "then": {"kind": "tp", "index": 1}}]}})
+
+
+def test_previous_target_is_refused_on_a_trigger_that_has_no_target():
+    """The engine reads `previous_tp` off the TP that fired, so on a price or R
+    trigger the step resolves to no target and silently does nothing. Caught at
+    the door rather than shipped as a run that reports "no difference"."""
+    with pytest.raises(HTTPException) as exc:
+        R._check_whatif({"mode": "whatif", "scope": {"type": "manual"},
+                         "changes": {"exit_steps": [
+                             {"when": {"kind": "r", "r": 1.0},
+                              "then": {"kind": "previous_tp"}}]}})
+    assert exc.value.status_code == 400
+    assert "previous target" in str(exc.value.detail)
+
+
+def test_the_builder_is_bounded_so_one_request_cannot_own_the_worker():
+    """A run is minutes of the worker's ONLY thread."""
+    many = [{"kind": "regime", "trending": True}] * (R.MAX_CONDITIONS + 1)
+    with pytest.raises(HTTPException):
+        R._check_whatif({"mode": "whatif", "scope": {"type": "manual"},
+                         "changes": {"conditions": many}})
+    steps = [{"when": {"kind": "tp", "index": 1}, "then": {"kind": "breakeven"}}] \
+        * (R.MAX_EXIT_STEPS + 1)
+    with pytest.raises(HTTPException):
+        R._check_whatif({"mode": "whatif", "scope": {"type": "manual"},
+                         "changes": {"exit_steps": steps}})
+
+
 def test_a_whatif_scope_of_manual_needs_no_id():
     """"Everything" is a real scope — the whole book is the baseline."""
     R._check_whatif({"mode": "whatif", "scope": {"type": "manual"},

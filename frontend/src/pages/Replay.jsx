@@ -35,25 +35,46 @@ const TRAVEL_LABEL = {
   unknown: "unknown",
 };
 
-const FILTERS = [
-  { kind: "rsi_below", label: "Only take signals with RSI below", value: 70, num: true },
-  { kind: "rsi_above", label: "Only take signals with RSI above", value: 30, num: true },
-  { kind: "min_stop_atr", label: "Skip signals whose stop is under N× ATR", value: 1.0, num: true },
-  { kind: "only_trending", label: "Only trade when the market is trending" },
-  { kind: "only_ranging", label: "Only trade when the market is ranging" },
-  { kind: "skip_session", label: "Skip a session", sessions: ["New York"] },
+// One-click starting points. Each one just drops a row into the same builder
+// the operator would have filled in by hand — a shortcut, never a second path.
+const QUICK = [
+  { label: "RSI", cond: { kind: "indicator", id: "rsi", field: "value", op: "lt", value: 60, timeframe: "15m" } },
+  { label: "Fair value gap", cond: { kind: "indicator", id: "fvg", field: "present", op: "is_true", timeframe: "15m" } },
+  { label: "Order block", cond: { kind: "indicator", id: "order_block", field: "dist_pct", op: "lte", value: 0.5, timeframe: "15m" } },
+  { label: "Trending", cond: { kind: "regime", trending: true, timeframe: "4h" } },
+  { label: "Session", cond: { kind: "session", sessions: ["London"] } },
 ];
 
-const EXITS = [
-  { v: "", label: "leave the exit as it is" },
-  { v: "be_at_tp1", label: "move stop to breakeven at TP1" },
-  { v: "be_at_tp2", label: "move stop to breakeven at TP2" },
-  { v: "let_it_run", label: "never move the stop" },
+const OPS = [
+  { v: "lt", label: "is below" }, { v: "lte", label: "is at or below" },
+  { v: "gt", label: "is above" }, { v: "gte", label: "is at or above" },
+  { v: "eq", label: "is" }, { v: "ne", label: "is not" },
+  { v: "is_true", label: "is there" }, { v: "is_false", label: "is not there" },
+];
+const BOOL_OPS = ["is_true", "is_false"];
+const SESSIONS = ["Asian (Tokyo)", "London", "New York"];
+
+// Exits: the three triggers and four targets `strategy/rules.py` already runs.
+const TRIGGERS = [
+  { v: "tp", label: "a target is hit" },
+  { v: "points", label: "price moves (in price)" },
+  { v: "r", label: "profit reaches (xR)" },
+];
+const ACTIONS = [
+  { v: "breakeven", label: "breakeven" },
+  { v: "previous_tp", label: "the previous target" },
+  { v: "tp", label: "a target" },
+];
+const EXIT_MODES = [
+  { v: "", label: "Leave it as it is" },
+  { v: "let_it_run", label: "Never move the stop" },
+  { v: "custom", label: "Build my own" },
 ];
 
 export default function Replay() {
   const [sources, setSources] = useState([]);
   const [accounts, setAccounts] = useState([]);
+  const [catalog, setCatalog] = useState(null);
   const [jobs, setJobs] = useState([]);
   const [runs, setRuns] = useState([]);
   const [openRun, setOpenRun] = useState(null);
@@ -64,6 +85,9 @@ export default function Replay() {
   useEffect(() => {
     api.sources().then(setSources).catch(() => {});
     api.accounts().then(setAccounts).catch(() => {});
+    // The indicator list IS the TA registry, so the builder offers exactly what
+    // the engine can compute — no hand-kept menu to drift out of sync.
+    api.taCatalog().then(setCatalog).catch(() => {});
   }, []);
 
   // Self-scheduling poll rather than a fixed interval: a run takes minutes, so
@@ -98,7 +122,7 @@ export default function Replay() {
 
   return (
     <div className="space-y-4">
-      <NewBacktest sources={sources} accounts={accounts}
+      <NewBacktest sources={sources} accounts={accounts} catalog={catalog}
         onQueued={() => setRefresh(n => n + 1)} />
       {err && <ErrorNote>{err}</ErrorNote>}
       <History jobs={jobs} runs={runs} openRun={openRun} onOpen={setOpenRun} />
@@ -108,34 +132,33 @@ export default function Replay() {
 }
 
 // --- step 1-4: the form -------------------------------------------------------
-function NewBacktest({ sources, accounts, onQueued }) {
+function NewBacktest({ sources, accounts, catalog, onQueued }) {
   const [scopeType, setScopeType] = useState("source");
   const [sourceId, setSourceId] = useState("");
   const [accountId, setAccountId] = useState("");
   const [from, setFrom] = useState("2026-07-05");
   const [to, setTo] = useState("2026-07-30");
-  const [picked, setPicked] = useState({});          // kind -> value
-  const [exit, setExit] = useState("");
+  const [conds, setConds] = useState([]);            // free-form entry conditions
+  const [atr, setAtr] = useState("");                // the one non-indicator filter
+  const [exitMode, setExitMode] = useState("");
+  const [steps, setSteps] = useState([]);            // free-form exit ladder
   const [risk, setRisk] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
   const [err, setErr] = useState(null);
 
-  const toggle = (f) => setPicked(p => {
-    const n = { ...p };
-    if (f.kind in n) delete n[f.kind];
-    else n[f.kind] = f.value ?? true;
-    return n;
-  });
+  const setCond = (i, patch) =>
+    setConds(cs => cs.map((c, j) => (j === i ? { ...c, ...patch } : c)));
+  const setStep = (i, patch) =>
+    setSteps(ss => ss.map((s, j) => (j === i ? { ...s, ...patch } : s)));
 
   const run = async () => {
     setBusy(true); setMsg(null); setErr(null);
     try {
-      const filters = Object.entries(picked).map(([kind, value]) => {
-        const def = FILTERS.find(f => f.kind === kind);
-        if (kind === "skip_session") return { kind, sessions: def.sessions };
-        return def?.num ? { kind, value: Number(value) } : { kind };
-      });
+      // Stop distance has no `when.type` in the live filtration grammar, so it
+      // stays a named preset the worker applies on the signal set itself.
+      const filters = atr
+        ? [{ kind: "min_stop_atr", value: Number(atr) }] : [];
       const scope = scopeType === "source" ? { type: "source", source_id: sourceId }
         : scopeType === "account" ? { type: "account", account_id: accountId }
         : { type: "manual" };
@@ -148,7 +171,9 @@ function NewBacktest({ sources, accounts, onQueued }) {
         to: to ? `${to}T23:59:59Z` : undefined,
         changes: {
           filters,
-          exit: exit || undefined,
+          conditions: conds.length ? conds : undefined,
+          exit: exitMode === "let_it_run" ? "let_it_run" : undefined,
+          exit_steps: exitMode === "custom" && steps.length ? steps : undefined,
           risk_percent: risk ? Number(risk) : undefined,
         },
         // No variants list: the browser names the question, the worker builds
@@ -168,7 +193,8 @@ function NewBacktest({ sources, accounts, onQueued }) {
 
   const ready = scopeType === "manual" ||
     (scopeType === "source" && sourceId) || (scopeType === "account" && accountId);
-  const nothingChanged = !Object.keys(picked).length && !exit && !risk;
+  const nothingChanged = !conds.length && !atr && !risk &&
+    !(exitMode === "let_it_run" || (exitMode === "custom" && steps.length));
 
   return (
     <Card>
@@ -212,31 +238,72 @@ function NewBacktest({ sources, accounts, onQueued }) {
           </div>
         </Step>
 
-        <Step n="3" title="What would we do differently?">
+        <Step n="3" title="Only take the trade when…">
           <div className="space-y-2">
-            {FILTERS.map(f => (
-              <label key={f.kind} className="flex items-center gap-2 text-sm">
-                <input type="checkbox" checked={f.kind in picked}
-                  onChange={() => toggle(f)} className="accent-beacon" />
-                <span>{f.label}</span>
-                {f.num && f.kind in picked && (
-                  <input type="number" step="0.1" value={picked[f.kind]}
-                    onChange={e => setPicked(p => ({ ...p, [f.kind]: e.target.value }))}
-                    className="w-20 bg-panel2 border border-edge rounded px-2 py-0.5 num text-xs" />
-                )}
-              </label>
+            {conds.map((c, i) => (
+              <ConditionRow key={i} c={c} catalog={catalog}
+                onChange={p => setCond(i, p)}
+                onRemove={() => setConds(cs => cs.filter((_, j) => j !== i))} />
             ))}
-            <div className="flex flex-wrap gap-3 pt-1">
-              <Field label="Exit">
-                <Select value={exit} onChange={e => setExit(e.target.value)}>
-                  {EXITS.map(o => <option key={o.v} value={o.v}>{o.label}</option>)}
-                </Select>
-              </Field>
-              <Field label="Risk per trade (%)" hint="blank = leave it as it is">
-                <NumberInput value={risk} step="0.25" placeholder="unchanged"
-                  onChange={e => setRisk(e.target.value)} />
-              </Field>
+            {!conds.length && (
+              <div className="text-[11px] text-muted">
+                Nothing set — every signal is taken, exactly as today.
+              </div>
+            )}
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              <span className="text-[11px] text-muted">add:</span>
+              {QUICK.map(q => (
+                <Button key={q.label} variant="ghost"
+                  onClick={() => setConds(cs => [...cs, { ...q.cond }])}>
+                  + {q.label}</Button>
+              ))}
+              <Button variant="ghost" onClick={() => setConds(cs => [...cs,
+                { kind: "indicator", id: "rsi", field: "value", op: "lt",
+                  value: 60, timeframe: "15m" }])}>+ anything else…</Button>
             </div>
+            {conds.length > 1 && (
+              <div className="text-[11px] text-muted">All of them must hold.</div>
+            )}
+          </div>
+        </Step>
+
+        <Step n="4" title="And handle the exit like this">
+          <div className="space-y-2">
+            <div className="flex flex-wrap gap-2">
+              {EXIT_MODES.map(m => (
+                <Button key={m.v} variant={exitMode === m.v ? "primary" : "ghost"}
+                  onClick={() => setExitMode(m.v)}>{m.label}</Button>
+              ))}
+            </div>
+            {exitMode === "custom" && (
+              <div className="space-y-2">
+                {steps.map((s, i) => (
+                  <StepRow key={i} s={s} onChange={p => setStep(i, p)}
+                    onRemove={() => setSteps(ss => ss.filter((_, j) => j !== i))} />
+                ))}
+                <Button variant="ghost" onClick={() => setSteps(ss => [...ss,
+                  { when: { kind: "tp", index: 1 }, then: { kind: "breakeven" } }])}>
+                  + add a step</Button>
+                {!steps.length && (
+                  <div className="text-[11px] text-warn">
+                    Add at least one step, or nothing changes.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </Step>
+
+        <Step n="5" title="Anything else? (optional)">
+          <div className="flex flex-wrap gap-3">
+            <Field label="Skip stops tighter than" hint="× ATR · blank = keep them all">
+              <NumberInput value={atr} step="0.25" placeholder="off"
+                onChange={e => setAtr(e.target.value)} />
+            </Field>
+            <Field label="Risk per trade (%)" hint="blank = leave it as it is">
+              <NumberInput value={risk} step="0.25" placeholder="unchanged"
+                onChange={e => setRisk(e.target.value)} />
+            </Field>
           </div>
         </Step>
       </div>
@@ -251,6 +318,125 @@ function NewBacktest({ sources, accounts, onQueued }) {
         {err && <span className="text-[11px] text-short">{err}</span>}
       </div>
     </Card>
+  );
+}
+
+// One entry condition. The indicator list is the TA registry itself (45 of them,
+// FVG and order blocks included) — the page offers whatever the engine can
+// actually compute rather than a menu that has to be kept in sync by hand.
+function ConditionRow({ c, catalog, onChange, onRemove }) {
+  const inds = catalog?.indicators || [];
+  const spec = inds.find(i => i.id === c.id);
+  const fields = spec?.outputs || ["value"];
+  const tfs = catalog?.timeframes || ["15m"];
+  const boolOp = BOOL_OPS.includes(c.op);
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-sm bg-panel2/40 rounded-lg px-2 py-1.5">
+      {c.kind === "indicator" && (<>
+        <Select value={c.id} onChange={e => {
+          const s = inds.find(i => i.id === e.target.value);
+          // Field names differ per indicator, so a stale one would silently read
+          // as missing and the condition would never hold.
+          onChange({ id: e.target.value, field: (s?.outputs || ["value"])[0] });
+        }}>
+          {inds.map(i => <option key={i.id} value={i.id}>{i.label}</option>)}
+        </Select>
+        {fields.length > 1 && (
+          <Select value={c.field} onChange={e => onChange({ field: e.target.value })}>
+            {fields.map(f => <option key={f} value={f}>{f.replace(/_/g, " ")}</option>)}
+          </Select>
+        )}
+        <Select value={c.timeframe} onChange={e => onChange({ timeframe: e.target.value })}>
+          {tfs.map(t => <option key={t} value={t}>{t}</option>)}
+        </Select>
+        <Select value={c.op} onChange={e => onChange({ op: e.target.value })}>
+          {OPS.map(o => <option key={o.v} value={o.v}>{o.label}</option>)}
+        </Select>
+        {!boolOp && (
+          <input type="number" step="any" value={c.value ?? ""}
+            onChange={e => onChange({ value: e.target.value === "" ? "" : Number(e.target.value) })}
+            className="w-24 bg-panel border border-edge rounded px-2 py-1 num text-xs" />
+        )}
+      </>)}
+
+      {(c.kind === "session" || c.kind === "not_session") && (<>
+        <Select value={c.kind}
+          onChange={e => onChange({ kind: e.target.value })}>
+          <option value="session">it is</option>
+          <option value="not_session">it is not</option>
+        </Select>
+        <Select value={(c.sessions || [])[0] || ""}
+          onChange={e => onChange({ sessions: [e.target.value] })}>
+          {SESSIONS.map(s => <option key={s} value={s}>{s}</option>)}
+        </Select>
+      </>)}
+
+      {c.kind === "regime" && (<>
+        <span className="text-muted text-xs">the market is</span>
+        <Select value={c.trending ? "1" : "0"}
+          onChange={e => onChange({ trending: e.target.value === "1" })}>
+          <option value="1">trending</option>
+          <option value="0">ranging</option>
+        </Select>
+        <Select value={c.timeframe || "4h"}
+          onChange={e => onChange({ timeframe: e.target.value })}>
+          {tfs.map(t => <option key={t} value={t}>{t}</option>)}
+        </Select>
+      </>)}
+
+      <Button variant="danger" onClick={onRemove}>remove</Button>
+    </div>
+  );
+}
+
+// One exit step. `previous target` is only offered on a TP trigger because the
+// engine reads that target off the TP that fired — on a price or R trigger it
+// resolves to nothing and the step silently does nothing.
+function StepRow({ s, onChange, onRemove }) {
+  const t = s.when || {}, a = s.then || {};
+  const setWhen = (p) => onChange({ when: { ...t, ...p } });
+  const setThen = (p) => onChange({ then: { ...a, ...p } });
+  const actions = t.kind === "tp" ? ACTIONS : ACTIONS.filter(x => x.v !== "previous_tp");
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-sm bg-panel2/40 rounded-lg px-2 py-1.5">
+      <span className="text-muted text-xs">when</span>
+      <Select value={t.kind} onChange={e => {
+        const kind = e.target.value;
+        setWhen({ kind });
+        if (kind !== "tp" && a.kind === "previous_tp") setThen({ kind: "breakeven" });
+      }}>
+        {TRIGGERS.map(x => <option key={x.v} value={x.v}>{x.label}</option>)}
+      </Select>
+      {t.kind === "tp" && (
+        <Select value={t.index || 1}
+          onChange={e => setWhen({ index: Number(e.target.value) })}>
+          {[1, 2, 3, 4, 5].map(i => <option key={i} value={i}>TP{i}</option>)}
+        </Select>
+      )}
+      {t.kind === "points" && (
+        <input type="number" step="any" value={t.points ?? 30}
+          onChange={e => setWhen({ points: Number(e.target.value) })}
+          className="w-24 bg-panel border border-edge rounded px-2 py-1 num text-xs" />
+      )}
+      {t.kind === "r" && (
+        <input type="number" step="0.1" value={t.r ?? 1}
+          onChange={e => setWhen({ r: Number(e.target.value) })}
+          className="w-24 bg-panel border border-edge rounded px-2 py-1 num text-xs" />
+      )}
+      <span className="text-muted text-xs">move the stop to</span>
+      <Select value={a.kind} onChange={e => setThen({ kind: e.target.value })}>
+        {actions.map(x => <option key={x.v} value={x.v}>{x.label}</option>)}
+      </Select>
+      {a.kind === "tp" && (
+        <Select value={a.index || 1}
+          onChange={e => setThen({ index: Number(e.target.value) })}>
+          {[1, 2, 3, 4, 5].map(i => <option key={i} value={i}>TP{i}</option>)}
+        </Select>
+      )}
+      <Button variant="danger" onClick={onRemove}>remove</Button>
+    </div>
   );
 }
 
