@@ -663,12 +663,21 @@ def verdict(base: dict, alt: dict, changes: dict) -> dict:
         head = "No difference."
 
     parts = [head]
-    if removed > 0:
-        parts.append(f"The change skipped {removed} signal(s) you took before.")
-        if lost_winners:
-            parts.append(f"{lost_winners} of them were winners.")
-    elif removed < 0:
-        parts.append(f"It took {abs(removed)} signal(s) you skipped before.")
+    # STATED AS NET COUNTS, not as attribution. The what-if REPLACES the filters
+    # you run today rather than adding to them, so the two arms turn away
+    # different SETS of signals — measured on GOLD VIP: today's filters skip 31,
+    # the what-if's conditions skip 39, and the net of 8 described neither. The
+    # old wording ("it skipped 8 signals you took before, 22 of them winners")
+    # invented an attribution the numbers cannot support.
+    if alt["executed"] != base["executed"]:
+        parts.append(f"It traded {alt['executed']} signals instead of "
+                     f"{base['executed']}.")
+    gained_w = alt["wins"] - base["wins"]
+    gained_l = alt["losses"] - base["losses"]
+    if gained_w or gained_l:
+        parts.append(
+            f"Wins go {base['wins']} to {alt['wins']}, "
+            f"losses {base['losses']} to {alt['losses']}.")
     if base["executed"] and alt["executed"] == 0:
         parts.append("It skipped EVERYTHING — the filter is too strict to test.")
     elif stated and not alt["skipped_by_rule"]:
@@ -719,6 +728,17 @@ def report(base_res, alt_res, *, changes: dict, scope_label: str,
     base = summarise(base_res, label="Your setup now")
     alt = summarise(alt_res, label="What-if: " + describe(changes))
     caveats = bulk_ingest_caveats(signals, changes)
+    # REPLACES, does not add. Measured on GOLD VIP: the live config already turns
+    # away 31 signals, and the what-if arm turns away a DIFFERENT 39 — so the two
+    # columns are not "before and after adding a filter", and a reader who
+    # assumes they are will misread every row.
+    if conditions_of(changes) and base["skipped_by_rule"]:
+        caveats.append(
+            f"Your conditions REPLACE the entry filters you run today, they do "
+            f"not stack on them. Today's filters turn away "
+            f"{base['skipped_by_rule']} of these signals; the what-if column "
+            f"turns away {alt['skipped_by_rule']} — a different set, not a "
+            "bigger one.")
     reach = exit_reach_caveat(signals, changes)
     if reach:
         caveats.insert(0, reach)      # it changes what the numbers MEAN

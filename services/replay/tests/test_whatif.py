@@ -459,9 +459,9 @@ def test_a_geometry_skip_is_counted_as_a_rule_skip_not_as_an_error():
 
 
 # --- the verdict --------------------------------------------------------------
-def _sum(profit, *, wins=5, by_rule=0, executed=20):
-    return {"profit": profit, "wins": wins, "skipped_by_rule": by_rule,
-            "executed": executed}
+def _sum(profit, *, wins=5, losses=5, by_rule=0, executed=20):
+    return {"profit": profit, "wins": wins, "losses": losses,
+            "skipped_by_rule": by_rule, "executed": executed}
 
 
 def test_the_verdict_says_better_or_worse_in_money():
@@ -469,8 +469,10 @@ def test_the_verdict_says_better_or_worse_in_money():
                   {"filters": [{"kind": "rsi_below", "value": 70}]})
     assert v["better"] is True and v["delta"] == 3238
     assert "3,238" in v["headline"] and "Better" in v["headline"]
-    assert "26 signal" in v["headline"]
-    assert "4 of them were winners" in v["headline"]
+    # NET counts, never attribution: the what-if REPLACES the live filters
+    # rather than adding to them, so the two arms turn away different SETS.
+    assert "traded 20 signals instead of 20" not in v["headline"]
+    assert "Wins go 5 to 1" in v["headline"]
     assert v["change"] == "only trade when RSI on 15m is below 70"
 
 
