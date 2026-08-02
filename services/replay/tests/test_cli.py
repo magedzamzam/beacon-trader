@@ -258,3 +258,33 @@ def test_the_builders_vocabulary_matches_the_one_the_api_accepts():
         assert W.trigger_of({"kind": k, "index": 1, "points": 1, "r": 1})
     for k in api_act:
         assert W.action_of({"kind": k, "index": 1})
+
+
+def test_the_trade_list_asks_for_arms_the_worker_actually_writes():
+    """The drill-down filters `replay_results` by variant name. The worker names
+    the two arms when it stores them, and a page asking for "control" or "alt"
+    would get an empty list and read as "no rows stored for this run" — a wrong
+    answer that looks like missing data rather than a typo."""
+    import re
+
+    main_src = (SERVICE_ROOT / "main.py").read_text(encoding="utf-8")
+    written = set(re.findall(r'"(baseline|whatif)":\s*\w+_res', main_src))
+    assert written == {"baseline", "whatif"}, written
+
+    page = (SERVICE_ROOT.parents[1] / "frontend/src/pages/Replay.jsx").read_text(
+        encoding="utf-8")
+    block = page.split("function Trades(", 1)[1]
+    asked = set(re.findall(r'\["(baseline|whatif)",', block))
+    assert asked == written, (asked, written)
+
+
+def test_the_trade_list_never_shows_leg_level_money():
+    """Trade-level P&L is trustworthy; leg-level is not (CLAUDE.md 2.5). The
+    per-leg line shows prices, size and an outcome LABEL — putting money on it
+    would invite exactly the attribution the repo has ruled out."""
+    page = (SERVICE_ROOT.parents[1] / "frontend/src/pages/Replay.jsx").read_text(
+        encoding="utf-8")
+    block = page.split("function Trades(", 1)[1]
+    leg_block = block.split("row.legs.map(", 1)[1].split("</div>", 1)[0]
+    assert "l.realized_pl" not in leg_block
+    assert "l.lot" in leg_block and "l.fill_price" in leg_block

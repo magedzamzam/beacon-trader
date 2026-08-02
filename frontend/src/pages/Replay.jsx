@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { FlaskConical, ArrowRight } from "lucide-react";
+import { FlaskConical, ArrowRight, ChevronRight, ChevronDown } from "lucide-react";
 import { Card, Table, Th, Td, Badge } from "../components/ui";
 import { ErrorNote, Button, Field, Input, Select, NumberInput } from "../components/form";
 import { api } from "../lib/api";
@@ -139,7 +139,7 @@ export default function Replay() {
         onQueued={() => setRefresh(n => n + 1)} />
       {err && <ErrorNote>{err}</ErrorNote>}
       <History jobs={jobs} runs={runs} openRun={openRun} onOpen={setOpenRun} />
-      {report && <Report r={report} />}
+      {report && <Report r={report} runId={openRun} />}
     </div>
   );
 }
@@ -532,7 +532,7 @@ function Row({ label, a, b, indent, strong }) {
   );
 }
 
-function Report({ r }) {
+function Report({ r, runId }) {
   const b = r.baseline || {}, w = r.whatif || {}, v = r.verdict || {};
   const travelKeys = [...new Set([...Object.keys(b.travel || {}),
                                   ...Object.keys(w.travel || {})])];
@@ -586,7 +586,135 @@ function Report({ r }) {
       {(r.caveats || []).map((c, i) => (
         <div key={i} className="px-4 py-2 text-[11px] text-warn border-t border-edge">{c}</div>
       ))}
+      <Trades runId={runId} />
       <div className="px-4 py-2 text-[11px] text-muted border-t border-edge">{r.note}</div>
     </Card>
+  );
+}
+
+// --- the receipts -------------------------------------------------------------
+// "How do I know the engine is telling the truth?" — by looking at what it says
+// it did. Every run already stores one row per signal per arm; this just shows
+// them. Collapsed by default: it is a spot-check you open when a number looks
+// wrong, not something to read every time.
+const OUTCOME = { tp_hit: "hit", sl_hit: "stopped out", breakeven: "closed at breakeven" };
+
+// Tailwind's JIT cannot emit a class assembled by interpolation (`text-${tone}`
+// produces nothing), so every tone resolves to a literal that appears here.
+const TONE = { long: "text-long", short: "text-short", muted: "text-muted" };
+
+function tradeLine(row) {
+  if (!row.taken) return { what: `skipped — ${row.not_taken_reason || "no reason given"}`, tone: "muted" };
+  if (!row.ever_filled) return { what: "never filled", tone: "muted" };
+  const legs = row.legs || [];
+  const best = Math.max(0, ...legs.filter(l => l.outcome === "tp_hit")
+    .map(l => l.tp_index || 0));
+  if (best) return { what: `TP${best} hit`, tone: "long" };
+  if (legs.some(l => l.outcome === "sl_hit")) return { what: "stopped out", tone: "short" };
+  if (legs.some(l => l.outcome === "breakeven")) return { what: "closed at breakeven", tone: "muted" };
+  return { what: "still open at the end", tone: "muted" };
+}
+
+const lots = (row) => (row.legs || []).reduce((n, l) => n + (Number(l.lot) || 0), 0);
+const px = (v) => (v == null ? "—" : Number(v).toFixed(2));
+
+function Trades({ runId }) {
+  const [open, setOpen] = useState(false);
+  const [arm, setArm] = useState("whatif");
+  const [rows, setRows] = useState(null);
+  const [expanded, setExpanded] = useState(null);
+  const [err, setErr] = useState(null);
+
+  useEffect(() => {
+    if (!open || !runId) return;
+    setRows(null); setErr(null);
+    api.replayResults(runId, { variant: arm, limit: 500 })
+      .then(d => setRows(d.rows || []))
+      .catch(e => setErr(e.message));
+  }, [open, arm, runId]);
+
+  if (!runId) return null;
+  const taken = (rows || []).filter(r => r.taken);
+
+  return (
+    <div className="border-t border-edge">
+      <button onClick={() => setOpen(o => !o)}
+        className="w-full px-4 py-2 flex items-center gap-2 text-[11px] text-muted hover:text-ink">
+        {open ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+        Show me the trades
+      </button>
+
+      {open && (
+        <div className="px-4 pb-3 space-y-2">
+          <div className="flex gap-2">
+            {[["baseline", "Your setup now"], ["whatif", "What-if"]].map(([v, l]) => (
+              <Button key={v} variant={arm === v ? "primary" : "ghost"}
+                onClick={() => { setArm(v); setExpanded(null); }}>{l}</Button>
+            ))}
+          </div>
+          {err && <div className="text-[11px] text-short">{err}</div>}
+          {rows === null && !err && <div className="text-[11px] text-muted">loading…</div>}
+          {rows && !rows.length && <div className="text-[11px] text-muted">No rows stored for this run.</div>}
+          {rows && !!rows.length && (
+            <>
+              <div className="text-[11px] text-muted">
+                {taken.length} traded · {rows.length - taken.length} skipped
+              </div>
+              <div className="divide-y divide-edge/40 rounded-lg bg-panel2/30">
+                {rows.map(row => {
+                  const o = tradeLine(row);
+                  const isOpen = expanded === row.id;
+                  const size = lots(row);
+                  return (
+                    <div key={row.id}>
+                      <button onClick={() => setExpanded(isOpen ? null : row.id)}
+                        className="w-full px-3 py-1.5 flex items-center gap-3 text-xs row-hover text-left">
+                        <span className="num text-muted w-14 shrink-0">#{row.signal_id}</span>
+                        <span className={`w-10 shrink-0 ${row.direction === "SELL" ? "text-short" : "text-long"}`}>
+                          {row.direction || "—"}</span>
+                        <span className="num text-muted w-24 shrink-0">
+                          {String(row.signal_at || "").slice(5, 16).replace("T", " ")}</span>
+                        <span className={`flex-1 ${TONE[o.tone]}`}>{o.what}</span>
+                        {row.taken && (<>
+                          <span className={`num w-20 text-right ${row.realized_pl >= 0 ? "text-long" : "text-short"}`}>
+                            {money(row.realized_pl)}</span>
+                          <span className="num w-14 text-right text-muted">
+                            {size ? size.toFixed(2) : "—"} lots</span>
+                        </>)}
+                      </button>
+                      {isOpen && !!(row.legs || []).length && (
+                        <div className="px-3 pb-2 space-y-1">
+                          {row.legs.map((l, i) => (
+                            <div key={i} className="text-[11px] num text-muted flex flex-wrap gap-x-3 pl-14">
+                              <span>leg {i + 1}</span>
+                              <span>{l.order_type}</span>
+                              <span>{Number(l.lot || 0).toFixed(2)} lots</span>
+                              <span>in {px(l.entry)}</span>
+                              <span>filled {px(l.fill_price)}</span>
+                              <span>tp {px(l.tp)}</span>
+                              <span>sl {px(l.sl)}{l.sl_moved ? " (moved)" : ""}</span>
+                              <span>out {px(l.close_price)}</span>
+                              {/* Outcome LABEL only. Leg-level money is not
+                                  trustworthy (CLAUDE.md §2.5); the trade's P&L
+                                  on the row above is. */}
+                              <span className="text-ink">
+                                {OUTCOME[l.outcome] || l.outcome || l.status}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="text-[11px] text-muted">
+                These are the engine's own records. Pick one you remember and check
+                the prices against the chart.
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
   );
 }

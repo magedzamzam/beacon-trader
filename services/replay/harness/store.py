@@ -414,9 +414,15 @@ def result_rows(run_id: int, variant_name: str, res, *, holdout_from=None) -> Li
             "ever_filled": t.ever_filled, "horizon_capped": t.horizon_capped,
             "same_bar_ambiguous": t.same_bar_ambiguous,
             "in_sample": bool(holdout_from is None or t.signal_at < holdout_from),
+            # `lot` is what makes a stored leg checkable by hand: entry, stop and
+            # fill say WHERE the engine thought it traded, and the size says how
+            # much. It is a SIZE, not money — leg-level P&L stays out of this row
+            # on purpose (CLAUDE.md §2.5), because a money column here would
+            # invite exactly the leg-level attribution the repo has ruled out.
             "legs": [{"tp_index": l.tp_index, "tranche": l.tranche,
                       "order_type": l.order_type, "status": l.status,
                       "entry": l.entry, "tp": l.tp, "sl": l.sl,
+                      "lot": float(l.lot or 0),
                       "fill_price": l.fill_price, "close_price": l.close_price,
                       "outcome": l.outcome, "sl_moved": l.sl_moved,
                       "same_bar_ambiguous": l.same_bar_ambiguous}

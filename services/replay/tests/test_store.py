@@ -64,6 +64,23 @@ def test_leg_rows_carry_outcome_labels_but_no_money():
     assert "realized_pl" not in leg
 
 
+def test_a_leg_carries_the_size_it_was_traded_at():
+    """The operator's spot-check: entry, stop and fill say WHERE the engine
+    thought it traded, and `lot` says how much. Without it the prices can be
+    checked against a chart but the money cannot be checked against them.
+
+    A SIZE, not money — the assertion above still holds."""
+    import json
+
+    _v, res = _res()
+    leg = store.result_rows(7, "v", res)[0]["legs"][0]
+    assert "lot" in leg and leg["lot"] > 0
+    # JSON-serialisable: a Decimal here fails on the column write, and it would
+    # fail at the END of a sweep, after every simulation had already run.
+    assert isinstance(leg["lot"], float)
+    json.dumps(leg)
+
+
 def test_the_validation_extract_is_keyed_the_way_the_gate_compares():
     _v, res = _res()
     legs, trades = store.sim_legs_for_validation(res)
