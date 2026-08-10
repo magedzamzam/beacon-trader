@@ -24,7 +24,7 @@ _EMOJI = {
     "new_signal": "📡", "signal_validated": "✅", "signal_rejected": "🚫",
     "order_placed": "📤", "order_filled": "🟢", "order_cancelled": "⚪",
     "tp_hit": "🎯", "sl_hit": "🔴", "sl_moved": "🛡️", "trade_closed": "🏁",
-    "broker_error": "⚠️", "daily_summary": "📊",
+    "broker_error": "⚠️", "daily_summary": "📊", "arm_dark": "🌑",
 }
 _DIR_EMOJI = {"BUY": "🔼", "SELL": "🔽"}
 

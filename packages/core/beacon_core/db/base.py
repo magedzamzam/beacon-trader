@@ -72,6 +72,32 @@ ADDITIVE_MIGRATIONS: tuple[str, ...] = (
     "ADD COLUMN IF NOT EXISTS range_low NUMERIC(18, 6)",       # NUM = Numeric(18,6) (#113/#137)
     "ALTER TABLE market_structure "
     "ADD COLUMN IF NOT EXISTS range_high NUMERIC(18, 6)",      # ^ (#113/#137)
+    # Rule epoch on the existing execution_strategies table (#200). Both nullable
+    # with no default: NULL means "never stamped", which is the honest state for
+    # every row that predates this deploy — the API stamps a row the first time it
+    # is written, and the backfill below seeds `epoch_started_at` from the
+    # `updated_at` that is currently the only record of an epoch boundary. Filling
+    # them with now() instead would claim every live epoch started at deploy time
+    # and silently reset Arm B's accumulation, which is the exact bug.
+    "ALTER TABLE execution_strategies "
+    "ADD COLUMN IF NOT EXISTS epoch_digest VARCHAR(40)",       # String(40) (#200)
+    "ALTER TABLE execution_strategies "
+    "ADD COLUMN IF NOT EXISTS epoch_started_at TIMESTAMPTZ",   # DateTime(tz) (#200)
+)
+
+# One-off data backfills, applied on startup AFTER the ALTERs above. Kept apart
+# from ADDITIVE_MIGRATIONS because those are DDL and carry `IF NOT EXISTS`; these
+# are DML and must be self-limiting instead — each one has a WHERE clause that
+# matches nothing on a second run, so re-running a backfill is a no-op rather
+# than an overwrite. `test_backfills_are_self_limiting` pins that.
+STARTUP_BACKFILLS: tuple[str, ...] = (
+    # #200: seed the epoch clock from the ONLY record of an epoch boundary that
+    # exists today. Filling it with now() instead would claim every live epoch
+    # began at deploy time and silently reset the accumulations this column was
+    # added to protect — on Arm B that is 25 decisive removals, 5 short of its
+    # first verdict in three epochs.
+    "UPDATE execution_strategies SET epoch_started_at = updated_at "
+    "WHERE epoch_started_at IS NULL",
 )
 
 
@@ -108,6 +134,12 @@ async def init_models() -> None:
             try:
                 await conn.exec_driver_sql(stmt)
             except Exception:                       # non-Postgres / already applied
+                pass
+        # After the columns exist, never before.
+        for stmt in STARTUP_BACKFILLS:
+            try:
+                await conn.exec_driver_sql(stmt)
+            except Exception:                       # column absent / nothing to do
                 pass
 
     # Idempotency backstop (#15): at most one trade per (signal, account). The

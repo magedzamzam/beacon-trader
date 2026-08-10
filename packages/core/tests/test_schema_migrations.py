@@ -66,6 +66,25 @@ def test_migrations_are_idempotent():
         assert "IF NOT EXISTS" in stmt.upper(), stmt
 
 
+def test_backfills_are_self_limiting():
+    """The backfills are DML, so `IF NOT EXISTS` cannot protect them — a WHERE
+    clause that stops matching after the first run has to. A backfill that
+    re-ran unguarded on every startup would overwrite the very thing it was
+    added to preserve (#200 seeds an epoch clock from `updated_at`; re-running
+    it after a later edit would silently re-date a live accumulation)."""
+    for stmt in B.STARTUP_BACKFILLS:
+        upper = stmt.upper()
+        assert upper.startswith("UPDATE "), stmt
+        assert " WHERE " in upper and "IS NULL" in upper, stmt
+
+
+def test_epoch_columns_have_alters():
+    # #200: `execution_strategies` is long-lived, so the epoch pair needs ALTERs
+    # or `select(ExecutionStrategy)` 500s on the live box the moment it deploys.
+    added = _added_columns("execution_strategies")
+    assert {"epoch_digest", "epoch_started_at"} <= added
+
+
 def test_model_and_migration_agree_on_cluster_columns():
     # Guard against drift: if the model maps these, the migration must add them.
     cols = set(Trade.__table__.columns.keys())

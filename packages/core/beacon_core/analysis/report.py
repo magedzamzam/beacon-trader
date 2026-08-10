@@ -1698,7 +1698,13 @@ def filter_removed_set(skips, control_trades, *, base_rate,
     TWO DISCIPLINES ARE STRUCTURAL HERE, not left to the caller's memory.
 
     **Epochs are never pooled.** `epoch` names the filter's configuration — its
-    rule and its timeframe, e.g. `adx_regime@4h`. Moving the `adx_regime` filter
+    rule and its timeframe, e.g. `adx_regime@4h`. Do NOT hand-write it: since
+    #200 it is `analysis.epochs.epoch_name(entry_filters, entry_policy)`, and it
+    is persisted on the strategy row (`epoch_digest` / `epoch_started_at`, and
+    the `epoch` field the strategies API returns). A literal typed into a weekly
+    script has to be re-derived from `updated_at` every time the config moves,
+    which is exactly how a week of skips gets assigned to a filter that was not
+    running. Moving the `adx_regime` filter
     from 4h to 1h mid-week made it a different experiment: the 4h half fired ZERO
     times (Arm B ≡ control) and the 1h half fired 8. Averaging the two describes
     no filter that ever ran. So the return is per epoch, and there is deliberately

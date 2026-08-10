@@ -36,6 +36,7 @@ from beacon_core.risk.sizing import deployed_risk_from_planned
 from beacon_core.strategy.rules import (PositionCtx, entry_basis, evaluate,
                                         levels_reached, next_mfe, DEFAULT_SL_RULES)
 from beacon_core.settings_store import get_setting, set_setting
+from beacon_core.analysis import epochs as EP
 from beacon_core.analysis import structure as S
 from beacon_core.analysis import structure_map as struct_map
 from beacon_core.tasks import spawn_bg
@@ -1118,6 +1119,100 @@ async def _maybe_recompute_structure() -> None:
         log.warning("structure recompute check failed: %s", exc)
 
 
+_DARK_ARM_KEY = "arm_dark_state"        # {account_id: last-alert ISO}
+_DARK_ARM_CFG_KEY = "arm_dark"          # operator overrides, all optional
+
+
+async def _decisions_since(session, since) -> dict:
+    """Per account: (signals decided, signals skipped by filtration) since `since`.
+
+    Deduped by SIGNAL on both sides. One signal fans out to several legs and each
+    can log its own `entry_filtered`, so counting events would inflate the skip
+    side against a trade side that is naturally one-per-signal, and manufacture a
+    dark arm out of a busy one."""
+    out: dict = {}
+
+    def _slot(acct):
+        return out.setdefault(int(acct), {"decided": set(), "skipped": set()})
+
+    rows = (await session.execute(
+        select(Event.payload).where(Event.kind == "entry_filtered",
+                                    Event.ts >= since))).scalars().all()
+    for p in rows:
+        if not isinstance(p, dict) or p.get("reason") != "filtration_skip":
+            continue                       # de-size / desize events are not skips
+        acct, sig = p.get("account_id"), p.get("signal_id")
+        if acct is None or sig is None:
+            continue
+        s = _slot(acct)
+        s["skipped"].add(sig)
+        s["decided"].add(sig)
+    taken = (await session.execute(
+        select(Trade.account_id, Trade.signal_id)
+        .where(Trade.created_at >= since, Trade.signal_id.isnot(None)))).all()
+    for acct, sig in taken:
+        if acct is not None:
+            _slot(acct)["decided"].add(sig)
+    return {a: (len(v["decided"]), len(v["skipped"])) for a, v in out.items()}
+
+
+async def _check_dark_arms() -> None:
+    """Alarm when an A/B arm has stopped trading (#200).
+
+    An arm skipping ~100% of its signals produces no trades and no information —
+    it is a broken experiment, not a conservative one. Arm B took 1 trade on
+    2026-08-05 and 0 on 08-06 while the control took 35 and 28, and the only
+    thing that noticed was a human looking at a flat account two days later; the
+    hand-tightening that followed orphaned a 52-removal accumulation.
+
+    READ-ONLY over the ledger and completely off the trading path: it writes an
+    `events` row and fires a notification, and touches no position. Debounced per
+    account so a genuinely dark arm alerts once per cooldown rather than once per
+    monitor tick."""
+    try:
+        async with Session()() as s:
+            cfg = await get_setting(s, _DARK_ARM_CFG_KEY, {}) or {}
+            if cfg.get("enabled") is False:
+                return
+            window_h = float(cfg.get("window_hours", 24))
+            cooldown_h = float(cfg.get("cooldown_hours", 6))
+            min_signals = int(cfg.get("min_signals", EP.DARK_MIN_SIGNALS))
+            threshold = float(cfg.get("threshold", EP.DARK_SKIP_RATE))
+
+            now = utcnow()
+            since = now - timedelta(hours=window_h)
+            counts = await _decisions_since(s, since)
+            if not counts:
+                return
+            state = dict(await get_setting(s, _DARK_ARM_KEY, {}) or {})
+            fired = False
+            for account_id, (n_decided, n_skipped) in sorted(counts.items()):
+                verdict = EP.dark_arm(n_decided, n_skipped,
+                                      min_signals=min_signals, threshold=threshold)
+                if not verdict["dark"]:
+                    state.pop(str(account_id), None)   # recovered — re-arm the alarm
+                    continue
+                last = parse_iso_utc(state.get(str(account_id)))
+                if last is not None and (now - last).total_seconds() < cooldown_h * 3600:
+                    continue
+                account = await s.get(Account, account_id)
+                detail = (f"{verdict['reason']} over the last {window_h:g}h. An arm "
+                          f"that is not trading is not a treatment — check its "
+                          f"entry_filters before its epoch is read as evidence.")
+                s.add(Event(kind="arm_dark", payload={
+                    "account_id": account_id, "window_hours": window_h, **verdict}))
+                _notify("arm_dark", {"account": account.name if account else
+                                     f"account {account_id}", "detail": detail})
+                log.warning("arm_dark: account %s — %s", account_id, verdict["reason"])
+                state[str(account_id)] = now.isoformat()
+                fired = True
+            if fired or state != (await get_setting(s, _DARK_ARM_KEY, {}) or {}):
+                await set_setting(s, _DARK_ARM_KEY, state)
+            await s.commit()
+    except Exception as exc:                    # never disturb the monitor loop
+        log.warning("dark-arm check failed: %s", exc)
+
+
 async def _sweep_orphaned_orders() -> None:
     """Start-up safety net (#161): cancel any order still resting at the broker
     whose trade we already consider CLOSED.
@@ -1181,6 +1276,7 @@ async def main() -> None:
         try:
             await tick()
             await _maybe_recompute_structure()
+            await _check_dark_arms()
         except Exception as exc:
             log.exception("tick failed: %s", exc)
         await asyncio.sleep(settings.monitor_interval)

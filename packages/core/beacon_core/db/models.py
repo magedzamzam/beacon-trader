@@ -206,6 +206,17 @@ class ExecutionStrategy(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True),
                                                     default=_now, onupdate=_now)
+    # RULE EPOCH (#200). `version` and `updated_at` bump on a relabel exactly as
+    # they do on a semantic edit, so neither can say whether an accumulation was
+    # discarded. `epoch_digest` is the stable identity of the rule CONFIGURATION
+    # (analysis/epochs.py — cosmetic keys excluded); `epoch_started_at` moves ONLY
+    # when that digest changes. The removed-set instrument (#186) accumulates
+    # within an epoch and tests once, so this pair makes "which skips belong to
+    # which experiment" a stored fact instead of an archaeology of `updated_at`.
+    # Measurement only — nothing on the trading path reads either column.
+    epoch_digest: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    epoch_started_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
 
 
 class AccountSourceRisk(Base):

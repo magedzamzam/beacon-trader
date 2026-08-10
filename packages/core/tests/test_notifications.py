@@ -39,7 +39,7 @@ def test_catalog_shape():
     cat = N.catalog()
     assert [c["id"] for c in cat["channels"]] == \
         ["email", "telegram", "whatsapp", "sms", "webhook", "push"]
-    assert len(N.EVENT_IDS) == 12
+    assert len(N.EVENT_IDS) == 13          # +arm_dark (#200)
     # every channel has at least one secret field except... all have config
     assert all("fields" in c and c["fields"] for c in cat["channels"])
 

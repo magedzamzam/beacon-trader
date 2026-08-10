@@ -68,6 +68,10 @@ EVENT_FIELDS: dict[str, list[str]] = {
                          "open_time", "close_time"],
     "broker_error":     ["symbol", "account", "detail"],
     "daily_summary":    [],
+    # #200: account + the reason sentence, which already carries the counts and
+    # the threshold it crossed. Deliberately no new FIELDS token — an alarm that
+    # needs a bespoke vocabulary to be readable is an alarm nobody will route.
+    "arm_dark":         ["account", "detail"],
 }
 
 

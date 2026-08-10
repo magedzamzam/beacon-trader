@@ -13,6 +13,8 @@ the live path. It had no test at all, and shipped two defects in 24h:
 Both classes are pinned below. Pure functions only: no DB, no TestClient, no
 event loop.
 """
+import datetime as dt
+import inspect
 import json
 import re
 from pathlib import Path
@@ -20,9 +22,34 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
+from beacon_core.analysis import epochs as EP
 from beacon_core.execution import strategy as ST
 
 from app.routers import strategies as S
+
+
+class _Row:
+    """A strategy row, for the pure `_shape` path. A class rather than a Mock so
+    a column added to the model without a default shows up here as an
+    AttributeError instead of silently rendering as a Mock repr."""
+
+    def __init__(self, **kw):
+        self.id = 1
+        self.account_id = self.source_id = None
+        self.entry_policy = self.entry_filters = self.exit_policy = None
+        self.enabled = True
+        self.label = self.note = None
+        self.version = 1
+        self.updated_at = None
+        self.epoch_digest = None
+        self.epoch_started_at = None
+        self.__dict__.update(kw)
+
+
+ADX = {"rules": [{"name": "skip_adx_trending_1h", "enabled": True,
+                  "action": "skip",
+                  "when": {"type": "adx_regime", "trending": True,
+                           "timeframe": "1h"}}]}
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RULE_TYPES_JSX = REPO_ROOT / "frontend/src/components/EntryFilterRules.jsx"
@@ -263,15 +290,52 @@ def test_a_new_indicator_rule_defaults_to_shadow_end_to_end():
 def test_shape_exposes_the_live_vs_shadow_count():
     """#167 requires the number of simultaneous LIVE gates to be visible — each one
     is another multiple comparison against a ~50–100 trade sample."""
-    class _Row:
-        id = 1; account_id = None; source_id = None
-        entry_policy = None; exit_policy = None; enabled = True
-        label = None; note = None; version = 1; updated_at = None
-        entry_filters = {"rules": [_rule(_ind()),                       # shadow
-                                   {**_rule(_ind()), "mode": "live"},
-                                   {"enabled": True, "action": "skip",
-                                    "when": {"type": "adx_regime"}}]}   # live
-    assert S._shape(_Row())["filter_modes"] == {"live": 2, "shadow": 1}
+    row = _Row(entry_filters={"rules": [_rule(_ind()),                  # shadow
+                                        {**_rule(_ind()), "mode": "live"},
+                                        {"enabled": True, "action": "skip",
+                                         "when": {"type": "adx_regime"}}]})  # live
+    assert S._shape(row)["filter_modes"] == {"live": 2, "shadow": 1}
+
+
+# ------------------------------------------------------------------ epochs (#200)
+def test_shape_carries_the_epoch_so_it_is_not_reconstructed_from_updated_at():
+    """The removed set accumulates WITHIN an epoch and is tested once, so which
+    epoch a row is in has to be readable off the row. Deriving it from
+    `updated_at` in a weekly script is how a missed bump mis-assigns a week of
+    skips to a filter that was not running."""
+    row = _Row(entry_filters=ADX, epoch_digest="abc123",
+               epoch_started_at=dt.datetime(2026, 7, 30, 8, 57,
+                                            tzinfo=dt.timezone.utc))
+    out = S._shape(row)
+    assert out["epoch_digest"] == "abc123"
+    assert out["epoch_started_at"].startswith("2026-07-30T08:57")
+    # The human key is derived from the rules AND carries the stored digest, so
+    # it cannot drift from the row the way a hand-typed literal can.
+    assert out["epoch"] == "adx_regime@1h+trendingTrue#abc123"
+
+
+def test_the_route_moves_the_clock_only_on_a_semantic_change():
+    """The decision the write path delegates, checked at its three branches.
+    A relabel must be free — that is the entire point of the digest."""
+    now, opened = "NOW", "OPENED"
+    same = EP.epoch_digest(ADX, None)
+    assert EP.epoch_transition(same, same, opened, now) == {
+        "digest": same, "started_at": opened, "closed": False}
+    changed = EP.epoch_digest({"rules": [{**ADX["rules"][0],
+                                          "when": {"type": "adx_regime",
+                                                   "timeframe": "1h",
+                                                   "trending": True,
+                                                   "min_adx": 30}}]}, None)
+    assert EP.epoch_transition(same, changed, opened, now)["closed"] is True
+
+
+def test_a_skip_count_is_deduped_by_signal_not_by_event():
+    """One signal fans out to several legs and each can log its own
+    `entry_filtered`. Counting rows would push an accumulation past the N>=30
+    threshold it is measured against without a single extra removal."""
+    src = inspect.getsource(S._skips_since)
+    assert "sigs.add" in src and "len(sigs)" in src
+    assert 'p.get("reason") != "filtration_skip"' in src
 
 
 # -------------------------------------------------------- _clean_entry_policy

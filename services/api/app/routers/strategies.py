@@ -9,7 +9,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from beacon_core.db.models import Account, ExecutionStrategy, Source
+from beacon_core.analysis import epochs as EP
+from beacon_core.db.models import Account, Event, ExecutionStrategy, Source
 from beacon_core.execution import strategy as ST
 from beacon_core.execution import staging as STG
 from beacon_core.execution.strategy import ENTRY_POLICY_KEYS
@@ -189,6 +190,32 @@ def _clean_exit_policy(xp) -> dict | None:
     return xp or None
 
 
+async def _skips_since(db: AsyncSession, account_id: int | None, since) -> int:
+    """Distinct signals this account skipped by filtration since `since`.
+
+    Deduped by signal, not counted by event: one signal fans out to several legs
+    and each can log its own `entry_filtered`, so counting rows would inflate the
+    accumulation straight past the threshold it is measured against (the same
+    trap `filter_removed_set` documents). This is the SKIP count, which bounds
+    the decisive count from above — decisive removals are the subset the control
+    actually scored, and only the weekly instrument can compute those because
+    only it knows which account is the control."""
+    if account_id is None or since is None:
+        return 0
+    rows = (await db.execute(
+        select(Event.payload).where(Event.kind == "entry_filtered",
+                                    Event.ts >= since))).scalars().all()
+    sigs = set()
+    for p in rows:
+        if not isinstance(p, dict) or p.get("reason") != "filtration_skip":
+            continue
+        if p.get("account_id") != account_id:
+            continue
+        if p.get("signal_id") is not None:
+            sigs.add(p["signal_id"])
+    return len(sigs)
+
+
 def _shape(s: ExecutionStrategy) -> dict:
     # `filter_modes` is derived, not stored (#167): how many enabled rules can
     # actually skip/scale a trade vs how many are only being measured. Every
@@ -199,7 +226,15 @@ def _shape(s: ExecutionStrategy) -> dict:
             "filter_modes": ST.filter_mode_counts((s.entry_filters or {}).get("rules")),
             "exit_policy": s.exit_policy, "enabled": s.enabled, "label": s.label,
             "note": s.note, "version": s.version,
-            "updated_at": s.updated_at.isoformat() if s.updated_at else None}
+            "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+            # #200: the epoch is what the removed set accumulates within, so it
+            # belongs on the same surface as the rules rather than being
+            # reconstructed from `updated_at` by whoever writes next week's script.
+            "epoch_digest": s.epoch_digest,
+            "epoch_started_at": (s.epoch_started_at.isoformat()
+                                 if s.epoch_started_at else None),
+            "epoch": EP.epoch_name(s.entry_filters, s.entry_policy,
+                                   digest=s.epoch_digest)}
 
 
 @router.get("")
@@ -252,7 +287,41 @@ async def upsert(body: dict, db: AsyncSession = Depends(get_db)):
         else ExecutionStrategy.account_id == account_id,
         ExecutionStrategy.source_id.is_(source_id) if source_id is None
         else ExecutionStrategy.source_id == source_id))).scalar_one_or_none()
+    now = utcnow()
+    new_digest = EP.epoch_digest(entry_filters, entry_policy)
+    warning = None
     if existing:
+        # #200: the epoch moves on a SEMANTIC change and only then. A relabel
+        # bumps `version` and `updated_at` exactly as a rule change does, which
+        # is why neither could ever say whether an accumulation had been thrown
+        # away — and why three consecutive Arm-B verdicts died mid-accumulation
+        # with nothing recording the cost.
+        old_digest = existing.epoch_digest
+        old_started = existing.epoch_started_at or existing.updated_at
+        move = EP.epoch_transition(old_digest, new_digest, old_started, now)
+        if move["closed"]:
+            n_skips = await _skips_since(db, account_id, old_started)
+            old_name = EP.epoch_name(existing.entry_filters,
+                                     existing.entry_policy, digest=old_digest)
+            warning = {
+                "epoch_closed": old_name, "epoch_started_at":
+                    old_started.isoformat() if old_started else None,
+                "n_skips_accumulated": n_skips,
+                "note": EP.epoch_close_note(old_name=old_name,
+                                            started_at=old_started,
+                                            n_skips=n_skips),
+                "decisive_count": ("computed by filter_removed_set against the "
+                                   "control arm; n_skips is its upper bound"),
+            }
+            # An `events` row as well as the response: the operator who makes
+            # this call is not necessarily the one who reads next week's report,
+            # and a warning that exists only in an HTTP response is a warning
+            # nobody can audit afterwards.
+            db.add(Event(kind="epoch_closed", payload={
+                "account_id": account_id, "source_id": source_id,
+                "strategy_id": existing.id, **warning}))
+        existing.epoch_digest = move["digest"]
+        existing.epoch_started_at = move["started_at"]
         existing.entry_policy = entry_policy
         existing.entry_filters = entry_filters
         existing.exit_policy = exit_policy
@@ -260,18 +329,22 @@ async def upsert(body: dict, db: AsyncSession = Depends(get_db)):
         existing.label = (body.get("label") or None)
         existing.note = (body.get("note") or None)
         existing.version = (existing.version or 1) + 1
-        existing.updated_at = utcnow()
+        existing.updated_at = now
         row = existing
     else:
         row = ExecutionStrategy(
             account_id=account_id, source_id=source_id, entry_policy=entry_policy,
             entry_filters=entry_filters, exit_policy=exit_policy,
             enabled=bool(body.get("enabled", True)),
-            label=(body.get("label") or None), note=(body.get("note") or None))
+            label=(body.get("label") or None), note=(body.get("note") or None),
+            epoch_digest=new_digest, epoch_started_at=now)
         db.add(row)
     await db.commit()
     await db.refresh(row)
-    return _shape(row)
+    out = _shape(row)
+    if warning:
+        out["epoch_warning"] = warning
+    return out
 
 
 @router.delete("/{strategy_id}")

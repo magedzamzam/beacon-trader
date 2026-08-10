@@ -83,6 +83,11 @@ EVENT_GROUPS = [
     {"group": "System", "events": [
         {"id": "broker_error", "label": "Broker / connection error"},
         {"id": "daily_summary", "label": "Daily summary"},
+        # #200: an A/B arm that skips ~everything produces no trades and no
+        # information. That is a broken experiment, not a conservative one, and
+        # the last one ran dark for two days before a human noticed a flat
+        # account — then fixed it in a way that orphaned the accumulation.
+        {"id": "arm_dark", "label": "A/B arm not trading"},
     ]},
 ]
 
