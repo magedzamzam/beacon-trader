@@ -786,7 +786,13 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             if reason:
                 session.add(Event(kind="risk_blocked",
                                   payload={"signal_id": sig.id, "account_id": acct.id,
-                                           "planned_risk": str(planned_risk), "reason": reason}))
+                                           "planned_risk": str(planned_risk),
+                                           # #202: the breaker states its BASIS. A
+                                           # halt is only reviewable if the number
+                                           # it fired on names where it came from.
+                                           "day_realized": str(day_realized),
+                                           "pl_basis": "trades.realized_pl",
+                                           "reason": reason}))
                 await session.commit()
                 log.warning("signal %s acct %s: RISK-LIMIT BLOCK — %s",
                             sig.id, acct.id, reason)
@@ -800,14 +806,21 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             # minutes) is implemented+tested in guard.soft_breaker_decision but needs
             # a persisted per-account cooldown_until to fire live — a follow-up.
             # Same cfg + basis on every A/B account -> symmetric by construction.
-            # NOTE (#74/#126): day_realized is the LEDGER sum, which over-states the
-            # loss; feed broker-truth realized before enabling this in anger.
+            # BASIS (#74/#126/#202): `day_realized` is Σ `trades.realized_pl`, and
+            # that is the RIGHT number — do not "upgrade" it to the activity
+            # ledger. The note that used to stand here said the ledger overstates
+            # the loss and told the next reader to feed broker truth instead; #202
+            # showed that backwards. `position_activities.realized_pl` stored a
+            # ratcheted stop-out UNSIGNED, i.e. a loss recorded as a gain, so the
+            # activity ledger UNDERSTATES losses — pointing a loss breaker at it
+            # would blind the one guard whose entire job is to see them.
             _bd = soft_breaker_decision(day_realized=day_realized, cfg=rl_cfg,
                                         now=utcnow(), cooldown_until=None)
             if _bd["block"]:
                 session.add(Event(kind="breaker_state",
                                   payload={"signal_id": sig.id, "account_id": acct.id,
                                            "state": _bd["state"], "day_realized": str(day_realized),
+                                           "pl_basis": "trades.realized_pl",
                                            "reason": _bd["reason"]}))
                 await session.commit()
                 log.warning("signal %s acct %s: SOFT-BREAKER %s — %s",

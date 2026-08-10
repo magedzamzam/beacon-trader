@@ -43,6 +43,20 @@ def test_something_actually_fires_it():
     assert "await _maybe_send_daily_digest()" in monitor
 
 
+def test_both_write_paths_apply_the_same_sign_rule():
+    """#202's root cause was one path repairing the sign and the other not.
+    They now call the same function, and this fails if either stops."""
+    monitor = (REPO_ROOT / "services/monitor/main.py").read_text(encoding="utf-8")
+    close_leg = monitor.split("realized_pl = m.get(\"pl\")", 1)[1].split(
+        "async def _audit_activities", 1)[0]
+    audit = monitor.split("async def _audit_activities", 1)[1].split(
+        "\n        # --- pass 1", 1)[0]
+    assert "BT.signed_close_pl(" in close_leg, "the leg path lost its sign repair"
+    assert "BT.signed_close_pl(" in audit, "the audit path is writing raw broker P&L"
+    # And the old inline rule must not creep back as a second copy.
+    assert "realized_pl = -realized_pl" not in monitor
+
+
 # --- the schedule --------------------------------------------------------------
 def test_it_reports_the_last_COMPLETE_day():
     """A digest of a day still in progress is a number that changes after you
@@ -120,6 +134,65 @@ def test_drawdown_is_peak_to_trough_not_the_net():
     assert BT.max_drawdown([100.0, 200.0]) == 0.0          # never below its peak
     assert BT.max_drawdown([]) == 0.0
     assert BT.max_drawdown([-50.0]) == -50.0               # peak is the 0 it started at
+
+
+# --- the phantom tax, and which way it actually pointed (#202) ----------------
+def test_a_ratcheted_stop_out_is_a_loss_however_the_broker_sent_it():
+    """The whole of #202 in one line. Capital.com returns the transaction amount
+    UNSIGNED when the stop was modified before the close, so a ratcheted
+    stop-out arrives as +89.71. `_close_leg` always repaired this; the activity
+    audit did not, and the two ledgers drifted apart by exactly twice the
+    ratcheted losses."""
+    assert BT.signed_close_pl(89.71, "sl_hit") == -89.71
+    assert BT.signed_close_pl(-89.71, "sl_hit") == -89.71     # already signed
+
+
+def test_a_winning_close_is_never_flipped():
+    assert BT.signed_close_pl(284.34, "tp_hit") == 284.34
+
+
+def test_a_breakeven_is_left_exactly_as_the_broker_sent_it():
+    """A breakeven can legitimately land either side of zero, and those rows
+    already agree (657 of 657 exact on the live book). Correcting them would
+    invent an error rather than fix one."""
+    assert BT.signed_close_pl(12.5, "breakeven") == 12.5
+    assert BT.signed_close_pl(-12.5, "breakeven") == -12.5
+
+
+def test_a_close_with_no_money_stays_none():
+    assert BT.signed_close_pl(None, "sl_hit") is None
+
+
+def test_the_breaker_records_the_basis_it_fired_on():
+    """A halt is only reviewable if the number it fired on says where it came
+    from. And the basis must stay `trades.realized_pl`: the note that used to
+    stand there told the next reader to feed broker truth instead, which — now
+    that the activity ledger is known to under-report losses — would blind the
+    one guard whose whole job is to see them."""
+    ex = (REPO_ROOT / "services/executor/main.py").read_text(encoding="utf-8")
+    assert ex.count('"pl_basis": "trades.realized_pl"') == 2   # hard + soft
+    assert "feed broker-truth realized before enabling" not in ex
+
+
+def test_the_gap_is_reported_per_account_not_reconciled_away():
+    """The two ledgers are built from different records, so a divergence means
+    one of them has stopped tracking the account. That is a thing to be told
+    about, not silently averaged."""
+    out = BT.phantom_gap({1: 100.0, 2: -50.0}, {1: 100.0, 2: 50.0})
+    assert out["gap"] == -100.0 and out["material"]
+    assert out["worst_trade"] == 2 and out["worst_gap"] == -100.0
+
+
+def test_agreeing_ledgers_are_not_flagged():
+    out = BT.phantom_gap({1: 100.0}, {1: 100.4})
+    assert not out["material"] and out["gap"] == -0.4
+
+
+def test_the_gap_counts_a_trade_missing_from_either_side():
+    """A trade the broker recorded and the ledger did not is the same defect
+    class, so it must not fall out of the comparison."""
+    out = BT.phantom_gap({1: 100.0, 2: 20.0}, {1: 100.0})
+    assert out["n_trades"] == 2 and out["gap"] == 20.0
 
 
 def test_settled_pl_says_which_basis_each_trade_came_from():

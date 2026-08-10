@@ -74,6 +74,56 @@ def settled_pl(rows: Iterable[dict], ledger: Optional[dict] = None) -> dict:
     return {"by_trade": out, "n_broker": len(broker), "n_ledger": n_ledger}
 
 
+def signed_close_pl(pl, outcome: Optional[str]):
+    """Restore the SIGN the broker did not send on a close (#202).
+
+    Capital.com returns the transaction amount UNSIGNED when the position's stop
+    was modified before it closed — a ratcheted stop-out comes back as `+89.71`.
+    `_close_leg` has always repaired this for the leg (`a stop-out is always a
+    loss`), but `_audit_activities` wrote the raw value straight into
+    `position_activities`, so the two ledgers disagreed by exactly TWICE the
+    ratcheted losses: 176 of 178 ratcheted stop-outs were stored positive
+    against 2 of 1093 un-ratcheted ones.
+
+    That is where the "phantom tax" came from, and it points the opposite way to
+    how it read: `trades.realized_pl` is the SOUND figure (it sums legs, which
+    are signed correctly) and the activity ledger was the inflated one. Anything
+    that treats `position_activities` as truth without this repair reports a
+    losing week as a winning one.
+
+    Only `sl_hit` is corrected, exactly mirroring the leg path. A breakeven can
+    legitimately land either side of zero and those rows agree already (657 of
+    657 exact), so touching them would invent an error."""
+    if pl is None:
+        return None
+    if outcome == "sl_hit" and float(pl) > 0:
+        return -pl
+    return pl
+
+
+def phantom_gap(broker_by_trade: dict, ledger_by_trade: dict,
+                *, tolerance: float = 1.0) -> dict:
+    """Broker ledger vs trade ledger, per the set of trades given.
+
+    Reported as a metric rather than reconciled away: the two are built from
+    different records and a divergence means one of them stopped tracking the
+    account, which is a thing to be told about, not to be silently averaged."""
+    trades = set(broker_by_trade) | set(ledger_by_trade)
+    broker = sum(float(broker_by_trade.get(t) or 0.0) for t in trades)
+    ledger = sum(float(ledger_by_trade.get(t) or 0.0) for t in trades)
+    gap = round(broker - ledger, 2)
+    worst = None
+    for t in trades:
+        d = float(broker_by_trade.get(t) or 0.0) - float(ledger_by_trade.get(t) or 0.0)
+        if worst is None or abs(d) > abs(worst[1]):
+            worst = (t, round(d, 2))
+    return {"n_trades": len(trades), "broker": round(broker, 2),
+            "ledger": round(ledger, 2), "gap": gap,
+            "worst_trade": worst[0] if worst else None,
+            "worst_gap": worst[1] if worst else 0.0,
+            "material": bool(abs(gap) > tolerance)}
+
+
 def max_drawdown(series: Iterable[float]) -> float:
     """Deepest peak-to-trough fall of a running total, as a NEGATIVE number.
 

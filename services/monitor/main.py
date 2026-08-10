@@ -36,6 +36,7 @@ from beacon_core.risk.sizing import deployed_risk_from_planned
 from beacon_core.strategy.rules import (PositionCtx, entry_basis, evaluate,
                                         levels_reached, next_mfe, DEFAULT_SL_RULES)
 from beacon_core.settings_store import get_setting, set_setting
+from beacon_core.analysis import broker_truth as BT
 from beacon_core.analysis import epochs as EP
 from beacon_core.analysis import structure as S
 from beacon_core.analysis import structure_map as struct_map
@@ -737,9 +738,11 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                 src = "heuristic"
             else:
                 src = "broker"
-                # `size` can arrive unsigned; a stop-out is always a loss.
-                if outcome == "sl_hit" and realized_pl > 0:
-                    realized_pl = -realized_pl
+                # `size` can arrive unsigned; a stop-out is always a loss. The
+                # rule lives in `analysis/broker_truth` so the activity audit
+                # below applies the SAME one — it did not, and the two ledgers
+                # drifted apart by twice the ratcheted losses (#202).
+                realized_pl = BT.signed_close_pl(realized_pl, outcome)
 
             # Was this close attributed by the EXACT position dealId (source of
             # truth), or only heuristically? Surface the latter so a mis-matched
@@ -812,6 +815,15 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                     t = _txn_lookup(txns, did)
                     if t is not None:
                         rp, cur = t.get("pl"), t.get("currency")
+                        # #202: the transaction amount arrives UNSIGNED when the
+                        # stop was modified before the close, and this write path
+                        # used to store it raw while the leg path repaired it —
+                        # so a ratcheted stop-out was logged here as a GAIN. That
+                        # single omission is the whole "phantom tax": the two
+                        # ledgers differed by exactly twice the ratcheted losses.
+                        # This runs after pass 1, so `leg.outcome` is already the
+                        # broker's own close reason.
+                        rp = BT.signed_close_pl(rp, leg.outcome)
                 session.add(PositionActivity(
                     account_id=trade.account_id, trade_id=trade.id, leg_id=leg.id,
                     epic=a.get("epic"), deal_id=did, deal_reference=a.get("deal_reference"),

@@ -29,7 +29,7 @@ from typing import Optional
 from sqlalchemy import select
 
 from ..analysis import broker_truth as BT
-from ..db.models import Account, PositionActivity, Trade
+from ..db.models import Account, Leg, PositionActivity, Trade
 
 DEFAULT_AT_UTC = "00:15"
 
@@ -81,16 +81,28 @@ async def build_digests(session, day: str) -> list[dict]:
     # the clock and the amount here, with no silent fallback to `realized_pl`.
     # A trade the broker has not settled simply is not in this day's digest yet.
     acts = (await session.execute(
-        select(PositionActivity).where(
-            PositionActivity.activity_at >= start,
-            PositionActivity.activity_at < end,
-            PositionActivity.realized_pl.isnot(None)))).scalars().all()
+        select(PositionActivity, Leg.outcome, Leg.realized_pl)
+        .outerjoin(Leg, Leg.id == PositionActivity.leg_id)
+        .where(PositionActivity.activity_at >= start,
+               PositionActivity.activity_at < end,
+               PositionActivity.realized_pl.isnot(None)))).all()
+    # #202: the sign is repaired AT READ TIME as well as on write, because every
+    # activity row stored before that fix has a ratcheted stop-out logged as a
+    # gain. A digest that skipped this would report a losing day as a winning
+    # one — which is exactly how the "phantom tax" read as the ledger's fault.
     rows = [{"account_id": a.account_id, "deal_id": a.deal_id,
              "activity_at": a.activity_at, "type": a.type,
-             "trade_id": a.trade_id, "realized_pl": a.realized_pl}
-            for a in acts]
+             "trade_id": a.trade_id,
+             "realized_pl": BT.signed_close_pl(a.realized_pl, outcome)}
+            for a, outcome, _leg_pl in acts]
     account_of = {r["trade_id"]: r["account_id"] for r in rows
                   if r["trade_id"] is not None}
+    # The leg ledger for the same closes, so the digest can SAY when the two
+    # records disagree rather than quietly quoting one of them.
+    leg_pl: dict = {}
+    for a, _outcome, lpl in acts:
+        if a.trade_id is not None and lpl is not None:
+            leg_pl[a.trade_id] = leg_pl.get(a.trade_id, 0.0) + float(lpl)
 
     open_counts: dict = {}
     for t in (await session.execute(
@@ -98,11 +110,20 @@ async def build_digests(session, day: str) -> list[dict]:
         open_counts[t.account_id] = open_counts.get(t.account_id, 0) + 1
 
     per_account: dict = {}
-    for tid, pl in BT.realized_by_trade(rows).items():
+    broker_by_trade = BT.realized_by_trade(rows)
+    for tid, pl in broker_by_trade.items():
         acct = account_of.get(tid)
         if acct is None:
             continue
         per_account.setdefault(acct, []).append(float(pl))
+
+    # #202: a per-account gap metric, so the next regression of this class is
+    # caught by the system rather than by a weekly report five days later.
+    gaps: dict = {}
+    for acct in per_account:
+        tids = [t for t, a in account_of.items() if a == acct]
+        gaps[acct] = BT.phantom_gap({t: broker_by_trade.get(t) for t in tids},
+                                    {t: leg_pl.get(t) for t in tids})
 
     # EVERY enabled account, including the ones that did nothing. A silent day
     # is the day worth reporting: on 2026-08-06 Arm B settled zero trades while
@@ -126,8 +147,20 @@ async def build_digests(session, day: str) -> list[dict]:
             "losses": str(sum(1 for p in pls if p < 0)),
             "open_positions": str(open_counts.get(acct, 0)),
             "drawdown": _fmt_money(BT.max_drawdown(pls)) if pls else "0.00",
-            "detail": (f"{len(pls)} trade(s) settled on {day} · "
-                       "P&L from deduped broker activity"
-                       if pls else f"nothing settled on {day}"),
+            "detail": _detail(day, pls, gaps.get(acct)),
+            "phantom_gap": (gaps.get(acct) or {}).get("gap", 0.0),
         })
     return out
+
+
+def _detail(day: str, pls: list, gap: Optional[dict]) -> str:
+    if not pls:
+        return f"nothing settled on {day}"
+    line = f"{len(pls)} trade(s) settled on {day} · P&L from deduped broker activity"
+    if gap and gap.get("material"):
+        # Said out loud rather than reconciled away: the two ledgers are built
+        # from different records, so a divergence means one of them has stopped
+        # tracking the account (#202).
+        line += (f" · ⚠ broker/ledger gap {_fmt_money(gap['gap'])} "
+                 f"(worst trade {gap['worst_trade']} {_fmt_money(gap['worst_gap'])})")
+    return line

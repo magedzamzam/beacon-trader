@@ -35,6 +35,17 @@ architecture, `INSTALL.md` for deployment.
 5. **Trade-level P&L is trustworthy; leg-level P&L is not** (known cross-attribution bug).
    Use `trades.realized_pl` and leg **outcome labels** (`tp_hit`/`sl_hit`/`breakeven`), never
    `legs.realized_pl`, for analysis.
+6. **`trades.realized_pl` is the P&L of record — NOT `position_activities` (#202).** This
+   reverses earlier guidance, so read it before writing another money query. Capital.com
+   returns the transaction amount **unsigned** when a position's stop was modified before it
+   closed; `_close_leg` always repaired that, `_audit_activities` did not, so **176 of 178
+   ratcheted stop-outs were stored in `position_activities` as GAINS**. The "phantom tax"
+   (+11,998 AED on the week of 2026-08-03) is exactly twice those losses, and it points the
+   opposite way to how it read: the activity ledger was inflated, the trade ledger was right.
+   The write path is fixed and rows since then are signed correctly, but **every activity row
+   written before that deploy is still wrong unless the backfill has been applied.** Any query
+   over `position_activities.realized_pl` must apply `analysis.broker_truth.signed_close_pl`
+   (or the equivalent `sign(l.realized_pl)` join) — the dedup alone is not enough.
 
 ## 3. Opening an issue — the required process
 
