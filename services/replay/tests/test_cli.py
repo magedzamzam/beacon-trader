@@ -260,6 +260,69 @@ def test_the_builders_vocabulary_matches_the_one_the_api_accepts():
         assert W.action_of({"kind": k, "index": 1})
 
 
+# One representative payload per condition kind, so a kind can be *resolved*
+# rather than merely named. `keep_leaf` returns None on an indicator with no
+# id/op, which would make the forward assertion below pass for the wrong reason.
+CONDITION_SAMPLES = {
+    "indicator": {"kind": "indicator", "id": "rsi", "field": "value",
+                  "op": "lt", "value": 30, "timeframe": "1h"},
+    "session": {"kind": "session", "sessions": ["london"]},
+    "not_session": {"kind": "not_session", "sessions": ["london"]},
+    "regime": {"kind": "regime", "trending": True, "timeframe": "4h"},
+}
+
+
+def _worker_condition_kinds(src: str) -> set:
+    """The kinds the worker actually branches on, read off `keep_leaf` and
+    `_leaf_of` only. `preset_leaf`'s `skip_session` is a PRESET name, not a
+    condition kind — including it would pin the wrong vocabulary."""
+    import re
+
+    kinds = set()
+    for fn in ("def keep_leaf(", "def _leaf_of("):
+        body = src.split(fn, 1)[1].split("\ndef ", 1)[0]
+        kinds |= set(re.findall(r'kind"?\)?\s*==\s*"([a-z_]+)"', body))
+    return kinds
+
+
+def test_the_condition_vocabulary_matches_the_one_the_api_accepts():
+    """The third vocabulary leg, pinned the same way triggers and actions are.
+
+    It fails in both directions on purpose. A kind the API accepts but the
+    worker cannot resolve is the bad one: `conditions_of` drops it silently
+    (`whatif.py`), so the arm runs WITHOUT the condition the operator stated
+    and the report says the change did little — a wrong answer, not an error.
+    The other direction only 400s a valid request, which at least tells you."""
+    import re
+
+    from harness import whatif as W
+    api = (SERVICE_ROOT.parents[1] / "services/api/app/routers/replay.py").read_text(
+        encoding="utf-8")
+    worker_src = (SERVICE_ROOT / "harness/whatif.py").read_text(encoding="utf-8")
+
+    api_cond = set(re.findall(
+        r'"([^"]+)"', api.split("CONDITION_KINDS = (", 1)[1].split(")", 1)[0]))
+    assert api_cond, "the API should restate the condition vocabulary"
+
+    # Forward: everything the API lets through resolves to an engine leaf.
+    for k in api_cond:
+        assert k in CONDITION_SAMPLES, f"no sample payload pinned for {k!r}"
+        assert W._leaf_of(CONDITION_SAMPLES[k]) is not None, k
+        # ...and survives the filter `conditions_of` applies before it builds
+        # the skip rule, which is where a half-supported kind disappears.
+        assert W.conditions_of({"conditions": [CONDITION_SAMPLES[k]]}), k
+
+    # Reverse: the worker cannot gain a kind the API would 400.
+    assert _worker_condition_kinds(worker_src) == api_cond
+
+    # And the page's free-form builder offers exactly that vocabulary — the
+    # QUICK picks are covered separately by the quick-pick test above.
+    page = (SERVICE_ROOT.parents[1] / "frontend/src/pages/Replay.jsx").read_text(
+        encoding="utf-8")
+    row = page.split("function ConditionRow(", 1)[1].split("\nfunction ", 1)[0]
+    assert set(re.findall(r'c\.kind === "([a-z_]+)"', row)) == api_cond
+
+
 def test_the_trade_list_asks_for_arms_the_worker_actually_writes():
     """The drill-down filters `replay_results` by variant name. The worker names
     the two arms when it stores them, and a page asking for "control" or "alt"
