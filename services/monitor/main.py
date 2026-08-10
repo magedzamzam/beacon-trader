@@ -42,6 +42,7 @@ from beacon_core.analysis import structure_map as struct_map
 from beacon_core.tasks import spawn_bg
 from beacon_core.timeutil import utcnow, parse_iso_utc
 from beacon_core import notifications as notify
+from beacon_core.notifications import digest as DG
 from beacon_core.notifications.context import build_ctx
 from beacon_core.notifications.throttle import Throttle, suffix as _burst_suffix
 
@@ -1213,6 +1214,43 @@ async def _check_dark_arms() -> None:
         log.warning("dark-arm check failed: %s", exc)
 
 
+_DIGEST_KEY = "daily_summary_last"      # the DATE last reported, not when
+_DIGEST_CFG_KEY = "daily_summary"       # {enabled, at_utc}
+
+
+async def _maybe_send_daily_digest() -> None:
+    """Send yesterday's operator digest once, shortly after the day ends (#198).
+
+    The guard stores the DATE the last digest covered, not the time it was sent.
+    That is what makes "exactly one per day" survive a restart: a monitor that
+    comes back at 15:00 sends yesterday's digest once and does not then walk
+    backwards filling in the week. A late digest is useful; a burst of stale
+    ones trains the operator to ignore the channel.
+
+    Read-only over the ledger, own session, and wrapped so a reporting failure
+    can never disturb the position loop."""
+    try:
+        async with Session()() as s:
+            cfg = await get_setting(s, _DIGEST_CFG_KEY, {}) or {}
+            if cfg.get("enabled") is False:
+                return
+            day = DG.digest_due(await get_setting(s, _DIGEST_KEY, None),
+                                utcnow(), cfg.get("at_utc", DG.DEFAULT_AT_UTC))
+            if day is None:
+                return
+            rows = await DG.build_digests(s, day)
+            # Stamp BEFORE sending, and stamp even with nothing to report: a
+            # send failure must not queue a duplicate on the next tick, and a
+            # quiet day is still a day that has been reported on.
+            await set_setting(s, _DIGEST_KEY, day)
+            await s.commit()
+        for ctx in rows:
+            _notify("daily_summary", ctx)
+        log.info("daily digest for %s: %s account(s)", day, len(rows))
+    except Exception as exc:                    # never disturb the monitor loop
+        log.warning("daily digest failed: %s", exc)
+
+
 async def _sweep_orphaned_orders() -> None:
     """Start-up safety net (#161): cancel any order still resting at the broker
     whose trade we already consider CLOSED.
@@ -1277,6 +1315,7 @@ async def main() -> None:
             await tick()
             await _maybe_recompute_structure()
             await _check_dark_arms()
+            await _maybe_send_daily_digest()
         except Exception as exc:
             log.exception("tick failed: %s", exc)
         await asyncio.sleep(settings.monitor_interval)

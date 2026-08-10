@@ -108,10 +108,21 @@ def test_broker_error_is_emitted_and_carries_a_reason():
 
 
 def test_non_emitted_event_has_no_fields():
-    assert T.field_descriptor("daily_summary") == []
-    assert T.sample_ctx("daily_summary") == {}
-    assert T.is_emitted("daily_summary") is False
+    # `signal_validated` is the remaining routed-but-unwired event; it took over
+    # this role from `daily_summary`, which is emitted since #198.
+    assert T.field_descriptor("signal_validated") == []
+    assert T.sample_ctx("signal_validated") == {}
+    assert T.is_emitted("signal_validated") is False
     assert T.is_emitted("trade_closed") is True
+
+
+def test_the_daily_digest_is_emitted_and_carries_the_rollup():
+    """#198 — routed, emoji'd and fired by nothing for months, so the editor
+    correctly greyed it out. It has an emitter now, so the contract must say so
+    or the editor keeps hiding a feature that exists."""
+    assert T.is_emitted("daily_summary") is True
+    assert {f["token"] for f in T.field_descriptor("daily_summary")} >= \
+        {"date", "pl", "wins", "losses", "open_positions", "drawdown"}
 
 
 def test_per_event_sample_matches_descriptor():

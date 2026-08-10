@@ -107,6 +107,13 @@ def _default_message(event_id: str, ctx: dict) -> tuple[str, str]:
     add("SL", ctx.get("sl"))
     add("Account", ctx.get("account"))
     add("Source", ctx.get("channel") or ctx.get("source"))
+    # Daily digest rows (#198). Absent on every other event, so `add`'s
+    # empty-skip keeps the existing messages byte-identical.
+    add("Date", ctx.get("date"))
+    if ctx.get("wins") is not None or ctx.get("losses") is not None:
+        add("Win / loss", f"{ctx.get('wins') or 0} / {ctx.get('losses') or 0}")
+    add("Open now", ctx.get("open_positions"))
+    add("Worst drawdown", ctx.get("drawdown"))
 
     _w = max((len(k) for k, _ in _rows), default=0)
     _body = "\n".join(f"{(k + ':').ljust(_w + 1)} {v}" for k, v in _rows)

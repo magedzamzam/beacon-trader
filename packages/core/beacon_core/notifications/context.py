@@ -7,6 +7,7 @@ leaves that token empty (the renderer treats empty as empty, never an error).
 """
 from __future__ import annotations
 
+import datetime as dt
 from typing import Optional
 
 from sqlalchemy import select
@@ -61,6 +62,22 @@ async def build_ctx(session, event_id: str = None, *,
     reconstructable from a historical trade and are simply absent (→ empty token,
     never an error). Without `event_id`, the full reconstructable set is returned.
     """
+    if event_id == "daily_summary":
+        # #198: the digest is a roll-up, not a trade — there is nothing to
+        # reconstruct it FROM. Build the real thing for the last complete day so
+        # a test-fire renders exactly what the scheduled emitter would send;
+        # anything else would be a mock-up the operator writes a template against.
+        from .digest import build_digests
+        day = str((utcnow().date() - dt.timedelta(days=1)))
+        rows = await build_digests(session, day)
+        if rows:
+            return rows[0]
+        # Nothing settled yesterday. Return the SHAPE with zeroes rather than an
+        # empty dict, so every token in the contract still resolves.
+        return {"date": day, "account": None, "pl": "0.00", "wins": "0",
+                "losses": "0", "open_positions": "0", "drawdown": "0.00",
+                "detail": f"nothing settled on {day}"}
+
     if signal is None and trade is not None and trade.signal_id is not None:
         signal = await session.get(Signal, trade.signal_id)
     source = (await session.get(Source, signal.source_id)

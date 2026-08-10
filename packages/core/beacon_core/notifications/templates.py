@@ -41,6 +41,13 @@ FIELDS: list[tuple[str, str, str]] = [
     ("ai.verdict",    "AI verdict",       "approve"),
     ("ai.confidence", "AI confidence",    "0.82"),
     ("detail",        "Detail",           "TP1 — tp_hit"),
+    # Daily digest (#198). Roll-up tokens, meaningless on a single-trade event —
+    # which is exactly what the per-event contract below is for.
+    ("date",           "Date (UTC)",       "2026-08-09"),
+    ("wins",           "Winning trades",   "7"),
+    ("losses",         "Losing trades",    "4"),
+    ("open_positions", "Open positions",   "2"),
+    ("drawdown",       "Worst drawdown",   "-1,204.50"),
 ]
 
 # Per-event field CONTRACT — the tokens each event's emitter actually populates
@@ -67,7 +74,12 @@ EVENT_FIELDS: dict[str, list[str]] = {
     "trade_closed":     ["symbol", "direction", "size", "channel", "account", "pl",
                          "open_time", "close_time"],
     "broker_error":     ["symbol", "account", "detail"],
-    "daily_summary":    [],
+    # #198: was `[]` — routed, emoji'd, and fired by nothing, so the editor
+    # correctly greyed it out and the feature it pointed at did not exist.
+    # Per ACCOUNT, because the three demo accounts are A/B/C arms and their sum
+    # describes no strategy.
+    "daily_summary":    ["date", "account", "pl", "wins", "losses",
+                         "open_positions", "drawdown", "detail"],
     # #200: account + the reason sentence, which already carries the counts and
     # the threshold it crossed. Deliberately no new FIELDS token — an alarm that
     # needs a bespoke vocabulary to be readable is an alarm nobody will route.

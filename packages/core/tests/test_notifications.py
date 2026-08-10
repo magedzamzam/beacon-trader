@@ -120,8 +120,9 @@ def test_catalog_exposes_per_event_fields_and_emitted():
     # order_filled does NOT carry channel/account -> not advertised
     of = {f["token"] for f in cat["fields_by_event"]["order_filled"]}
     assert "channel" not in of and "account" not in of
-    # non-emitted events are flagged and empty
-    assert cat["emitted"]["daily_summary"] is False
-    assert cat["fields_by_event"]["daily_summary"] == []
+    # non-emitted events are flagged and empty (daily_summary graduated in #198)
+    assert cat["emitted"]["signal_validated"] is False
+    assert cat["fields_by_event"]["signal_validated"] == []
     assert cat["emitted"]["trade_closed"] is True
+    assert cat["emitted"]["daily_summary"] is True
     assert set(cat["samples"]["new_signal"]) == {"symbol", "direction", "entry", "sl", "tp", "channel"}
