@@ -152,7 +152,8 @@ export default function Replay() {
       <NewBacktest sources={sources} accounts={accounts} catalog={catalog}
         onQueued={() => setRefresh(n => n + 1)} />
       {err && <ErrorNote>{err}</ErrorNote>}
-      <History jobs={jobs} runs={runs} openRun={openRun} onOpen={setOpenRun} />
+      <History jobs={jobs} runs={runs} openRun={openRun} onOpen={setOpenRun}
+        onChanged={() => setRefresh(n => n + 1)} />
       {report && <Report r={report} runId={openRun} />}
     </div>
   );
@@ -498,10 +499,33 @@ function Step({ n, title, children }) {
 const JOB_TONE = { queued: "muted", running: "beacon", done: "long",
                    failed: "short", cancelled: "warn" };
 
-function History({ jobs, runs, openRun, onOpen }) {
+function History({ jobs, runs, openRun, onOpen, onChanged }) {
   const running = jobs.filter(j => j.status === "queued" || j.status === "running");
   const done = runs.filter(r => r.label && r.label.startsWith("what-if"));
+  // Per-row, because the reason a cancel failed belongs next to the job it
+  // failed on — and it is nearly always the 409 below, which is information.
+  const [cancelErr, setCancelErr] = useState({});
+  const [cancelling, setCancelling] = useState(null);
   if (!running.length && !done.length) return null;
+
+  // The worker runs ONE job at a time, so a mis-scoped sweep does not merely
+  // waste its own minutes — it blocks every run behind it. Offered on `queued`
+  // only, exactly mirroring the route: a RUNNING job is deliberately left to
+  // the stale-job reaper and returns 409. A job that starts between render and
+  // click hits that 409, which is the truth and is shown, not swallowed.
+  const cancel = async (id) => {
+    setCancelling(id);
+    setCancelErr(e => ({ ...e, [id]: null }));
+    try {
+      await api.replayCancelJob(id);
+      onChanged?.();
+    } catch (e) {
+      setCancelErr(err => ({ ...err, [id]: e.message || "could not cancel" }));
+    } finally {
+      setCancelling(null);
+    }
+  };
+
   return (
     <Card>
       <div className="px-4 py-3 border-b border-edge text-sm font-medium">History</div>
@@ -510,6 +534,12 @@ function History({ jobs, runs, openRun, onOpen }) {
           <Badge tone={JOB_TONE[j.status]}>{j.status}</Badge>
           <span>{j.label}</span>
           <span className="text-muted">{j.progress || "…"}</span>
+          {cancelErr[j.id] && <span className="text-warn">{cancelErr[j.id]}</span>}
+          {j.status === "queued" && (
+            <button onClick={() => cancel(j.id)} disabled={cancelling === j.id}
+              className="ml-auto text-muted hover:text-short disabled:opacity-50">
+              {cancelling === j.id ? "cancelling…" : "cancel"}</button>
+          )}
         </div>
       ))}
       {!!done.length && (

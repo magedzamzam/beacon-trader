@@ -255,6 +255,26 @@ def test_the_client_can_queue_but_not_delete():
     assert "del(" not in block, "the replay client must never DELETE"
 
 
+def test_the_page_can_cancel_a_queued_job_and_only_a_queued_one():
+    """The worker runs ONE job at a time, so a mis-scoped sweep does not just
+    waste its own minutes — it blocks every run behind it, and the only recourse
+    without this control is a CLI edit of the queue table.
+
+    Gated on `queued` because that is exactly what the route allows: a RUNNING
+    job is deliberately left to the stale-job reaper and 409s. Offering cancel
+    on a running row would be a button whose whole job is to fail."""
+    page = REPLAY_PAGE.read_text(encoding="utf-8")
+    assert "replayCancelJob" in page, "the served cancel route needs a caller"
+    block = page.split("function History(", 1)[1].split("\nfunction ", 1)[0]
+    assert 'j.status === "queued"' in block, "cancel must be gated on queued"
+    # The 409 a job that started between render and click returns is shown, not
+    # swallowed — "nothing happened" is the one response that teaches nothing.
+    assert "cancelErr" in block
+    # And the list is re-read after a successful cancel, so the row flips
+    # without waiting out the 20s idle poll.
+    assert "onChanged" in block
+
+
 def test_the_cli_front_door_is_still_named_by_the_api():
     """The page no longer quotes it, and should not: Backtest queues its own runs
     now, so an empty state telling the operator to SSH would be a lie about the
