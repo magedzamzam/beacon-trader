@@ -36,6 +36,16 @@ def test_a_relabel_does_not_change_the_epoch():
     assert EP.epoch_digest(ADX, None) == EP.epoch_digest(renamed, None)
 
 
+def test_recording_where_a_rule_came_from_does_not_close_its_epoch():
+    """#201 backfills a `provenance` block onto rules that are already running.
+    Documenting a rule must never be the act that discards its accumulation —
+    otherwise the backfill would close all six Arm-C epochs at once."""
+    documented = {"rules": [{**ADX["rules"][0], "provenance": {
+        "status": "recorded", "replay_run_id": 37,
+        "effect_holdout": {"n": 11, "mean_r": -0.0363}}}]}
+    assert EP.epoch_digest(ADX, None) == EP.epoch_digest(documented, None)
+
+
 def test_a_rule_change_does_change_the_epoch():
     """`min_adx: 30` on 2026-08-06 closed a 52-removal accumulation. It has to
     read as a different experiment, because it is one."""

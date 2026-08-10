@@ -329,6 +329,94 @@ def test_the_route_moves_the_clock_only_on_a_semantic_change():
     assert EP.epoch_transition(same, changed, opened, now)["closed"] is True
 
 
+# -------------------------------------------------------- provenance (#201)
+# Flat `when`, because `_clean_entry_filters` requires a top-level `when.type`.
+# NOTE: the six live `bt_` rules use the COMPOSED `{"not": {...}}` shape from
+# #184, which this validator does not accept — they were written by SQL, not
+# through this route. That gap is real but pre-existing and out of scope here;
+# the gate below still covers every mined rule the portal can author.
+BT_RULE = {"name": "bt_1h_cci_value_gte100", "enabled": True, "action": "skip",
+           "mode": "live",
+           "when": {"type": "indicator", "id": "cci", "field": "value",
+                    "op": "gte", "value": 100, "timeframe": "1h"}}
+GOOD_PROV = {"status": "recorded", "replay_run_id": 37,
+             "n_candidates_screened": 250,
+             "effect_in_sample": {"n": 68, "mean_r": 0.0514},
+             "effect_holdout": {"n": 30, "mean_r": 0.0301}}
+
+
+def test_provenance_survives_the_pillar_clean():
+    """It must not be dropped by `_clean_entry_filters` — a provenance block
+    that silently vanishes on save is worse than none, because the operator
+    believes it was recorded."""
+    out = S._clean_entry_filters({"rules": [{**BT_RULE, "provenance": GOOD_PROV}]})
+    assert out["rules"][0]["provenance"]["replay_run_id"] == 37
+    assert out["rules"][0]["provenance"]["effect_holdout"] == {"n": 30, "mean_r": 0.0301}
+
+
+def test_a_malformed_provenance_is_a_422_not_a_silent_drop():
+    with pytest.raises(HTTPException) as exc:
+        S._clean_entry_filters({"rules": [{**BT_RULE,
+                                           "provenance": {"status": "maybe"}}]})
+    assert exc.value.status_code == 422 and "rules[0]" in exc.value.detail
+
+
+def test_arming_a_new_mined_rule_with_no_provenance_is_refused():
+    with pytest.raises(HTTPException) as exc:
+        S._check_promotions([BT_RULE], old_rules=[])
+    assert exc.value.status_code == 422 and "records nothing" in exc.value.detail
+
+
+def test_a_rule_already_running_in_this_exact_form_is_not_re_gated():
+    """The gate is on the screen->LIVE step. Re-saving a config that is already
+    running cannot make anything worse, and refusing it would trap the operator
+    behind six rules that predate provenance entirely — including on a routine
+    relabel."""
+    assert S._check_promotions([BT_RULE], old_rules=[BT_RULE]) == []
+
+
+def test_changing_the_threshold_of_a_running_rule_re_opens_the_gate():
+    """A different threshold is a different rule, however similar it looks —
+    the same reason it is a different epoch (#200)."""
+    moved = {**BT_RULE, "when": {**BT_RULE["when"], "value": 120}}
+    with pytest.raises(HTTPException):
+        S._check_promotions([moved], old_rules=[BT_RULE])
+
+
+def test_a_shadow_rule_can_always_be_saved():
+    """Measurement stays cheap; that is the whole point of shadow mode."""
+    assert S._check_promotions([{**BT_RULE, "mode": "shadow"}], old_rules=[]) == []
+
+
+def test_a_deep_screen_warns_without_blocking():
+    armed = {**BT_RULE, "provenance": {**GOOD_PROV,
+                                       "effect_holdout": {"n": 11, "mean_r": 0.02}}}
+    # n=11 clears the floor of 10, so it saves — and says how thin it is.
+    warnings = S._check_promotions([armed], old_rules=[])
+    assert any("250 candidates screened" in w for w in warnings)
+
+
+def test_the_read_surface_puts_the_effects_side_by_side():
+    row = _Row(entry_filters={"rules": [{**BT_RULE, "provenance": GOOD_PROV}]})
+    prov = S._shape(row)["rule_provenance"]["bt_1h_cci_value_gte100"]
+    assert prov["mined"] and prov["armed"]
+    assert "in-sample +0.0514" in prov["line"] and "holdout +0.0301" in prov["line"]
+
+
+def test_a_hand_written_rule_does_not_clutter_the_provenance_surface():
+    row = _Row(entry_filters=ADX)
+    assert S._shape(row)["rule_provenance"] == {}
+
+
+def test_the_page_shows_provenance_and_never_lets_it_be_typed_in():
+    """A claim about a backtest that an operator can edit by hand is not a
+    record of anything. The panel renders it; there is no input bound to it."""
+    jsx = RULE_TYPES_JSX.read_text(encoding="utf-8")
+    assert "function Provenance(" in jsx and "<Provenance p={r.provenance}" in jsx
+    assert "effect_in_sample" in jsx and "effect_holdout" in jsx
+    assert "provenance:" not in jsx, "provenance must never be patched from the UI"
+
+
 def test_a_skip_count_is_deduped_by_signal_not_by_event():
     """One signal fans out to several legs and each can log its own
     `entry_filtered`. Counting rows would push an accumulation past the N>=30

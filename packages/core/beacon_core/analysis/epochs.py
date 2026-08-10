@@ -27,7 +27,11 @@ import json
 # Rule keys that name a rule rather than describe it. Changing one of these
 # CANNOT change what the filter does, so it must not reset an accumulation: the
 # whole point of the digest is that a relabel is free and a rule change is not.
-COSMETIC_KEYS = ("name", "note", "label", "comment", "description")
+# `provenance` (#201) is here for the same reason: it records where a rule CAME
+# FROM, and documenting a rule that is already running must not be the act that
+# throws away its accumulation. Backfilling provenance onto the six live `bt_`
+# rules would otherwise close every one of their epochs at once.
+COSMETIC_KEYS = ("name", "note", "label", "comment", "description", "provenance")
 
 
 def _canon(v):

@@ -257,6 +257,53 @@ function RuleFields({ when, set, setMany, catalog }) {
   return null;
 }
 
+// Where a mined rule came from (#201). Read-only: provenance is written by
+// whatever promoted the replay variant, not typed in here — a claim about a
+// backtest that an operator can edit by hand is not a record of anything.
+//
+// The three effects sit on ONE line on purpose. "backtest said -0.4R, holdout
+// said -0.1R, live week said -0.42R" is the sentence that decides whether a
+// mined rule is signal or winner's curse, and it used to take three separate
+// archaeology sessions to assemble.
+const effR = (e) => (e && e.mean_r != null
+  ? `${e.mean_r >= 0 ? "+" : ""}${Number(e.mean_r).toFixed(4)}${e.n != null ? ` (n=${e.n})` : ""}`
+  : "—");
+
+function Provenance({ p }) {
+  if (!p) return null;
+  if (p.status === "unrecorded") {
+    return (
+      <p className="text-[11px] text-warn">
+        Provenance unrecorded — this rule came from somewhere, but nothing
+        records which run, how many candidates it beat, or what it did out of
+        sample. It can be trusted, not reviewed.
+      </p>
+    );
+  }
+  const cand = p.n_candidates_screened;
+  const holdN = p.effect_holdout?.n;
+  // Candidates per held-out observation. Not a multiplicity correction and not
+  // offered as one — it is the "how hard did we look" number.
+  const intensity = cand && holdN ? (cand / holdN).toFixed(1) : null;
+  return (
+    <div className="text-[11px] text-muted space-y-0.5">
+      <div>
+        in-sample <span className="num">{effR(p.effect_in_sample)}</span>
+        {" → "}holdout <span className="num">{effR(p.effect_holdout)}</span>
+      </div>
+      <div>
+        {p.replay_run_id != null && <>replay run #{p.replay_run_id} · </>}
+        {cand != null && <>{cand} candidates screened</>}
+        {intensity && (
+          <span className={Number(intensity) >= 5 ? "text-warn" : ""}>
+            {" "}· {intensity} per held-out trade
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function EntryFilterRules({ rules, onChange }) {
   const list = rules || [];
   const [catalog, setCatalog] = useState(null);
@@ -325,6 +372,7 @@ export default function EntryFilterRules({ rules, onChange }) {
                   <button onClick={() => onChange(list.filter((_, j) => j !== i))} className="ml-auto text-short" title="remove rule"><Trash2 className="w-4 h-4" /></button>
                 </div>
                 <p className="text-[11px] text-muted">{RULE_TYPES[type]?.hint}</p>
+                <Provenance p={r.provenance} />
                 <RuleFields when={r.when} set={(k, v) => patchWhen(i, k, v)}
                   setMany={(obj) => patchWhenMany(i, obj)} catalog={catalog} />
               </div>

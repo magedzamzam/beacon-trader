@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from beacon_core.analysis import epochs as EP
+from beacon_core.analysis import provenance as PV
 from beacon_core.db.models import Account, Event, ExecutionStrategy, Source
 from beacon_core.execution import strategy as ST
 from beacon_core.execution import staging as STG
@@ -175,6 +176,19 @@ def _clean_entry_filters(ef) -> dict | None:
                 out["mode"] = mode
             else:
                 out.pop("mode", None)
+            # #201: a provenance block is a CLAIM about where a rule came from.
+            # Validated strictly here — the opposite of the evaluator's
+            # fail-open reading — because a malformed claim that is silently
+            # kept reads as "recorded" to every later reviewer.
+            if "provenance" in out:
+                try:
+                    p = PV.clean_provenance(out["provenance"])
+                except ValueError as exc:
+                    raise HTTPException(422, f"{where}: {exc}")
+                if p is None:
+                    out.pop("provenance", None)
+                else:
+                    out["provenance"] = p
             cleaned.append(out)
         ef = {**ef, "rules": cleaned}
     return ef or None
@@ -188,6 +202,45 @@ def _clean_exit_policy(xp) -> dict | None:
     if not _valid_sl_rules(xp.get("sl_rules")):
         raise HTTPException(422, "exit_policy.sl_rules must be a list of {trigger, action:move_sl_to}")
     return xp or None
+
+
+def _armed(rule) -> bool:
+    """Can this rule actually remove or resize a trade? Shadow rules are being
+    MEASURED, which is the thing we want to stay cheap."""
+    return bool(isinstance(rule, dict) and rule.get("enabled", True)
+                and ST.rule_mode(rule) == "live")
+
+
+def _rule_key(rule) -> str:
+    """Identity of a rule for "is this the same one that was already running?".
+
+    Reuses the epoch digest's canonicalisation, so `30` and `"30"` are one rule
+    here for exactly the reason they are one epoch there."""
+    return EP.epoch_digest({"rules": [rule]}, None)
+
+
+def _check_promotions(new_rules, old_rules) -> list:
+    """Gate the screen->live step (#201), and ONLY that step.
+
+    Applied to rules being armed that were NOT already armed in this exact form.
+    Re-saving a config that is already running cannot make anything worse, and
+    refusing it would trap the operator behind a rule they did not write today —
+    the six live `bt_` rules predate provenance entirely. What the gate stops is
+    a NEW mined rule going live with nothing recorded about the run, the
+    candidate count, or what it did out of sample.
+
+    Returns the warnings; raises 422 on a refusal."""
+    already = {_rule_key(r) for r in (old_rules or []) if _armed(r)}
+    warnings = []
+    for i, r in enumerate(new_rules or []):
+        armed = _armed(r)
+        warnings.extend(PV.promotion_warnings(r, armed=armed))
+        if not armed or _rule_key(r) in already:
+            continue
+        verdict = PV.promotion_check(r, armed=True)
+        if not verdict["ok"]:
+            raise HTTPException(422, f"rules[{i}]: {verdict['reason']}")
+    return warnings
 
 
 async def _skips_since(db: AsyncSession, account_id: int | None, since) -> int:
@@ -234,7 +287,19 @@ def _shape(s: ExecutionStrategy) -> dict:
             "epoch_started_at": (s.epoch_started_at.isoformat()
                                  if s.epoch_started_at else None),
             "epoch": EP.epoch_name(s.entry_filters, s.entry_policy,
-                                   digest=s.epoch_digest)}
+                                   digest=s.epoch_digest),
+            # #201: "backtest said -0.4R, holdout said -0.1R" as ONE line, not
+            # three archaeology sessions. Keyed by rule name so the page can put
+            # it on the rule it belongs to.
+            "rule_provenance": {
+                (r.get("name") or f"rules[{i}]"): {
+                    "mined": PV.is_mined(r),
+                    "status": (r.get("provenance") or {}).get("status"),
+                    "armed": _armed(r),
+                    **(PV.shrinkage(r) or {}),
+                }
+                for i, r in enumerate((s.entry_filters or {}).get("rules") or [])
+                if isinstance(r, dict) and PV.is_mined(r)}}
 
 
 @router.get("")
@@ -287,6 +352,11 @@ async def upsert(body: dict, db: AsyncSession = Depends(get_db)):
         else ExecutionStrategy.account_id == account_id,
         ExecutionStrategy.source_id.is_(source_id) if source_id is None
         else ExecutionStrategy.source_id == source_id))).scalar_one_or_none()
+    # #201: the screen->live gate, against what is ALREADY armed on this scope.
+    promo = _check_promotions((entry_filters or {}).get("rules"),
+                              ((existing.entry_filters or {}).get("rules")
+                               if existing else None))
+
     now = utcnow()
     new_digest = EP.epoch_digest(entry_filters, entry_policy)
     warning = None
@@ -344,6 +414,10 @@ async def upsert(body: dict, db: AsyncSession = Depends(get_db)):
     out = _shape(row)
     if warning:
         out["epoch_warning"] = warning
+    if promo:
+        # Not a refusal — "how hard did we look before it worked?" is a
+        # judgement about a research programme, not about one rule.
+        out["provenance_warnings"] = promo
     return out
 
 
