@@ -27,6 +27,20 @@ const money = (v) => (v == null ? "—" :
   (v >= 0 ? "+" : "") + Number(v).toLocaleString(undefined,
     { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
 
+// The default window is RELATIVE, never a literal. Two hardcoded dates went
+// stale the day after they were written and then silently dropped a further day
+// of signals every day after that — an operator who never touched the fields got
+// a verdict computed on a truncated book with no cue that the tail was missing.
+// UTC on purpose: the form sends these back as `T00:00:00Z`/`T23:59:59Z` and the
+// ledger is UTC, so a local-date reading would shift the window by a day.
+const DEFAULT_WINDOW_DAYS = 30;
+const isoDay = (d) => d.toISOString().slice(0, 10);
+const defaultWindow = () => {
+  const now = new Date();
+  return { from: isoDay(new Date(now.getTime() - DEFAULT_WINDOW_DAYS * 864e5)),
+           to: isoDay(now) };
+};
+
 const TRAVEL_LABEL = {
   straight_to_sl: "straight to SL",
   ranged: "ranged, no direction",
@@ -149,8 +163,10 @@ function NewBacktest({ sources, accounts, catalog, onQueued }) {
   const [scopeType, setScopeType] = useState("source");
   const [sourceId, setSourceId] = useState("");
   const [accountId, setAccountId] = useState("");
-  const [from, setFrom] = useState("2026-07-05");
-  const [to, setTo] = useState("2026-07-30");
+  // Lazy initialiser: evaluated once on mount, so the window is anchored to the
+  // day the page was opened rather than re-derived on every render.
+  const [from, setFrom] = useState(() => defaultWindow().from);
+  const [to, setTo] = useState(() => defaultWindow().to);
   const [conds, setConds] = useState([]);            // free-form entry conditions
   const [atr, setAtr] = useState("");                // the one non-indicator filter
   const [exitMode, setExitMode] = useState("");

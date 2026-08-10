@@ -288,6 +288,24 @@ def test_the_page_can_launch_a_run():
     assert "replayJobs" in page
 
 
+def test_the_default_window_is_relative_and_never_a_hardcoded_date():
+    """A literal date in the form's initial state is a slow leak: it is right on
+    the day it is written and then drops one more day of signals every day
+    after, with nothing on screen saying the tail was cut. The operator who
+    never touches the fields is exactly the one who gets the truncated verdict,
+    so the default has to be derived from `now`."""
+    page = REPLAY_PAGE.read_text(encoding="utf-8")
+    code = re.sub(r"/\*.*?\*/", "", page, flags=re.S)
+    code = re.sub(r"^\s*//.*$", "", code, flags=re.M)
+    # No `useState("2026-…")` anywhere: that is the shape the bug shipped in.
+    assert not re.search(r'useState\(\s*"\d{4}-\d{2}-\d{2}"', code), \
+        "the date window must not be seeded from a literal"
+    assert "defaultWindow()" in code, "the window must be derived from now"
+    # ...and the derivation has to be UTC, because the form posts these back as
+    # `T00:00:00Z` and a local-date reading shifts the whole window by a day.
+    assert "toISOString().slice(0, 10)" in code
+
+
 def test_the_page_asks_one_question_and_states_the_two_answers():
     """The rebuild's whole point. The screen exists to answer "would we have made
     money doing it differently", so it must ask for a scope, a window and a
