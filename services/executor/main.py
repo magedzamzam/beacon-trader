@@ -26,6 +26,7 @@ from beacon_core.db.models import (Account, Event, Leg, Signal, Source, Trade,
                                    StagedEntry, StagedTranche)
 from beacon_core.execution import strategy as ST
 from beacon_core.execution import staging as STG
+from beacon_core.execution import placement as PLACE     # broker-refusal recovery (#221)
 from beacon_core.brokers import build_adapter, symbol_map
 from beacon_core.brokers import fx
 from beacon_core.tasks import spawn_bg
@@ -925,35 +926,84 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                                            "entry": str(pleg.entry),
                                            "trigger": str(pleg.trigger) if pleg.trigger is not None else None}))
                 continue
-            try:
-                _is_market = pleg.order_type == "MARKET"
-                req = PlaceOrderRequest(
-                    broker_symbol=smap.broker_epic,
-                    side=OrderSide.BUY if side_buy else OrderSide.SELL,
-                    order_type=OrderType.MARKET if _is_market else OrderType.LIMIT,
-                    quantity=pleg.lot,
-                    limit_price=None if _is_market else pleg.entry,
-                    stop_loss=pleg.sl, take_profit=pleg.tp,
-                    # Broker-enforced TTL for working orders (#40) — never GTC.
-                    good_till=None if _is_market else good_till,
-                )
-                res = await adapter.place_order(req)
-                if res.status == OrderStatus.REJECTED:
-                    # Broker declined the order (market closed, risk check, min
-                    # size, bad epic, …). Make it visible instead of silently
-                    # leaving the leg 'pending'.
-                    leg.status = "rejected"
-                    leg.outcome = "rejected"
-                    session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="reject",
-                                      payload={"ref": res.broker_order_ref,
-                                               "reason": res.rejection_reason}))
-                    log.warning("signal %s acct %s leg %s REJECTED by broker: %s",
-                                sig.id, acct.id, leg.id, res.rejection_reason)
-                    _broker_error(
-                        "reject", f"Order rejected: {res.rejection_reason or 'no reason given'}",
-                        account=acct.name, symbol=sig.symbol, account_id=acct.id)
+            # #221: place, and RECOVER a refusal we understand rather than
+            # dropping the leg's size. Two broker errors are routinely
+            # recoverable — a LIMIT the market reached before we submitted it,
+            # and a take-profit outside the broker's band (the error names the
+            # bound). Both were discarding the leg: 49 legs / 954.93 lots over
+            # six weeks, invisible because only a `rejected` row was written and
+            # nothing recorded the exposure the trade therefore never carried.
+            # The decision is pure and lives in execution/placement.py; at most
+            # ONE retry, and anything unrecognised still fails closed.
+            _otype, _tp, _retried_as, _err, res = pleg.order_type, pleg.tp, None, None, None
+            _first_err = None
+            for _attempt in (1, 2):
+                try:
+                    _is_market = _otype == "MARKET"
+                    res = await adapter.place_order(PlaceOrderRequest(
+                        broker_symbol=smap.broker_epic,
+                        side=OrderSide.BUY if side_buy else OrderSide.SELL,
+                        order_type=OrderType.MARKET if _is_market else OrderType.LIMIT,
+                        quantity=pleg.lot,
+                        limit_price=None if _is_market else pleg.entry,
+                        stop_loss=pleg.sl, take_profit=_tp,
+                        # Broker-enforced TTL for working orders (#40) — never GTC.
+                        good_till=None if _is_market else good_till,
+                    ))
+                    _err = res.rejection_reason if res.status == OrderStatus.REJECTED else None
+                except Exception as exc:      # one leg failing must not sink the rest
+                    res, _err = None, exc
+                if _err is None or _attempt == 2:
+                    break
+                _first_err = _err          # what the broker said the FIRST time
+                _plan = PLACE.retry_plan(_err, side_buy=side_buy, order_type=_otype,
+                                         entry=pleg.entry, take_profit=_tp)
+                if not _plan:
+                    break
+                if _plan["action"] == PLACE.RETRY_AS_MARKET:
+                    # Refused as "at market" means price already reached the
+                    # level, so a market fill is at-or-BETTER in both directions
+                    # and planned risk cannot rise (#140's argument, one module).
+                    _otype, _retried_as = "MARKET", "MARKET"
                 else:
-                    if pleg.order_type == "MARKET":
+                    _tp, _retried_as = _plan["take_profit"], "TP@%s" % _plan["take_profit"]
+                log.warning("signal %s acct %s leg %s refused (%s) — retrying as %s",
+                            sig.id, acct.id, leg.id, str(_err)[:120], _retried_as)
+
+            if _err is not None:
+                # Unrecoverable. Make it visible instead of silently leaving the
+                # leg 'pending' — and say how much size never reached the broker.
+                leg.status = "rejected"
+                leg.outcome = "rejected"
+                session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="reject",
+                                  payload={"ref": getattr(res, "broker_order_ref", None),
+                                           "reason": str(_err)[:300]}))
+                session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="leg_rejected",
+                                  payload=PLACE.rejection_event(
+                                      leg, intended_lot=pleg.lot, error=_err,
+                                      retried_as=_retried_as, recovered=False)))
+                log.warning("signal %s acct %s leg %s REJECTED by broker: %s",
+                            sig.id, acct.id, leg.id, str(_err)[:200])
+                _broker_error(
+                    "reject", f"Order rejected: {str(_err) or 'no reason given'}",
+                    account=acct.name, symbol=sig.symbol, account_id=acct.id)
+            else:
+                # Recording the accepted order must not be able to sink the rest
+                # of the ladder either — the guarantee the old `except Exception`
+                # around this whole block used to give.
+                try:
+                    if _retried_as is not None:
+                        # The leg is not what the planner asked for; persist what
+                        # was actually sent so reconciliation reads the truth, and
+                        # record the recovery with the size it saved.
+                        leg.order_type = _otype
+                        leg.tp = _tp
+                        session.add(Event(trade_id=trade.id, leg_id=leg.id,
+                                          kind="leg_rejected",
+                                          payload=PLACE.rejection_event(
+                                              leg, intended_lot=pleg.lot, error=_first_err,
+                                              retried_as=_retried_as, recovered=True)))
+                    if _otype == "MARKET":
                         leg.broker_position_ref = res.broker_order_ref
                         leg.status = "open" if res.status == OrderStatus.FILLED else "pending"
                         # A 0 fill level is an UNKNOWN fill, not a fill at zero.
@@ -973,13 +1023,11 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                                                "status": res.status.value}))
                     placed += 1
                     placed_lots += pleg.lot
-            except Exception as exc:              # one leg failing must not sink the rest
-                leg.status = "rejected"
-                session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="reject",
-                                  payload={"error": str(exc)[:300]}))
-                log.warning("leg place failed (trade %s): %s", trade.id, exc)
-                _broker_error("place_failed", f"Order placement failed: {exc}",
-                              account=acct.name, symbol=sig.symbol, account_id=acct.id)
+                except Exception as exc:      # one leg failing must not sink the rest
+                    leg.status = "rejected"
+                    session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="reject",
+                                      payload={"error": str(exc)[:300]}))
+                    log.warning("leg record failed (trade %s): %s", trade.id, exc)
             await asyncio.sleep(1.0 / max(settings.broker_rate_per_sec, 0.1))
 
         # Persist the staged-entry state (#129) so the monitor can drive the DECIDE
