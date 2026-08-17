@@ -18,6 +18,11 @@ services:
     build:
       context: .
       dockerfile: services/api/Dockerfile
+      args:
+        # Build provenance (#218). Empty default so a plain `docker compose build`
+        # still works; pass it to record the commit:
+        #   GIT_SHA=$(git rev-parse HEAD) docker compose build api executor monitor telegram
+        GIT_SHA: "${GIT_SHA:-}"
     restart: unless-stopped
     env_file: .env
     ports:
@@ -30,6 +35,8 @@ services:
     build:
       context: .
       dockerfile: services/telegram/Dockerfile
+      args:
+        GIT_SHA: "${GIT_SHA:-}"                                    # (#218)
     restart: unless-stopped
     env_file: .env
     depends_on:
@@ -40,6 +47,8 @@ services:
     build:
       context: .
       dockerfile: services/executor/Dockerfile
+      args:
+        GIT_SHA: "${GIT_SHA:-}"                                    # (#218)
     restart: unless-stopped
     env_file: .env
     depends_on:
@@ -50,6 +59,8 @@ services:
     build:
       context: .
       dockerfile: services/monitor/Dockerfile
+      args:
+        GIT_SHA: "${GIT_SHA:-}"                                    # (#218)
     restart: unless-stopped
     env_file: .env
     depends_on:

@@ -6,6 +6,10 @@ RUN pip install /app/packages/core
 COPY services/monitor/requirements.txt /tmp/req.txt
 RUN if [ -s /tmp/req.txt ]; then pip install -r /tmp/req.txt; fi
 COPY services/monitor /app
+# Build provenance — rationale and layer-order note in services/api/Dockerfile. (#218)
+#   GIT_SHA=$(git rev-parse HEAD) docker compose build monitor
+ARG GIT_SHA=""
+ENV BEACON_GIT_SHA=$GIT_SHA
 EXPOSE 8080
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \
   CMD python -c "import urllib.request;urllib.request.urlopen('http://localhost:8080/health')" || exit 1
