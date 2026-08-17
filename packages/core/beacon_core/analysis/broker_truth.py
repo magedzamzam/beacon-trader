@@ -4,12 +4,12 @@
 get wrong in a way that looks right, so the dedup lives here once rather than
 being re-derived by every caller:
 
-  * The identity of an activity is `(account_id, deal_id, activity_at, type)` —
-    the table's own unique constraint. Collapsing on `deal_id` alone (the
-    tempting `MAX(realized_pl) GROUP BY deal_id`) silently drops every partial
-    close but the largest, which on a laddered book is most of the money.
-  * Rows can arrive twice from two feeds differing only by `source` (the USER/TP
-    pair), so the dedup is a MAX over the identity, not a SUM over it.
+  * The identity of an activity is `(account_id, deal_id, leg_id, type,
+    realized_pl)`. Collapsing on `deal_id` alone (the tempting
+    `MAX(realized_pl) GROUP BY deal_id`) silently drops every partial close but
+    the largest, which on a laddered book is most of the money.
+  * Rows arrive twice for one close, so the dedup is a MAX over the identity,
+    not a SUM over it.
   * Only then is it summed per trade.
 
 Pure by design: the query belongs to the caller, the arithmetic belongs here, so
@@ -19,20 +19,49 @@ from __future__ import annotations
 
 from typing import Iterable, Optional
 
-# The activity identity, in the order the unique constraint declares it.
-IDENTITY = ("account_id", "deal_id", "activity_at", "type")
+# The activity identity (#216). It USED to be the table's own unique
+# constraint, `(account_id, deal_id, activity_at, type)`, and that key NEVER
+# FIRED: measured across the whole live table, ZERO groups had more than one
+# row, so this function was an expensive no-op and every duplicated close was
+# counted twice.
+#
+# `activity_at` is why. The duplicate this exists for is one close reported
+# twice, and the reports do not share a timestamp — observed gaps run from
+# 45 MILLISECONDS to 2 HOURS 1 MINUTE, so no tolerance window separates a
+# duplicate from a genuine partial close either.
+#
+# `realized_pl` replaces it, keyed per LEG. Two rows carrying the identical
+# amount on the same leg of the same deal are one close reported twice: 53
+# groups / 106 rows across the book, of which 47 are two different sources
+# (TP+USER, SL+USER) and 6 are the SAME feed repeating itself inside 1.3s — so
+# keying on `source` would have missed those 6. A genuine scale-out differs in
+# lot or price, and therefore in P&L, which is what keeps it separate here.
+IDENTITY = ("account_id", "deal_id", "leg_id", "type", "realized_pl")
+
+
+def _amount(v):
+    """The money in a form two feeds reporting it agree on.
+
+    One can send `100.0` and the other `Decimal('100.00')`; keying on the raw
+    value would read those as two closes and defeat the dedup a second time."""
+    if v is None:
+        return None
+    try:
+        return round(float(v), 2)
+    except (TypeError, ValueError):
+        return v
 
 
 def _key(row: dict) -> tuple:
-    return tuple(row.get(k) for k in IDENTITY)
+    return tuple(_amount(row.get(k)) if k == "realized_pl" else row.get(k)
+                 for k in IDENTITY)
 
 
 def dedupe_activities(rows: Iterable[dict]) -> list[dict]:
     """One row per activity identity, keeping the largest `realized_pl`.
 
-    MAX rather than "first seen": the duplicate pair differs only by `source`
-    and carries the same money, so either is correct, and MAX is the choice that
-    does not depend on the order the rows came back in."""
+    Every row in a group now carries the same amount by construction, so MAX is
+    simply an order-independent way to pick one."""
     best: dict = {}
     for r in rows or ():
         if r.get("realized_pl") is None:
