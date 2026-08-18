@@ -443,8 +443,8 @@ export default function Notifications() {
         <ul className="p-4 space-y-1.5 text-sm text-muted">
           {[
             "Severity thresholds and quiet hours",
-            "Daily / weekly performance digest scheduling",
-            "Escalation when a broker connection drops",
+            "Weekly / monthly performance digest (the daily digest is live)",
+            "Escalation (repeat/upgrade) when a broker connection stays down",
           ].map(x => (
             <li key={x} className="flex items-start gap-2">
               <span className="mt-1.5 w-1 h-1 rounded-full bg-muted shrink-0" />{x}
