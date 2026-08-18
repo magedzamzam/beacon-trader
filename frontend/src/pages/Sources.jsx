@@ -6,6 +6,31 @@ import { api } from "../lib/api";
 
 const KIND_LABEL = {
   telegram: "Channel ID", tradingview: "Webhook key", api: "API key", manual: "Key (optional)",
+  engine: "External id (unused)",
+};
+
+// The strategy that produced the evidence behind Lever 5 (replay run 43), offered
+// as a starting point so nobody authors a generator from a blank box. Edit it
+// freely -- the API validates on save and returns every problem at once.
+const REFERENCE_GENERATOR = {
+  timeframe: "15m",
+  long: { when: { all: [
+    { type: "indicator", id: "macd", timeframe: "15m", field: "cross", op: "eq", value: "up" },
+    { type: "indicator", id: "rsi", timeframe: "15m", field: "value", op: "lt", value: 70 },
+    { any: [
+      { type: "indicator", id: "fvg", timeframe: "15m", field: "present", op: "is_true" },
+      { type: "indicator", id: "order_block", timeframe: "15m", field: "present", op: "is_true" },
+    ] },
+  ] } },
+  short: { when: { all: [
+    { type: "indicator", id: "macd", timeframe: "15m", field: "cross", op: "eq", value: "down" },
+    { type: "indicator", id: "rsi", timeframe: "15m", field: "value", op: "gt", value: 30 },
+  ] } },
+  entry: { type: "close" },
+  sl: { type: "atr_mult", timeframe: "1h", period: 14, mult: 1.5 },
+  tps: [{ type: "r_mult", r: 1.0 }, { type: "r_mult", r: 2.0 }, { type: "r_mult", r: 3.0 }],
+  cooldown_bars: 60,
+  max_signals_per_day: 8,
 };
 
 export default function Sources() {
@@ -97,18 +122,37 @@ function SourceModal({ source, accounts, onClose, onSaved }) {
   const [enabled, setEnabled] = useState(s.enabled_for_trading || false);
   const [accountMap, setAccountMap] = useState(s.account_map || []);
   const [err, setErr] = useState(null);
+  // An ENGINE source's strategy IS the source — unlike a channel, where entry /
+  // filtration / exit live on the Strategies page. So this box is only shown,
+  // and only sent, for kind='engine'.
+  const [genText, setGenText] = useState(
+    JSON.stringify((s.strategy || {}).generator || REFERENCE_GENERATOR, null, 2));
+  const isEngine = kind === "engine";
 
   const toggleAcct = (id) => setAccountMap(m => m.includes(id) ? m.filter(x => x !== id) : [...m, id]);
 
   const save = async () => {
-    // A source is now only identity + trust + routing. Entry/Filtration/Exit live
-    // on the Strategies page and risk on Risk & Limits (#84) — we omit strategy/
-    // risk_config here so the PATCH preserves any existing values untouched.
+    // For a CHANNEL a source is identity + trust + routing: entry/filtration/exit
+    // live on the Strategies page and risk on Risk & Limits (#84), so `strategy`
+    // is omitted and the PATCH preserves whatever is already there.
+    // For an ENGINE the generator config IS the strategy, so it is sent — and
+    // only then, so a channel can never have its SL rules wiped by this screen.
     const payload = {
       kind, name, external_id: externalId || null,
       is_trusted: trusted, enabled_for_trading: enabled,
       account_map: accountMap,
     };
+    if (isEngine) {
+      let parsed;
+      try { parsed = JSON.parse(genText); }
+      catch (e) {
+        // Caught here rather than sent: a JSON syntax error would come back as an
+        // opaque 422 about the request body, not about the strategy.
+        setErr(`Generator config is not valid JSON — ${e.message}`);
+        return;
+      }
+      payload.strategy = { ...(s.strategy || {}), generator: parsed };
+    }
     try {
       if (source) await api.updateSource(source.id, payload);
       else await api.createSource(payload);
@@ -126,14 +170,42 @@ function SourceModal({ source, accounts, onClose, onSaved }) {
             <option value="tradingview">TradingView webhook</option>
             <option value="api">Generic API</option>
             <option value="manual">Manual desk</option>
+            <option value="engine">Engine (own signals)</option>
           </Select>
         </Field>
         <Field label="Name"><Input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. GoldGA" /></Field>
       </div>
-      <Field label={KIND_LABEL[kind]}
-        hint={kind === "telegram" ? "The channel id, e.g. -1001220837618" : "Used as the webhook auth key in /ingest/tv/<key>"}>
-        <Input mono value={externalId} onChange={e => setExternalId(e.target.value)} />
-      </Field>
+      {!isEngine && (
+        <Field label={KIND_LABEL[kind]}
+          hint={kind === "telegram" ? "The channel id, e.g. -1001220837618" : "Used as the webhook auth key in /ingest/tv/<key>"}>
+          <Input mono value={externalId} onChange={e => setExternalId(e.target.value)} />
+        </Field>
+      )}
+
+      {isEngine && (
+        <Field label="Generator strategy (JSON)"
+          hint="The conditions, the geometry and the caps. Saved straight to the engine — no deploy. Validated on save; every problem comes back at once.">
+          <textarea
+            value={genText}
+            onChange={e => setGenText(e.target.value)}
+            spellCheck={false}
+            rows={18}
+            className="w-full bg-panel2 border border-edge rounded-lg px-3 py-2 text-xs num text-ink focus:border-beacon outline-none"
+          />
+        </Field>
+      )}
+      {/* Outside the Field on purpose: Field wraps its children in a <label>, and
+          a button nested in a label also focuses the labelled control on click. */}
+      {isEngine && (
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" onClick={() => setGenText(JSON.stringify(REFERENCE_GENERATOR, null, 2))}>
+            Load reference strategy
+          </Button>
+          <span className="text-[11px] text-muted">
+            MACD cross + RSI ceiling + FVG/OB, 1.5×ATR stop, 1R/2R/3R ladder.
+          </span>
+        </div>
+      )}
 
       <div className="flex gap-6">
         <Field label="Trusted"><Toggle checked={trusted} onChange={setTrusted} /></Field>
@@ -155,8 +227,19 @@ function SourceModal({ source, accounts, onClose, onSaved }) {
       </div>
 
       <div className="text-[11px] text-muted border-t border-edge pt-3">
-        Entry, filtration and exit (SL) rules now live on the <b>Strategies</b> page (per account × source);
-        risk lives on <b>Risk &amp; Limits</b>. A source here is just identity, trust, and routing.
+        {isEngine ? (
+          <>
+            An engine writes <b>shadow</b> signals only — they are scored forward but
+            <b> never traded</b>, whatever “Enabled for trading” says, until the Lever-5
+            evidence is in. It cannot place an order: nothing in the producer can reach
+            the execution queue. Expect roughly one signal a day.
+          </>
+        ) : (
+          <>
+            Entry, filtration and exit (SL) rules now live on the <b>Strategies</b> page (per account × source);
+            risk lives on <b>Risk &amp; Limits</b>. A source here is just identity, trust, and routing.
+          </>
+        )}
       </div>
 
       <div className="flex justify-end gap-2 pt-2">
