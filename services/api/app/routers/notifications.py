@@ -84,6 +84,43 @@ async def put_config(body: dict, db: AsyncSession = Depends(get_db)):
     return out
 
 
+# --- scheduled reports & alarms (#209/#210) -----------------------------------
+# Three operator-facing background jobs shipped tunable from `settings_store`
+# with zero API and zero UI, so the only way to disable the digest or adjust the
+# dark-arm threshold was a raw DB write - while the portal advertised digest
+# scheduling as a PLANNED capability. Same store, same keys the monitor and
+# dispatch already read; this is the surface that was missing, not new state.
+@router.get("/policy")
+async def get_policy(db: AsyncSession = Depends(get_db)):
+    """Every delivery/schedule policy, defaults filled in. The monitor treats a
+    missing block as "on with defaults", so an empty store must not render as
+    "off" in a screen the operator then trusts."""
+    return {k: notif.clean_policy(k, await get_setting(db, k, None) or _POLICY_ON(k))
+            for k in notif.POLICY_KEYS}
+
+
+def _POLICY_ON(key: str) -> dict:
+    """What an UNSET policy actually behaves as. `daily_summary` and `arm_dark`
+    are opt-OUT in the monitor (`if cfg.get("enabled") is False: return`), quiet
+    hours is opt-IN in dispatch. The screen has to say what is running, not what
+    the JSON happens to contain."""
+    return {"enabled": key != "quiet_hours"}
+
+
+@router.put("/policy")
+async def put_policy(body: dict, db: AsyncSession = Depends(get_db)):
+    """Persist only known keys, whitelisted and clamped.
+
+    The monitor and dispatch already read these defensively, but the API should
+    not STORE junk they then have to tolerate: an `at_utc: "banana"` is a digest
+    that silently never fires while this screen says it is on."""
+    incoming = body or {}
+    for k in notif.POLICY_KEYS:
+        if k in incoming:
+            await set_setting(db, k, notif.clean_policy(k, incoming[k]))
+    return await get_policy(db)
+
+
 @router.get("/deliveries")
 async def get_deliveries(limit: int = 50, db: AsyncSession = Depends(get_db)):
     """Recent dispatch outcomes, newest first (#181) — the per-channel result

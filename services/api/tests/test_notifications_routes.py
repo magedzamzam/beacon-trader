@@ -18,6 +18,8 @@ EXPECTED = {
     ("GET", "/notifications/catalog"),
     ("GET", "/notifications/config"),
     ("PUT", "/notifications/config"),
+    ("GET", "/notifications/policy"),
+    ("PUT", "/notifications/policy"),
     ("GET", "/notifications/deliveries"),
     ("POST", "/notifications/test/{channel_id}"),
     ("POST", "/notifications/test-event"),
@@ -53,3 +55,56 @@ def test_deliveries_is_read_only():
     writes = {(m, p) for m, p in _served()
               if p == "/notifications/deliveries" and m != "GET"}
     assert not writes
+
+
+# --- the policy surface (#209/#210) -------------------------------------------
+# The digest, the dark-arm alarm and the quiet-hours gate all shipped tunable
+# from `settings_store` with no API and no UI: the only way to disable the digest
+# or move the 80% skip threshold was a raw DB write, while this very page
+# advertised digest scheduling as a PLANNED capability.
+NOTIFICATIONS_JSX = Path(__file__).resolve().parents[3] / "frontend/src/pages/Notifications.jsx"
+
+
+def test_the_policy_route_covers_every_settings_only_knob():
+    """A key the monitor or dispatch reads but the API cannot write is exactly
+    the silent knob this closes."""
+    assert set(N.notif.POLICY_KEYS) == {"daily_summary", "arm_dark", "quiet_hours"}
+
+
+def test_an_unset_policy_reads_as_what_it_actually_does():
+    """The monitor treats a missing digest block as ON with defaults
+    (`if cfg.get("enabled") is False: return`), so an empty store must not render
+    as "off" in a screen the operator then trusts. Quiet hours is the opposite -
+    opt-IN in dispatch - and reads off."""
+    assert N._POLICY_ON("daily_summary") == {"enabled": True}
+    assert N._POLICY_ON("arm_dark") == {"enabled": True}
+    assert N._POLICY_ON("quiet_hours") == {"enabled": False}
+
+
+def test_the_write_path_clamps_rather_than_storing_junk():
+    """The monitor already reads defensively, but a stored `at_utc: "banana"` is
+    a digest that silently never fires while the screen says it is on."""
+    assert N.notif.clean_policy("daily_summary",
+                                {"enabled": True, "at_utc": "banana",
+                                 "rm -rf": "/"}) == {"enabled": True, "at_utc": "00:15"}
+    dark = N.notif.clean_policy("arm_dark", {"threshold": 42, "window_hours": -5})
+    assert dark["threshold"] == 1.0 and dark["window_hours"] == 1
+
+
+def test_the_page_renders_the_card_and_no_longer_calls_quiet_hours_planned():
+    jsx = NOTIFICATIONS_JSX.read_text(encoding="utf-8")
+    assert "PolicyCard" in jsx and "Scheduled reports" in jsx
+    # the companion copy fix (#208) has to hold once the feature actually ships
+    # just the planned LIST, not everything after it in the file
+    planned = jsx.split("Planned capabilities", 1)[1].split("</ul>", 1)[0]
+    assert "quiet hours" not in planned.lower()
+    assert "digest scheduling" not in planned.lower()
+
+
+def test_the_card_binds_every_knob_the_backend_accepts():
+    """A knob with an endpoint and no input is the same silent setting in a new
+    place."""
+    jsx = NOTIFICATIONS_JSX.read_text(encoding="utf-8")
+    for field in ("at_utc", "window_hours", "cooldown_hours", "min_signals",
+                  "threshold", "start_utc", "end_utc", "min_severity"):
+        assert field in jsx, field

@@ -437,12 +437,13 @@ export default function Notifications() {
 
       <Deliveries />
 
+      <PolicyCard catalog={cat} />
+
       {/* ---- Still-planned capabilities ---- */}
       <Card>
         <div className="px-4 py-3 border-b border-edge text-sm font-medium">Planned capabilities</div>
         <ul className="p-4 space-y-1.5 text-sm text-muted">
           {[
-            "Severity thresholds and quiet hours",
             "Weekly / monthly performance digest (the daily digest is live)",
             "Escalation (repeat/upgrade) when a broker connection stays down",
           ].map(x => (
@@ -473,6 +474,155 @@ const _clock = (ts) => {
  * without tailing a box, and gives the #76 class of silent drop a permanent
  * visible tripwire. Read-only telemetry over a bounded tail (last 500 rows).
  */
+/**
+ * Scheduled reports & alarms (#209) + the quiet-hours delivery gate (#210).
+ *
+ * Three operator-facing jobs shipped tunable from `settings_store` with no API
+ * and no UI, so disabling the digest or moving the dark-arm threshold meant a
+ * raw DB write - while this very page advertised digest scheduling as planned.
+ *
+ * The defaults are shown as placeholders: an empty field means "use the
+ * default", so the operator never has to retype a value they did not want to
+ * change. Bad input is clamped server-side, not here - the browser is not the
+ * layer that gets to decide what the monitor is allowed to read.
+ */
+function PolicyCard({ catalog }) {
+  const [p, setP] = useState(null);
+  const [err, setErr] = useState(null);
+  const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api.notificationPolicy().then(setP).catch(e => setErr(e.message));
+  }, []);
+
+  const set = (key, field, value) =>
+    setP(prev => ({ ...prev, [key]: { ...(prev?.[key] || {}), [field]: value } }));
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      setP(await api.saveNotificationPolicy(p));
+      setErr(null); setSaved(true); setTimeout(() => setSaved(false), 2000);
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+
+  if (err && !p) return <Card><ErrorNote>{err}</ErrorNote></Card>;
+  if (!p) return <Card><Empty>Loading…</Empty></Card>;
+
+  const digest = p.daily_summary || {};
+  const dark = p.arm_dark || {};
+  const quiet = p.quiet_hours || {};
+  const sev = catalog?.severity || {};
+  const floor = quiet.min_severity || "critical";
+  const rank = { info: 0, summary: 1, critical: 2 };
+  // What the current floor will and will not send, spelled out beside the
+  // control that sets it: "critical only" is not a self-explanatory phrase when
+  // the cost of guessing wrong is a missed stop-out.
+  const held = Object.keys(sev).filter(e => rank[sev[e]] < rank[floor]);
+  const delivered = Object.keys(sev).filter(e => rank[sev[e]] >= rank[floor]);
+
+  return (
+    <Card>
+      <div className="px-4 py-3 border-b border-edge text-sm font-medium">
+        Scheduled reports &amp; alarms
+      </div>
+      <div className="p-4 space-y-5">
+        {/* daily digest (#198) */}
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-sm">Daily summary</div>
+              <div className="text-xs text-muted">
+                One per-account roll-up of yesterday, sent once shortly after the
+                day ends. The three demo accounts are A/B/C arms, so this is one
+                message per arm — their sum describes no strategy.
+              </div>
+            </div>
+            <Toggle checked={digest.enabled !== false}
+              onChange={(v) => set("daily_summary", "enabled", v)} />
+          </div>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <Field label="Send at (UTC)" hint="default 00:15">
+              <Input type="time" value={digest.at_utc ?? ""} placeholder="00:15"
+                onChange={(e) => set("daily_summary", "at_utc", e.target.value)} />
+            </Field>
+          </div>
+        </div>
+
+        {/* dark-arm alarm (#200) */}
+        <div className="space-y-3 pt-4 border-t border-edge">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-sm">A/B arm not trading</div>
+              <div className="text-xs text-muted">
+                An arm skipping ~everything produces no trades and no
+                information — a broken experiment, not a conservative one. The
+                last one ran dark for two days before a human noticed.
+              </div>
+            </div>
+            <Toggle checked={dark.enabled !== false}
+              onChange={(v) => set("arm_dark", "enabled", v)} />
+          </div>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <Field label="Window (hours)" hint="default 24">
+              <NumberInput value={dark.window_hours ?? ""} placeholder="24"
+                onChange={(e) => set("arm_dark", "window_hours", e.target.value)} /></Field>
+            <Field label="Cooldown (hours)" hint="default 6 — one alert per cooldown">
+              <NumberInput value={dark.cooldown_hours ?? ""} placeholder="6"
+                onChange={(e) => set("arm_dark", "cooldown_hours", e.target.value)} /></Field>
+            <Field label="Min signals" hint="default 10 — below this, too quiet to judge">
+              <NumberInput value={dark.min_signals ?? ""} placeholder="10"
+                onChange={(e) => set("arm_dark", "min_signals", e.target.value)} /></Field>
+            <Field label="Skip-rate threshold" hint="0–1 · default 0.80">
+              <NumberInput step="0.05" value={dark.threshold ?? ""} placeholder="0.80"
+                onChange={(e) => set("arm_dark", "threshold", e.target.value)} /></Field>
+          </div>
+        </div>
+
+        {/* quiet hours (#210) */}
+        <div className="space-y-3 pt-4 border-t border-edge">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-sm">Quiet hours</div>
+              <div className="text-xs text-muted">
+                Inside the window, hold anything below the chosen severity. Held
+                events are still recorded in Deliveries — never silently dropped.
+              </div>
+            </div>
+            <Toggle checked={!!quiet.enabled}
+              onChange={(v) => set("quiet_hours", "enabled", v)} />
+          </div>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <Field label="From (UTC)" hint="default 22:00">
+              <Input type="time" value={quiet.start_utc ?? ""} placeholder="22:00"
+                onChange={(e) => set("quiet_hours", "start_utc", e.target.value)} /></Field>
+            <Field label="To (UTC)" hint="earlier than From crosses midnight">
+              <Input type="time" value={quiet.end_utc ?? ""} placeholder="06:00"
+                onChange={(e) => set("quiet_hours", "end_utc", e.target.value)} /></Field>
+            <Field label="Deliver at least" hint="anything below this is held">
+              <Select value={floor}
+                onChange={(e) => set("quiet_hours", "min_severity", e.target.value)}>
+                {(catalog?.severities || ["info", "summary", "critical"]).map(x =>
+                  <option key={x} value={x}>{x}</option>)}
+              </Select></Field>
+          </div>
+          <div className="text-[11px] text-muted space-y-0.5">
+            <div><span className="text-long">delivers:</span> {delivered.join(", ") || "—"}</div>
+            <div><span className="text-warn">holds:</span> {held.join(", ") || "nothing"}</div>
+          </div>
+        </div>
+
+        {err && <ErrorNote>{err}</ErrorNote>}
+        <div className="flex items-center justify-end gap-3">
+          {saved && <span className="text-xs text-long">Saved.</span>}
+          <Button onClick={save} disabled={busy}>Save schedule &amp; alarms</Button>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 function Deliveries() {
   const [rows, setRows] = useState(null);
   const [err, setErr] = useState(null);

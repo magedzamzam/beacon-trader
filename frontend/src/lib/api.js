@@ -143,6 +143,9 @@ export const api = {
   testNotificationChannel: (id) => post(`/notifications/test/${id}`, {}),
   testNotificationEvent: (body) => post("/notifications/test-event", body),
   notificationDeliveries: (limit = 50) => req(`/notifications/deliveries?limit=${limit}`),
+  // scheduled reports & alarms + the quiet-hours delivery gate (#209/#210)
+  notificationPolicy: () => req("/notifications/policy"),
+  saveNotificationPolicy: (p) => req("/notifications/policy", { method: "PUT", body: JSON.stringify(p) }),
   // risk limits + kill switch
   riskLimits: () => req("/risk-limits/config"),
   saveRiskLimits: (c) => req("/risk-limits/config", { method: "PUT", body: JSON.stringify(c) }),
