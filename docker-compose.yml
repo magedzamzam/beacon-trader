@@ -102,6 +102,40 @@ services:
       redis:
         condition: service_healthy
 
+  # Lever 5's shadow producer (#224). Runs every enabled `kind='engine'` source
+  # against the newest CLOSED bar and writes a `status='shadow'` signal when the
+  # strategy triggers.
+  #
+  # It CANNOT place an order. A signal reaches the executor exactly once, by
+  # being enqueued onto the durable queue in ingest/pipeline.py; this process
+  # neither imports the bus nor enqueues anything, and a test asserts that over
+  # the module's AST. `enabled_for_trading=false` on the source is the second,
+  # independent guard.
+  #
+  # It reads candles from our own store rather than the broker, so unlike
+  # candle-sync it costs no rate limit and can run often. 5 minutes against a
+  # 15m trigger bar means a signal is written within a few minutes of the bar
+  # closing; the bar-close stamp makes the exact cadence irrelevant to the
+  # ledger. Idle until an engine source exists.
+  engine-producer:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+      args:
+        GIT_SHA: "${GIT_SHA:-}"                                    # (#218)
+    restart: unless-stopped
+    env_file: .env
+    command: ["python", "/app/scripts/engine_producer.py", "--loop", "300"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 10m
+      timeout: 20s
+      start_period: 1m
+      retries: 2
+    depends_on:
+      redis:
+        condition: service_healthy
+
   # Offline replay + backtest harness (#169). RESEARCH, not trading.
   #
   # Deliberately different from every service above, and each difference is the

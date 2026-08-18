@@ -75,23 +75,7 @@ def rules_generator(bars: Sequence[B.Bar], config: dict) -> GeneratorOutput:
         when = bar.ts + dt.timedelta(minutes=spec.tf_minutes)
         counts["n_bars_evaluated"] += 1
 
-        cond_ctx: dict = {"price": bar.close}
-        ta = builder.ta_block(ta_rules, when)
-        if ta:
-            cond_ctx["ta"] = ta
-        adx = {}
-        for tf in adx_tfs:
-            blk = builder.adx_block(tf, when)
-            if blk is not None:
-                adx[tf] = blk
-        if adx:
-            cond_ctx["adx"] = adx
-        if spec.sessions:
-            try:
-                cond_ctx["sessions"] = list(
-                    (TH.status(spec.sessions, when) or {}).get("active") or [])
-            except Exception:
-                pass                              # fail-open, exactly as live
+        cond_ctx = G.condition_context(spec, builder, bar.close, when)
 
         direction, why = G.decide_direction(spec, cond_ctx)
         if direction is None:

@@ -97,3 +97,40 @@ def test_the_probe_does_not_cry_wolf_over_the_weekend():
     red every weekend, gets muted, and then hides a real stall."""
     src = SCRIPT.read_text(encoding="utf-8")
     assert "market closed" in src, "the freshness probe must exempt the market close"
+
+
+# --- the shadow producer runs on the same terms (#224) -----------------------
+
+def test_the_engine_producer_is_scheduled_too():
+    """A producer nobody runs accumulates no evidence, and Lever 5 is decided by
+    accumulated evidence over about six weeks."""
+    block = _service_block("engine-producer")
+    assert "engine_producer.py" in block
+    m = re.search(r'"--loop",\s*"(\d+)"', block)
+    assert m and 0 < int(m.group(1)) <= 900, \
+        "the producer must loop, and often enough to catch a 15m bar promptly"
+    assert "restart: unless-stopped" in block
+
+
+def test_the_producer_image_carries_the_script():
+    block = _service_block("engine-producer")
+    df = (REPO / re.search(r"dockerfile:\s*(\S+)", block).group(1)).read_text(encoding="utf-8")
+    assert re.search(r"^COPY scripts ", df, re.M)
+
+
+def test_the_producer_has_no_route_to_the_broker():
+    """Asserted over the AST, not the text: the script DISCUSSES the queue in its
+    docstring, so a grep would either fail on the prose or be weakened until it
+    passed."""
+    import ast
+    tree = ast.parse((REPO / "scripts" / "engine_producer.py").read_text(encoding="utf-8"))
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.add(node.module or "")
+    assert not [m for m in imported if "bus" in m], imported
+    calls = {n.func.attr if isinstance(n.func, ast.Attribute) else getattr(n.func, "id", "")
+             for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    assert "enqueue" not in calls and "place_order" not in calls, calls
