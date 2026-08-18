@@ -579,14 +579,14 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             try:
                 _decision = ST.evaluate_filter_rules(_frules, _filter_ctx)
                 _ff, _skip, _reasons = _decision.factor, _decision.skip, _decision.reasons
-                _shadow = _decision.shadow
+                _shadow, _evaluated = _decision.shadow, _decision.evaluated
             except Exception as exc:
                 log.exception("signal %s acct %s: filtration evaluation FAILED — "
                               "failing open at full size: %s", sig.id, acct.id, exc)
                 session.add(Event(kind="entry_filter_error", payload={
                     "signal_id": sig.id, "account_id": acct.id,
                     "error": str(exc), "rules": _frules}))
-                _ff, _skip, _reasons, _shadow = 1.0, False, [], []
+                _ff, _skip, _reasons, _shadow, _evaluated = 1.0, False, [], [], []
             # #167: what the shadow rules WOULD have done. Recorded before the live
             # skip returns, so a shadow rule is measurable on the very signals a
             # live rule rejects — otherwise the record is conditioned on the gate
@@ -594,12 +594,20 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             if _shadow:
                 session.add(Event(kind="filter_shadow", payload={
                     "signal_id": sig.id, "account_id": acct.id,
-                    "rules": _shadow}))
+                    "rules": _shadow,
+                    # #213: the values, not just the verdict — a shadow rule that
+                    # records only "matched" can never enter a feature screen.
+                    "evaluated": [e for e in _evaluated if e["mode"] == "shadow"]}))
             if _skip:
                 log.info("signal %s acct %s: SKIP by filtration (%s)", sig.id, acct.id, _reasons)
                 session.add(Event(kind="entry_filtered", payload={
                     "signal_id": sig.id, "account_id": acct.id,
-                    "reason": "filtration_skip", "rules": _reasons}))
+                    # `rules` stays a list of NAMES: every existing consumer of
+                    # this event reads it that way. `evaluated` is the new audit
+                    # trail — what each leaf asked and what it actually read
+                    # (#213), without which a removal cannot be reconstructed.
+                    "reason": "filtration_skip", "rules": _reasons,
+                    "evaluated": _evaluated}))
                 await session.commit()
                 return
             filter_factor = Decimal(str(_ff))

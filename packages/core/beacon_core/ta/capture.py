@@ -11,7 +11,8 @@ from decimal import Decimal
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from ..analysis import sidecar
-from ..db.models import SignalFeature
+from ..db.models import ExecutionStrategy, SignalFeature
+from ..execution import strategy as ST
 from ..logging import get_logger
 from ..settings_store import get_setting
 from ..timeutil import utcnow
@@ -42,12 +43,62 @@ async def load_config(session) -> dict:
     return sanitize_config(stored) if stored else dict(DEFAULT_CONFIG)
 
 
+async def live_rule_requirements(session) -> list:
+    """Every `(indicator, timeframe)` any ENABLED execution strategy references,
+    as `ta_rule_requirements` rows. Best-effort: a failure here degrades capture
+    to the fixed configured set, never to no capture at all."""
+    from sqlalchemy import select
+    try:
+        rows = (await session.execute(
+            select(ExecutionStrategy.entry_filters).where(
+                ExecutionStrategy.enabled.is_(True)))).scalars().all()
+    except Exception as exc:                     # pragma: no cover - degraded path
+        log.warning("could not read live filter rules for capture: %s", exc)
+        return []
+    reqs, seen = [], set()
+    for ef in rows:
+        for req in ST.ta_rule_requirements((ef or {}).get("rules") or []):
+            token = (req["timeframe"], req["key"])
+            if token not in seen:
+                seen.add(token)
+                reqs.append(req)
+    return reqs
+
+
+def capture_plan(cfg: dict, requirements) -> dict:
+    """`{timeframe: [{id, params}, ...]}` — the fixed configured capture UNIONED
+    with everything a live rule references (#213).
+
+    CAPTURE FOLLOWS CONFIGURATION. Since #167 an `indicator` gate can name any
+    registry entry, which made arming one a config act; the capture list stayed a
+    hand-maintained constant. So the highest-volume rule in the experiment gated
+    51 removals on `cci`, which `signal_features` has never held a single value
+    of — no counterfactual on the other twelve channels, no out-of-sample screen,
+    nothing to review. A rule can now never reference something we do not
+    persist, because the rules themselves are an input to what gets persisted."""
+    timeframes = list(cfg.get("timeframes") or DEFAULT_CONFIG["timeframes"])
+    base = list(cfg.get("indicators") or DEFAULT_CONFIG["indicators"])
+    plan = {tf: list(base) for tf in timeframes}
+    for req in requirements or ():
+        tf = req.get("timeframe")
+        if not tf or tf not in TF_RESOLUTION:
+            continue                             # nothing can fetch bars for it
+        want = {"id": req["id"], "params": req.get("params") or {}}
+        bucket = plan.setdefault(tf, list(base))
+        if not any(i.get("id") == want["id"]
+                   and (i.get("params") or {}) == want["params"] for i in bucket):
+            bucket.append(want)
+    return plan
+
+
 async def capture_for_signal(session, sig, adapter, smap, *, max_bars: int = MAX_BARS):
     """Fetch bars for each configured timeframe, compute the configured
     indicators, and upsert one SignalFeature row for `sig`."""
     cfg = await load_config(session)
-    timeframes = cfg.get("timeframes") or DEFAULT_CONFIG["timeframes"]
-    indicators = cfg.get("indicators") or DEFAULT_CONFIG["indicators"]
+    plan = capture_plan(cfg, await live_rule_requirements(session))
+    timeframes = sorted(plan, key=lambda t: list(TF_RESOLUTION).index(t))
+    n_indicators = len({(i["id"], tuple(sorted((i.get("params") or {}).items())))
+                        for items in plan.values() for i in items})
 
     # Shadow analytics sidecar (#51/#52): reuse the bars we're about to fetch for
     # its primary timeframe (no extra broker call), so estimators run on the same
@@ -80,7 +131,7 @@ async def capture_for_signal(session, sig, adapter, smap, *, max_bars: int = MAX
             continue
         if label == a_tf:                        # retain for the analytics sidecar
             analytics_bars = bars
-        f = compute_timeframe(bars, price, indicators)
+        f = compute_timeframe(bars, price, plan[label])
         if f is not None:
             tf_features[label] = f
 
@@ -97,7 +148,7 @@ async def capture_for_signal(session, sig, adapter, smap, *, max_bars: int = MAX
     ).on_conflict_do_nothing(constraint="uq_signal_feature")
     await session.execute(stmt)
     log.info("captured TA features for signal %s (%s timeframes, %s indicators)",
-             sig.id, len(tf_features), len(indicators))
+             sig.id, len(tf_features), n_indicators)
 
     # Shadow analytics sidecar (#51/#52) — runs in its OWN session, fully
     # isolated; any failure is swallowed here and never affects TA capture (which

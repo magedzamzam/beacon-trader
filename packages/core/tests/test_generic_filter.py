@@ -427,3 +427,96 @@ def test_every_registry_indicator_is_gateable_without_new_code():
             assert len(reqs) == 1, spec["id"]
             # inert against an empty ctx, and never raising
             assert ST.apply_filter_rules(_live(when), {}) == (1.0, False, [])
+
+
+# ---- what the rule READ, not just what it decided (#213) ---------------------
+# The highest-volume live rule in the experiment gated 51 removals on `cci`, and
+# nothing in the database could say what value fired it: the skip event recorded
+# the rule NAME and `signal_features` has never held a cci reading. A gate we
+# cannot observe cannot be reviewed, promoted or retired.
+def test_explain_records_the_value_a_firing_rule_actually_read():
+    when = {"type": "indicator", "id": "rsi", "timeframe": "1h",
+            "field": "value", "op": "gte", "value": 70}
+    (leaf,) = ST.explain_condition(when, CTX)
+    assert leaf["id"] == "rsi" and leaf["timeframe"] == "1h"
+    assert leaf["op"] == "gte" and leaf["value"] == 70
+    assert leaf["actual"] == 72.0                 # the reading, not the verdict
+    assert leaf["result"] is True
+
+
+def test_explain_marks_an_input_nobody_captured():
+    """`actual: None` with `result: None` IS the signature of #213: a gate
+    firing (or silently never firing) on something we do not persist."""
+    when = {"type": "indicator", "id": "cci", "timeframe": "1h",
+            "field": "value", "op": "gte", "value": 100}
+    (leaf,) = ST.explain_condition(when, CTX)
+    assert leaf["actual"] is None and leaf["result"] is None
+
+
+def test_explain_walks_a_composed_condition_leaf_by_leaf():
+    cond = {"all": [{"type": "indicator", "id": "rsi", "timeframe": "1h",
+                     "field": "value", "op": "gte", "value": 70},
+                    {"not": {"type": "adx_regime", "timeframe": "4h",
+                             "trending": True}}]}
+    ctx = {**CTX, "adx": {"4h": {"adx": 31.2, "trending": True}}}
+    leaves = ST.explain_condition(cond, ctx)
+    assert [l["type"] for l in leaves] == ["indicator", "adx_regime"]
+    assert leaves[1]["actual"] == {"adx": 31.2, "trending": True}
+    assert leaves[1]["result"] is True            # the LEAF, not the `not`
+
+
+def test_explain_is_json_safe_for_every_leaf_type():
+    import json
+    ctx = {**CTX, "sessions": ["London"], "ts": "2026-08-12T08:30:00Z",
+           "montecarlo": {"p_win": 0.6}, "turtle": {"position": "long"}}
+    for when in ({"type": "session_in", "sessions": ["London"]},
+                 {"type": "time_window", "from": "07:00", "to": "09:00"},
+                 {"type": "adx_regime", "timeframe": "4h", "trending": True},
+                 {"type": "mc_probability", "min_p_win": 0.5},
+                 {"type": "turtle_signal", "agrees": True},
+                 {"type": "always"}):
+        json.dumps(ST.explain_condition(when, ctx))
+
+
+def test_the_decision_carries_an_audit_record_for_live_and_shadow_rules():
+    rules = (_live({"type": "indicator", "id": "rsi", "timeframe": "1h",
+                    "field": "value", "op": "gte", "value": 70}, name="live_rsi")
+             + _rule({"type": "indicator", "id": "cci", "timeframe": "1h",
+                      "field": "value", "op": "gte", "value": 100}, name="shadow_cci"))
+    d = ST.evaluate_filter_rules(rules, CTX)
+    assert d.skip is True and d.reasons == ["live_rsi"]     # unchanged shape
+    by_name = {e["name"]: e for e in d.evaluated}
+    assert set(by_name) == {"live_rsi", "shadow_cci"}
+    assert by_name["live_rsi"]["mode"] == "live"
+    assert by_name["live_rsi"]["leaves"][0]["actual"] == 72.0
+    # the shadow rule is recorded WITH its reading, so it can be screened before
+    # anyone argues about arming it
+    assert by_name["shadow_cci"]["mode"] == "shadow"
+    assert by_name["shadow_cci"]["matched"] is None      # tri-state: unreadable
+    assert by_name["shadow_cci"]["leaves"][0]["actual"] is None
+
+
+def test_a_rule_that_did_not_match_is_recorded_too():
+    """A live gate's non-matches are half the evidence for ever keeping it."""
+    rules = _live({"type": "indicator", "id": "rsi", "timeframe": "1h",
+                   "field": "value", "op": "gte", "value": 99}, name="never")
+    d = ST.evaluate_filter_rules(rules, CTX)
+    assert d.skip is False and d.reasons == []
+    assert d.evaluated[0]["matched"] is False
+    assert d.evaluated[0]["leaves"][0]["actual"] == 72.0
+
+
+def test_a_disabled_rule_is_not_recorded_as_evaluated():
+    rules = _live({"type": "indicator", "id": "rsi", "timeframe": "1h",
+                   "field": "value", "op": "gte", "value": 70})
+    rules[0]["enabled"] = False
+    assert ST.evaluate_filter_rules(rules, CTX).evaluated == []
+
+
+def test_the_audit_record_cannot_change_the_decision():
+    """It is a trail, not a second evaluator: same inputs, same skip."""
+    rules = _live({"type": "indicator", "id": "rsi", "timeframe": "1h",
+                   "field": "value", "op": "gte", "value": 70})
+    before = ST.apply_filter_rules(rules, CTX)
+    after = ST.evaluate_filter_rules(rules, CTX)
+    assert before == (after.factor, after.skip, after.reasons)

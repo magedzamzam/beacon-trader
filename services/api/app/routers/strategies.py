@@ -135,6 +135,14 @@ def _check_indicator_side(side: dict, where: str, *, need_op: bool) -> None:
     tf = side.get("timeframe")
     if tf not in (None, "") and tf not in TA.AVAILABLE_TIMEFRAMES:
         raise HTTPException(422, f"{where}: unknown timeframe '{tf}'")
+    # #213: refuse to arm what capture cannot follow. Capture unions the live
+    # rules into what it persists, but only for a timeframe it can fetch bars
+    # for — arming a gate on any other one is a rule whose removals could never
+    # be reconstructed, which is the hole this closes.
+    effective_tf = tf or ST.DEFAULT_RULE_TIMEFRAME
+    if effective_tf not in TA.TF_RESOLUTION:
+        raise HTTPException(422, f"{where}: '{effective_tf}' has no capture "
+                                 "resolution, so this rule could never be measured")
     field = side.get("field") or "value"
     if field not in inst["outputs"]:
         raise HTTPException(422, f"{where}: '{inst['id']}' has no field '{field}' "

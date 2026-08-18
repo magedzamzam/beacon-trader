@@ -24,6 +24,7 @@ from fastapi import HTTPException
 
 from beacon_core.analysis import epochs as EP
 from beacon_core.execution import strategy as ST
+from beacon_core.ta import registry as TA
 
 from app.routers import strategies as S
 
@@ -170,6 +171,31 @@ def test_entry_filters_accepts_the_new_shadow_rule_types():
     for t in ("mc_probability", "turtle_signal"):
         out = S._clean_entry_filters({"rules": [_rule({"type": t})]})
         assert out["rules"][0]["when"]["type"] == t
+
+
+# ------------------------------------------------------- capture follows config
+def test_a_gate_can_only_be_armed_on_a_timeframe_capture_can_fetch():
+    """#213: arming a rule now WIDENS capture to whatever it references — but
+    only for a timeframe bars can be fetched for. Anything else is a rule whose
+    removals could never be reconstructed, so it is refused at write time rather
+    than discovered a month later in a weekly."""
+    assert set(TA.AVAILABLE_TIMEFRAMES) <= set(TA.TF_RESOLUTION)
+    with pytest.raises(HTTPException) as exc:
+        S._clean_entry_filters({"rules": [_rule(
+            {"type": "indicator", "id": "cci", "timeframe": "3w",
+             "field": "value", "op": "gte", "value": 100})]})
+    assert exc.value.status_code == 422
+
+
+def test_the_cci_rule_that_started_this_saves_and_declares_its_capture():
+    """The live rule that did the most work in the experiment and about which
+    the database could say nothing: it is legal config, and it now announces the
+    (indicator, timeframe) capture has to persist."""
+    when = {"type": "indicator", "id": "cci", "timeframe": "1h",
+            "field": "value", "op": "gte", "value": 100}
+    rule = S._clean_entry_filters({"rules": [_rule(when)]})["rules"][0]
+    reqs = ST.ta_rule_requirements([rule])
+    assert [(r["id"], r["timeframe"]) for r in reqs] == [("cci", "1h")]
 
 
 # ------------------------------------------------------------- time_window

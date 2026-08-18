@@ -618,11 +618,16 @@ def filter_mode_counts(rules) -> dict:
 
 class FilterDecision(NamedTuple):
     """What the filtration pillar decided, plus what the shadow rules WOULD have
-    decided. `factor`/`skip`/`reasons` reflect live rules only."""
+    decided. `factor`/`skip`/`reasons` reflect live rules only.
+
+    `evaluated` is the audit trail (#213): one record per ENABLED rule, live or
+    shadow, carrying the leaf values that decided it. `reasons` stays a list of
+    NAMES so every existing consumer of the skip event is unaffected."""
     factor: float
     skip: bool
     reasons: list
     shadow: list
+    evaluated: list = []
 
 
 def adx_rule_timeframes(rules, default: str = "4h") -> set:
@@ -740,6 +745,74 @@ def _eval_time_window(when, ctx):
     if lo < hi:
         return lo <= minute < hi
     return minute >= lo or minute < hi            # crosses midnight
+
+
+# ---- what a rule actually READ ----------------------------------------------
+# #167 made arming a gate a config act; capture and the skip event did not
+# follow. The result was a rule doing the most work in the whole experiment
+# (`bt_1h_cci_value_gte100`: 51 removals, -19,430 AED) about which the database
+# could not answer what value fired it, what it would have done elsewhere, or
+# whether it still separates. A rule that cannot be observed cannot be reviewed.
+def leaf_reading(leaf, ctx):
+    """The INPUT one leaf actually read out of `ctx`, or None when it read
+    nothing. Never raises and never evaluates side-effects — this is the audit
+    trail, so it must not be able to change what the gate decided."""
+    if not isinstance(leaf, dict):
+        return None
+    t = leaf.get("type")
+    if t == "indicator":
+        return _ta_field(ctx, leaf, _rule_instance_key(leaf))
+    if t == "adx_regime":
+        # The evaluator's own lookup, single-entry fallback included: an audit
+        # trail that reads a different place from the gate is worse than none.
+        return _adx_block(ctx, leaf.get("timeframe"))
+    if t == "session_in":
+        have = ctx.get("sessions")
+        if have is None and ctx.get("session") is not None:
+            have = [ctx["session"]]
+        return have
+    if t == "time_window":
+        ts = ctx.get("ts")
+        return ts if ts is None or isinstance(ts, str) else str(ts)
+    if t == "mc_probability":
+        return ctx.get("montecarlo")
+    if t == "turtle_signal":
+        return ctx.get("turtle")
+    return None
+
+
+def explain_condition(cond, ctx) -> list:
+    """One record per LEAF of a condition: what it asked, what it read, and how
+    it resolved. JSON-safe, so it can ride on the event payload.
+
+    `result` is the leaf's own tri-state, NOT the rule's: a composed rule that
+    skipped is explained by which of its leaves held and which could not be
+    computed at all. `actual: null` with `result: null` is the signature of a
+    gate firing on an input nobody is capturing."""
+    out = []
+    for leaf in condition_leaves(cond):
+        if not isinstance(leaf, dict):
+            continue
+        rec = {"type": leaf.get("type")}
+        for k in ("id", "timeframe", "field", "op", "value", "trending",
+                  "min_adx", "max_adx", "sessions", "from", "to", "tz", "days"):
+            if k in leaf and leaf[k] not in (None, ""):
+                rec[k] = leaf[k]
+        actual = leaf_reading(leaf, ctx)
+        rec["actual"] = actual if _json_safe(actual) else str(actual)
+        rec["result"] = _eval_leaf(leaf, ctx)
+        out.append(rec)
+    return out
+
+
+def _json_safe(v) -> bool:
+    if v is None or isinstance(v, (bool, int, float, str)):
+        return True
+    if isinstance(v, (list, tuple)):
+        return all(_json_safe(x) for x in v)
+    if isinstance(v, dict):
+        return all(isinstance(k, str) and _json_safe(x) for k, x in v.items())
+    return False
 
 
 def _eval_leaf(when, ctx):
@@ -895,7 +968,7 @@ def evaluate_filter_rules(rules, ctx) -> FilterDecision:
     matched, action, factor} so the executor can emit `filter_shadow` and the
     would-have-happened can be measured against outcomes. Promotion to `live` is a
     deliberate config act that has to clear the documented bar (CLAUDE.md §2.4)."""
-    factor, skip, reasons, shadow = 1.0, False, [], []
+    factor, skip, reasons, shadow, evaluated = 1.0, False, [], [], []
     for r in rules or []:
         if not isinstance(r, dict) or not r.get("enabled", True):
             continue
@@ -903,6 +976,16 @@ def evaluate_filter_rules(rules, ctx) -> FilterDecision:
         wtype = when.get("type")
         matched = _matches(when, ctx)
         mode = rule_mode(r)
+        # Recorded for BOTH modes and whether it matched or not: a rule has to be
+        # measurable BEFORE it is armed, and a live gate's non-matches are half
+        # the evidence for ever keeping it (#213).
+        # `matched` here is TRI-STATE, unlike the boolean the decision uses:
+        # "could not tell" and "did not hold" are the same non-skip but not the
+        # same evidence, and telling them apart is the whole point (#213).
+        evaluated.append({"name": r.get("name") or wtype or "rule",
+                          "type": wtype, "mode": mode, "action": r.get("action"),
+                          "matched": evaluate_condition(when, ctx),
+                          "leaves": explain_condition(when, ctx)})
         if mode == "shadow":
             # Recorded whether it matched or not — a gate's non-matches are half
             # of the evidence you need to ever justify promoting it.
@@ -919,7 +1002,7 @@ def evaluate_filter_rules(rules, ctx) -> FilterDecision:
         elif r.get("action") == "scale":
             factor *= _scale_factor(r)
             reasons.append(r.get("name") or wtype or "scale")
-    return FilterDecision(factor, skip, reasons, shadow)
+    return FilterDecision(factor, skip, reasons, shadow, evaluated)
 
 
 def apply_filter_rules(rules, ctx) -> tuple:
