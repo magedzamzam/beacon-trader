@@ -84,6 +84,12 @@ def _default_message(event_id: str, ctx: dict) -> tuple[str, str]:
         _head += f" {_DIR_EMOJI.get(_dir, '')} {_dir}".rstrip()
     if _sym:
         _head += f" {_sym}"
+    elif ctx.get("account"):
+        # Symbol-less events (daily_summary, arm_dark) are PER-ACCOUNT, and the
+        # three demo accounts are A/B/C arms. Without this the operator gets
+        # three identical headlines and must open each to learn which arm it is
+        # (#207). Symbol-bearing events never reach here, so they are unchanged.
+        _head += f" {ctx['account']}"
     _head += f" — {_label}"
     if _pl not in (None, ""):
         try:

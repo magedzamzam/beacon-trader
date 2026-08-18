@@ -63,6 +63,33 @@ def test_format_message_size_is_the_first_detail_row():
     assert "Size" not in t2 and "None" not in t2
 
 
+def test_symbolless_headline_names_the_account():
+    """#207 — the digest and the arm alarm are PER-ACCOUNT and carry no symbol.
+    Three arms must not arrive under three identical headlines."""
+    heads = [D.format_message("daily_summary",
+                              {"account": f"acct{a} · Arm {arm}", "pl": pl,
+                               "date": "2026-08-16", "wins": 3, "losses": 1})[0]
+             for a, arm, pl in ((5, "A", 2410.0), (7, "B", -880.5), (8, "C", 1204.5))]
+    assert len(set(heads)) == 3                       # distinguishable at a glance
+    assert heads[0].startswith("📊 acct5 · Arm A — Daily summary")
+    assert "P&L -880.50" in heads[1]
+    # the arm alarm has neither symbol nor P&L, and still names the arm
+    subj, _t = D.format_message("arm_dark", {"account": "acct7 · Arm B"})
+    assert subj == "🌑 acct7 · Arm B — A/B arm not trading", subj
+
+
+def test_symbol_bearing_headlines_are_unchanged_by_the_account_promotion():
+    """The account is promoted ONLY when there is no symbol — a trade event that
+    carries both must render exactly as it did before #207."""
+    ctx = {"symbol": "XAUUSD", "direction": "SELL", "pl": -40.0,
+           "account": "acct5 · Arm A", "price": "3428.10"}
+    subj, text = D.format_message("trade_closed", ctx)
+    assert subj == ("🏁 🔽 SELL XAUUSD — Trade closed"
+                    "  |  P&L -40.00"), subj
+    assert "acct5" not in subj                        # still a detail row only
+    assert "Account:" in text and "acct5 · Arm A" in text
+
+
 def test_format_message_default_when_no_template():
     # no templates arg -> byte-for-byte the built-in format (backward compat)
     a = D.format_message("tp_hit", {"symbol": "XAUUSD", "direction": "BUY", "pl": "5"})
