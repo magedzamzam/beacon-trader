@@ -67,6 +67,29 @@ services:
       redis:
         condition: service_healthy
 
+  # Keeps `public.candles` current (#224). It is a SERVICE and not a habit: the
+  # store went 15 days stale because `scripts/candle_sync.py` was run by hand on
+  # 2026-08-03 and then never again, which silently blocked BOTH the #182/#187
+  # excursion ladder and any forward test of the offline generator.
+  #
+  # Deliberately its own container rather than a task inside `monitor`: a
+  # catch-up pass is thousands of bars of broker API, and `monitor` manages OPEN
+  # POSITIONS on a tick loop against the same rate limit. It reuses the api image
+  # (same deps, no second build) and touches nothing on the trading path -- it
+  # only INSERTs candles, ON CONFLICT DO NOTHING.
+  candle-sync:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+      args:
+        GIT_SHA: "${GIT_SHA:-}"                                    # (#218)
+    restart: unless-stopped
+    env_file: .env
+    command: ["python", "/app/scripts/candle_sync.py", "--loop", "1800"]
+    depends_on:
+      redis:
+        condition: service_healthy
+
   # Offline replay + backtest harness (#169). RESEARCH, not trading.
   #
   # Deliberately different from every service above, and each difference is the
