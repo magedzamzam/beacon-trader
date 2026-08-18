@@ -8,6 +8,7 @@ crash never loses track of real money.
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -33,7 +34,8 @@ from beacon_core.tasks import spawn_bg
 from beacon_core.timeutil import utcnow
 from beacon_core.brokers.types import (OrderSide, OrderStatus, OrderType, PlaceOrderRequest)
 from beacon_core.parsing.models import ParsedSignal
-from beacon_core.execution.planner import build_plan, FanoutPlan, DEFAULT_PLANNER
+from beacon_core.execution.planner import (build_plan, fanout_order, FanoutPlan,
+                                           DEFAULT_PLANNER)
 from beacon_core.execution.guard import (should_auto_execute, risk_limit_reason,
                                           soft_breaker_decision, DEFAULT_RISK_LIMITS)
 from beacon_core.execution.trend_filter import trend_filter_cfg, decide as trend_decide
@@ -313,8 +315,20 @@ async def handle_signal(signal_id: int) -> None:
         parsed = _to_parsed(sig)
         ai_cfg = await ai_service.load_config(session)
 
-        for acct in accounts:
-            await _execute_on_account(session, sig, parsed, source, acct, ai_cfg)
+        # #211: the fanout is SEQUENTIAL, so whichever account goes last trades a
+        # staler price — measured at $0.62 (0.058R) of adverse fill for the third
+        # arm, the same size as the treatment effects being measured and always
+        # signed against the same arm. Placing in a per-signal seeded permutation
+        # turns that systematic bias into noise the day-block bootstrap already
+        # accounts for. Sizing, risk and whether a trade is placed are untouched:
+        # this changes only WHICH arm draws the short straw on a given signal.
+        _order = {a: i for i, a in
+                  enumerate(fanout_order([a.id for a in accounts], sig.id))}
+        _fanout_started = time.monotonic()
+        for acct in sorted(accounts, key=lambda a: _order.get(a.id, 0)):
+            _lag_ms = int(round((time.monotonic() - _fanout_started) * 1000))
+            await _execute_on_account(session, sig, parsed, source, acct, ai_cfg,
+                                      placement_lag_ms=_lag_ms)
         sig.status = "executed"
         await session.commit()
 
@@ -346,7 +360,7 @@ async def _capture_features_bg(signal_id: int, account_id: int) -> None:
 
 
 async def _execute_on_account(session, sig, parsed, source, acct,
-                              ai_cfg=None) -> None:
+                              ai_cfg=None, *, placement_lag_ms=None) -> None:
     # Idempotency: one trade per (signal, account). If one already exists this
     # signal was already placed here — skip rather than double-place.
     dup = (await session.execute(select(Trade.id).where(
@@ -899,6 +913,9 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                       planned_risk=planned_risk,
                       sl_rules=_sl_rules, strategy_id=_strategy_id,
                       cluster_id=cluster_id, cluster_alloc=cluster_alloc_rec,
+                      # How late in the fanout this arm was reached (#211), so
+                      # the handicap is measurable instead of invisible.
+                      placement_lag_ms=placement_lag_ms,
                       # As RUN, not as configured (#156): a staged strategy that
                       # fell back to the single-shot planner is a CONTROL trade and
                       # must not be counted in the staged arm.

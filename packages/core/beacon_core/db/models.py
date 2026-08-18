@@ -134,6 +134,20 @@ class Trade(Base):
     # (CLAUDE.md 6), so this needs an explicit ALTER on deploy:
     #   ALTER TABLE trades ADD COLUMN IF NOT EXISTS deployed_risk NUMERIC(18,6);
     deployed_risk: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)
+    # How late in the fanout this account was placed, in ms after the FIRST
+    # account of the same signal (#211). The fanout is sequential, so the arm
+    # sitting last trades a staler price: measured over one frozen window the
+    # third arm filled $0.62 worse per trade, 0.058R against a $10.66 median
+    # stop — the same size as the treatment effects the experiment exists to
+    # measure, and always signed against the same arm. Nothing recorded it, so
+    # the confound was invisible. 0 on the first-placed account, NULL on
+    # historical rows (excluded rather than read as zero).
+    #
+    # SCHEMA GOTCHA: `create_all` does NOT add columns to an existing table
+    # (CLAUDE.md 6), so this needs an explicit ALTER on deploy:
+    #   ALTER TABLE trades ADD COLUMN IF NOT EXISTS placement_lag_ms INTEGER;
+    # (already in ADDITIVE_MIGRATIONS, so startup applies it — listed for review)
+    placement_lag_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     realized_pl: Mapped[Decimal] = mapped_column(NUM, default=Decimal("0"))
     # Execution-strategy attribution (#83/#84): the exit sl_rules this trade
     # actually ran under, SNAPSHOT at entry (point-in-time — immune to later
