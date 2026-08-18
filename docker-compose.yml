@@ -86,6 +86,18 @@ services:
     restart: unless-stopped
     env_file: .env
     command: ["python", "/app/scripts/candle_sync.py", "--loop", "1800"]
+    # Override the api image's HTTP probe -- this container serves no port. The
+    # health that matters here is the STORE's freshness, not the process's
+    # liveness: a probe on "is it running?" would have been green through the
+    # whole 15-day stall, because nothing was running it at all. 90 min allows
+    # two missed 30-min passes before it goes red, and the check treats the
+    # weekend market close as healthy rather than crying wolf every Saturday.
+    healthcheck:
+      test: ["CMD", "python", "/app/scripts/candle_sync.py", "--healthcheck", "90"]
+      interval: 10m
+      timeout: 30s
+      start_period: 2m
+      retries: 2
     depends_on:
       redis:
         condition: service_healthy

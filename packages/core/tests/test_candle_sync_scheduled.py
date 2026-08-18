@@ -73,3 +73,27 @@ def test_a_failed_pass_does_not_kill_the_loop():
     src = SCRIPT.read_text(encoding="utf-8")
     assert re.search(r"except Exception.*?\n.*?sync pass failed", src), \
         "sync_once() must be wrapped so one bad pass does not exit the loop"
+
+
+def test_it_has_its_own_healthcheck_not_the_api_image_s():
+    """It reuses the api image, whose HEALTHCHECK curls port 8000 — a port this
+    container does not serve. Left inherited it reports `unhealthy` forever,
+    which is how a red status stops meaning anything."""
+    block = _service_block("candle-sync")
+    assert "healthcheck:" in block,         "candle-sync inherits the api image's HTTP probe and will always be unhealthy"
+    assert "--healthcheck" in block, "the probe must ask the script, not curl a port"
+
+
+def test_the_probe_measures_FRESHNESS():
+    """Probing liveness would have stayed green through the entire 15-day stall,
+    because nothing was running at all. Health here means the store is current."""
+    src = SCRIPT.read_text(encoding="utf-8")
+    assert "_freshness_exit" in src and '"--healthcheck"' in src
+    assert "max(ts)" in src, "the probe must read the newest bar"
+
+
+def test_the_probe_does_not_cry_wolf_over_the_weekend():
+    """Gold prints no bars Friday 21:00Z -> Sunday 22:00Z. A naive age check goes
+    red every weekend, gets muted, and then hides a real stall."""
+    src = SCRIPT.read_text(encoding="utf-8")
+    assert "market closed" in src, "the freshness probe must exempt the market close"
