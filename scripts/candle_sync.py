@@ -198,6 +198,41 @@ async def sync_once(a):
         print("candles now: n=%s  %s -> %s" % (r[0], r[1], r[2]))
     await eng.dispose()
 
+async def _freshness_exit(a) -> int:
+    """0 when the store is current, 1 when it has gone stale (#224).
+
+    Weekends are the trap: gold does not print bars from Friday 21:00Z to Sunday
+    22:00Z, so a naive age check goes red every weekend and gets muted, which is
+    how a real stall then hides. Age is therefore measured against the last bar
+    the MARKET could have produced, not against now."""
+    tf = TF_NAME[a.resolution]
+    eng = create_async_engine(os.environ["DATABASE_URL"])
+    try:
+        async with eng.connect() as conn:
+            mx = (await conn.exec_driver_sql(
+                "select max(ts) from public.candles where symbol='%s' and timeframe='%s'"
+                % (a.symbol, tf))).scalar()
+    finally:
+        await eng.dispose()
+    if mx is None:
+        print("UNHEALTHY: no bars at all for %s %s" % (a.symbol, tf))
+        return 1
+    now = datetime.now(timezone.utc)
+    age_min = (now - mx).total_seconds() / 60.0
+    # Saturday, and Sunday before the 22:00Z open: the market is shut, so the
+    # newest bar is legitimately old and staleness cannot be judged.
+    wd, hour = now.weekday(), now.hour
+    closed = wd == 5 or (wd == 6 and hour < 22) or (wd == 4 and hour >= 21)
+    if closed:
+        print("OK (market closed): newest bar %s, age %.0f min not judged" % (mx, age_min))
+        return 0
+    if age_min > a.healthcheck:
+        print("UNHEALTHY: newest bar %s is %.0f min old (limit %d)" % (mx, age_min, a.healthcheck))
+        return 1
+    print("OK: newest bar %s, age %.0f min" % (mx, age_min))
+    return 0
+
+
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbol", default="XAUUSD")
@@ -213,7 +248,15 @@ async def main():
     # remains the default, so every existing manual invocation is unchanged.
     ap.add_argument("--loop", type=int, default=0,
                     help="repeat every N seconds instead of exiting (0 = one pass)")
+    # This service's health IS the freshness of the store. Probing "is the
+    # process up?" would have reported green through the entire 15-day stall
+    # that #224 is about, because the process was not up at all -- nobody had
+    # started it. Probe the thing that matters instead.
+    ap.add_argument("--healthcheck", type=int, default=0, metavar="MAX_AGE_MIN",
+                    help="exit 0 if the newest bar is younger than N minutes, else 1")
     a = ap.parse_args()
+    if a.healthcheck:
+        sys.exit(await _freshness_exit(a))
     while True:
         try:
             await sync_once(a)
