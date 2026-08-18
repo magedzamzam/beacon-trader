@@ -6,6 +6,11 @@ RUN pip install /app/packages/core
 COPY services/api/requirements.txt /tmp/req.txt
 RUN pip install -r /tmp/req.txt
 COPY services/api/app /app/app
+# Operational scripts run from this image as their own service (#224):
+# `candle-sync` keeps public.candles current, which the excursion ladder
+# (#182/#187) and the offline generator both read. Copied last so editing a
+# script never rebuilds the dependency layers.
+COPY scripts /app/scripts
 # The commit this image was built from. There is no `.git` and no `git` binary in
 # here, so this build arg is the ONLY way a running container can say what code it
 # is. Declared LAST on purpose: an ENV that changes every commit invalidates every
