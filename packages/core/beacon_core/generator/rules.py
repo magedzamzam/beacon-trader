@@ -35,6 +35,7 @@ from typing import Optional
 from beacon_core.execution import strategy as ST
 from beacon_core.execution.planner import validate_signal
 from beacon_core.parsing.models import ParsedSignal
+from beacon_core.trading_hours import sessions as TH
 
 NAME = "rules"
 DEFAULT_TIMEFRAME = "15m"
@@ -269,6 +270,39 @@ def build_signal(spec: RulesSpec, direction: str, close: float, provider,
     if not ok:
         return None, "invalid_geometry:%s" % why
     return parsed, None
+
+
+def condition_context(spec: "RulesSpec", provider, close: float,
+                      when: dt.datetime) -> dict:
+    """Everything the conditions are allowed to read at `when`.
+
+    Shared for the same reason the rest of this module is: the backtest and the
+    producer must ask the conditions about the SAME inputs, and a context built
+    twice diverges the first time one of them learns a new block. Only what a
+    rule actually references is computed -- nothing is fetched for a rule set
+    that mentions no TA.
+
+    `provider` needs `ta_block(rules, when)` and `adx_block(tf, when)` on top of
+    `atr(...)`; replay's ContextBuilder has all three."""
+    ctx: dict = {"price": close}
+    ta = provider.ta_block(spec.ta_rules(), when)
+    if ta:
+        ctx["ta"] = ta
+    adx = {}
+    for tf in sorted(ST.adx_rule_timeframes(
+            [{"when": c} for c in (spec.long, spec.short) if c])):
+        blk = provider.adx_block(tf, when)
+        if blk is not None:
+            adx[tf] = blk
+    if adx:
+        ctx["adx"] = adx
+    if spec.sessions:
+        try:
+            ctx["sessions"] = list(
+                (TH.status(spec.sessions, when) or {}).get("active") or [])
+        except Exception:
+            pass                              # fail-open, exactly as live
+    return ctx
 
 
 # --- the decision, in the order both callers must ask it ---------------------
