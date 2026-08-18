@@ -13,7 +13,8 @@ import pytest
 
 from beacon_core.analysis.report import (
     FILTER_ACCUMULATE, FILTER_NO_EVIDENCE, FILTER_REMOVES_LOSERS,
-    FILTER_REMOVES_WINNERS, FILTER_UNTESTED, MIN_REMOVED_N, filter_removed_set)
+    FILTER_REMOVES_WINNERS, FILTER_UNTESTED, MIN_REMOVED_N,
+    day_block_bootstrap_diff, filter_removed_set, removed_vs_kept_expectancy)
 
 BASE = 0.6
 
@@ -186,3 +187,194 @@ def test_r_is_computed_off_planned_risk_and_skips_rows_without_it():
 def test_no_skips_at_all_returns_an_empty_report_rather_than_failing():
     out = filter_removed_set([], [], base_rate=BASE)
     assert out["epochs"] == {} and out["n_epochs"] == 0
+
+
+# --- the expectancy criterion (#212) -----------------------------------------
+# The win-rate arm cannot fire on this book. At payoff_ratio 0.427 a bucket
+# losing -0.21R per trade still wins ~55% of the time, so its posterior upper
+# bound sits ABOVE the base rate while the money screams. Both live epochs
+# landed in that hole at N well past the floor, on the first frozen window the
+# experiment ever produced — the estimator was specified for losses that come
+# from frequency, and this book's come from magnitude.
+
+# Payoff geometry of the real control book, so these fixtures fail the way the
+# live data failed rather than the way a hand-picked one would.
+AVG_WIN_R, AVG_LOSS_R = 0.312, -0.732
+LIVE_BASE = 0.6161
+BOOT = dict(n_boot=200, seed=20260801)      # small + seeded: the ruling is fixed
+
+
+def _book(n, *, wins, win_r, loss_r, first_id, risk=100.0, days=4, channels=4):
+    """`n` control trades with EXACTLY `wins` winners spread evenly over the
+    days and channels, so a leave-one-out fold drops a representative slice
+    rather than an accident of ordering."""
+    out = []
+    for i in range(n):
+        won = (i * wins) // n < ((i + 1) * wins) // n
+        out.append({
+            "signal_id": first_id + i,
+            "realized_pl": risk * (win_r if won else loss_r),
+            "planned_risk": risk,
+            "day": f"2026-08-{10 + i % days:02d}",
+            "source_id": 100 + i % channels,
+        })
+    return out
+
+
+def _split(removed, kept, epoch="adx_regime@1h+min_adx30"):
+    """(skips, control_trades) for a removed set and the set that was kept."""
+    return ([{"signal_id": t["signal_id"], "epoch": epoch} for t in removed],
+            removed + kept)
+
+
+def test_a_magnitude_driven_removed_set_fires_on_expectancy_not_win_rate():
+    """Arm B, as it actually read: 53 decisive removals, -0.21R, and a win-rate
+    interval that spans the base rate because the losses are big, not frequent.
+    The old estimator returned NO_EVIDENCE on the only robust effect in the
+    experiment."""
+    removed = _book(53, wins=29, win_r=AVG_WIN_R, loss_r=AVG_LOSS_R, first_id=1)
+    kept = _book(79, wins=49, win_r=0.55, loss_r=-0.35, first_id=1000)
+    skips, control = _split(removed, kept)
+    e = _one(filter_removed_set(skips, control, base_rate=LIVE_BASE, **BOOT),
+             "adx_regime@1h+min_adx30")
+
+    # the win-rate arm is silent: the upper bound is ABOVE the base rate
+    assert e["win_rate_ci"][1] > LIVE_BASE
+    assert e["removed_set_net"] < 0 and e["mean_r"] < -0.15
+    # ...and the expectancy arm rules
+    assert e["verdict"] == FILTER_REMOVES_LOSERS
+    assert e["criterion"] == "expectancy"
+    assert e["expectancy_dR"] < 0
+    lo, hi = e["expectancy_ci"]
+    assert lo is not None and hi < 0                  # interval excludes zero
+    assert e["n_blocks"] == 4
+    assert e["loco_sign_stable"]["same_sign"] == e["loco_sign_stable"]["folds"] == 4
+    assert e["lodo_sign_stable"]["same_sign"] == e["lodo_sign_stable"]["folds"] == 4
+    assert "win rate cannot separate" in e["reason"]
+
+
+def test_a_frequency_driven_removed_set_still_fires_on_the_win_rate():
+    """The case the original estimator was specified for: the removed set loses
+    by losing OFTEN. That arm keeps ruling, and says so."""
+    removed = _book(40, wins=10, win_r=1.0, loss_r=-1.0, first_id=1)
+    kept = _book(60, wins=40, win_r=1.0, loss_r=-1.0, first_id=1000)
+    skips, control = _split(removed, kept)
+    e = _one(filter_removed_set(skips, control, base_rate=BASE, **BOOT),
+             "adx_regime@1h+min_adx30")
+    assert e["verdict"] == FILTER_REMOVES_LOSERS
+    assert e["criterion"] == "win_rate"
+    assert e["win_rate_ci"][1] < BASE                 # the bound that matters
+    assert "upper bound is below the base" in e["reason"]
+
+
+def test_two_criteria_pointing_opposite_ways_is_not_a_promotion():
+    """A removed set that wins constantly and nets positive AED, but on far more
+    risk than the kept set — high win rate, negligible R. The win-rate arm reads
+    REMOVES_WINNERS, the expectancy arm reads REMOVES_LOSERS, and a disagreement
+    is not a verdict."""
+    removed = _book(40, wins=34, win_r=0.01, loss_r=-0.02, first_id=1, risk=1000.0)
+    kept = _book(60, wins=36, win_r=1.2, loss_r=-0.6, first_id=1000, risk=100.0)
+    skips, control = _split(removed, kept)
+    e = _one(filter_removed_set(skips, control, base_rate=BASE, **BOOT),
+             "adx_regime@1h+min_adx30")
+    assert e["win_rate_ci"][0] > BASE and e["removed_set_net"] > 0
+    assert e["expectancy_dR"] < 0
+    assert e["verdict"] == FILTER_NO_EVIDENCE
+    assert e["criterion"] is None
+    assert "disagree" in e["reason"]
+
+
+def test_an_effect_carried_by_one_channel_does_not_survive_the_loco_family():
+    """#215's mined suite: -0.2088 with a clean interval one week, and -0.0044
+    the moment TFXC was dropped. The whole effect was ever one channel, and the
+    fold family is what says so."""
+    # channel 100 is a disaster; the other three are indistinguishable from kept
+    removed, kept = [], []
+    for i in range(60):
+        ch, day = 100 + i % 4, f"2026-08-{10 + i % 4:02d}"
+        r = -0.9 if ch == 100 else 0.10
+        removed.append({"signal_id": i, "realized_pl": 100.0 * r,
+                        "planned_risk": 100.0, "day": day, "source_id": ch})
+    for i in range(60):
+        kept.append({"signal_id": 1000 + i, "realized_pl": 5.0,
+                     "planned_risk": 100.0,
+                     "day": f"2026-08-{10 + i % 4:02d}", "source_id": 100 + i % 4})
+    skips, control = _split(removed, kept)
+    e = _one(filter_removed_set(skips, control, base_rate=BASE, **BOOT),
+             "adx_regime@1h+min_adx30")
+    assert e["expectancy_dR"] < 0                      # pooled, it looks real
+    loco = e["loco_sign_stable"]
+    assert loco["same_sign"] < loco["folds"]           # ...one fold flips it
+    assert e["verdict"] != FILTER_REMOVES_LOSERS       # so it does not promote
+    assert e["criterion"] is None
+
+
+def test_below_the_floor_the_expectancy_arm_offers_no_verdict_either():
+    """One test, at accumulated N — the new statistic changes what is measured,
+    not the peeking rule."""
+    removed = _book(10, wins=5, win_r=AVG_WIN_R, loss_r=AVG_LOSS_R, first_id=1)
+    kept = _book(60, wins=40, win_r=0.55, loss_r=-0.35, first_id=1000)
+    skips, control = _split(removed, kept)
+    e = _one(filter_removed_set(skips, control, base_rate=LIVE_BASE, **BOOT),
+             "adx_regime@1h+min_adx30")
+    assert e["n_decisive"] < MIN_REMOVED_N
+    assert e["verdict"] == FILTER_ACCUMULATE and e["criterion"] is None
+    # the number is still reported — hiding it just gets it recomputed by hand
+    assert e["expectancy_dR"] is not None
+
+
+def test_without_a_day_on_the_control_trades_the_old_arm_rules_alone():
+    """No day, no blocks, no expectancy — and an epoch is never ruled on a
+    statistic that could not be computed."""
+    sigs = list(range(1, 41))
+    out = filter_removed_set(_skips(sigs), _control(sigs, pl=-50.0),
+                             base_rate=BASE, **BOOT)
+    e = _one(out)
+    assert e["expectancy_dR"] is None and e["expectancy_ci"] == (None, None)
+    assert e["loco_sign_stable"] is None and e["lodo_sign_stable"] is None
+    assert e["n_blocks"] == 0
+    assert e["verdict"] == FILTER_REMOVES_LOSERS and e["criterion"] == "win_rate"
+
+
+def test_a_single_day_interval_is_degenerate_and_cannot_promote():
+    """One block has zero between-block variance, so the interval collapses to a
+    point. It must not be readable as tight (the trap #186 was filed on)."""
+    removed = _book(40, wins=22, win_r=AVG_WIN_R, loss_r=AVG_LOSS_R,
+                    first_id=1, days=1)
+    kept = _book(60, wins=40, win_r=0.55, loss_r=-0.35, first_id=1000, days=1)
+    skips, control = _split(removed, kept)
+    e = _one(filter_removed_set(skips, control, base_rate=LIVE_BASE, **BOOT),
+             "adx_regime@1h+min_adx30")
+    assert e["n_blocks"] == 1
+    assert e["verdict"] != FILTER_REMOVES_LOSERS and e["criterion"] is None
+
+
+# --- the difference bootstrap itself ------------------------------------------
+def test_the_difference_bootstrap_is_seeded_and_reports_its_blocks():
+    by_day = {f"2026-08-1{d}": [(-0.5, True), (-0.4, True), (0.3, False),
+                                (0.4, False)] for d in range(4)}
+    a = day_block_bootstrap_diff(by_day, n_boot=200, seed=7)
+    b = day_block_bootstrap_diff(by_day, n_boot=200, seed=7)
+    assert a == b                                      # a ruling that moves is not a ruling
+    assert a["n_blocks"] == 4 and a["degenerate"] is False
+    assert a["mean"] == round(-0.45 - 0.35, 4)
+    assert a["ci_high"] < 0
+
+
+def test_the_difference_bootstrap_needs_both_sides():
+    only_removed = {"2026-08-10": [(-0.5, True)], "2026-08-11": [(-0.4, True)]}
+    out = day_block_bootstrap_diff(only_removed, n_boot=50, seed=7)
+    assert out["mean"] is None and out["degenerate"] is True
+
+
+def test_the_expectancy_helper_is_usable_on_its_own():
+    """It is in the library so the weekly stops hand-rolling it — which is the
+    failure mode #186 was created to end."""
+    rows = [{"r": -0.5 if i % 2 else -0.6, "day": f"2026-08-1{i % 4}",
+             "channel": f"src{i % 3}", "removed": True} for i in range(30)]
+    rows += [{"r": 0.2, "day": f"2026-08-1{i % 4}", "channel": f"src{i % 3}",
+              "removed": False} for i in range(30)]
+    out = removed_vs_kept_expectancy(rows, n_boot=200, seed=7)
+    assert out["dR"] < 0 and out["excludes_zero"] is True
+    assert out["n_removed"] == 30 and out["n_kept"] == 30
+    assert out["loco"]["folds"] == 3 and out["lodo"]["folds"] == 4

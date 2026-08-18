@@ -1666,6 +1666,181 @@ def delever_null(pairs, *, n_boot=DEFAULT_BOOT, seed=DEFAULT_SEED) -> dict:
 # literal duplicate of the control. "No difference" then reads as "the filter has
 # no edge" when it is really "the filter was never tested". Both verdicts are
 # reported here by name so they cannot be confused for each other.
+def _day_key(t) -> "str | None":
+    """The UTC day a control trade belongs to, for the day blocks. Reads an
+    explicit `day` first, then the timestamps a trade row carries; a row with no
+    date at all simply cannot join a block, and is dropped rather than pooled
+    into a fake one."""
+    for key in ("day", "closed_at", "opened_at", "created_at"):
+        v = t.get(key)
+        if v in (None, ""):
+            continue
+        if hasattr(v, "date"):
+            return str(v.date())
+        return str(v)[:10]
+    return None
+
+
+def _channel_key(t):
+    """Which signal source a control trade came from, for the LOCO family."""
+    for key in ("source_id", "channel", "source"):
+        v = t.get(key)
+        if v not in (None, ""):
+            return str(v)
+    return None
+
+
+def day_block_bootstrap_diff(rows_by_day, *, n_boot=DEFAULT_BOOT,
+                             seed=DEFAULT_SEED, lo=0.05, hi=0.95) -> dict:
+    """Day-block bootstrap of a DIFFERENCE of two pooled means (#212).
+
+    `rows_by_day`: {day: [(value, in_group_a), ...]}. Each resample draws whole
+    days with replacement and recomputes `mean(A) - mean(B)` over everything it
+    drew, so the two groups move together within a day — which is the point: the
+    removed and kept sets share a day's regime, and resampling them independently
+    would break the very correlation the day block exists to preserve.
+
+    `day_block_bootstrap` cannot express this: a difference of two means is not
+    the mean of any per-observation value, so it needs its own resampler rather
+    than a clever re-encoding of the inputs. Same seed, same determinism
+    contract, same `n_blocks` / `degenerate` reporting — a one-block interval has
+    zero between-block variance and must never be read as tight."""
+    days = sorted(rows_by_day)
+    flat = [r for d in days for r in rows_by_day[d]]
+    n_a = sum(1 for _v, a in flat if a)
+    n_b = len(flat) - n_a
+    empty = {"n": len(flat), "n_a": n_a, "n_b": n_b, "n_blocks": len(days),
+             "mean": None, "ci_low": None, "ci_high": None, "degenerate": True}
+    if not n_a or not n_b:
+        return empty                              # one side is empty: no contrast
+
+    def _diff(rows):
+        a = [v for v, grp in rows if grp]
+        b = [v for v, grp in rows if not grp]
+        if not a or not b:
+            return None
+        return sum(a) / len(a) - sum(b) / len(b)
+
+    point = _diff(flat)
+    import random
+    rng = random.Random(seed)
+    diffs = []
+    for _ in range(n_boot):
+        picked = [rows_by_day[days[rng.randrange(len(days))]] for _ in days]
+        d = _diff([r for blk in picked for r in blk])
+        if d is not None:
+            diffs.append(d)
+    diffs.sort()
+    return {
+        "n": len(flat), "n_a": n_a, "n_b": n_b, "n_blocks": len(days),
+        "mean": round(point, 4),
+        "ci_low": round(_pct(diffs, lo), 4) if diffs else None,
+        "ci_high": round(_pct(diffs, hi), 4) if diffs else None,
+        "degenerate": len(days) < 2,
+    }
+
+
+def _excludes_zero(block) -> bool:
+    lo_, hi_ = block.get("ci_low"), block.get("ci_high")
+    if lo_ is None or hi_ is None or block.get("degenerate"):
+        return False
+    return lo_ > 0 or hi_ < 0
+
+
+def _leave_one_out_family(rows, key, *, n_boot, seed) -> "dict | None":
+    """Recompute the dR with each distinct `key` value dropped in turn.
+
+    Returns sign-stability COUNTS rather than one interval, which is the whole
+    point: Arm C's mined suite read -0.2088 with a clean interval and collapsed
+    to -0.0044 when a single channel was dropped. An effect carried by one
+    channel or one day is not an effect, and only the family shows that."""
+    groups = sorted({r[key] for r in rows if r.get(key) is not None},
+                    key=str)
+    if len(groups) < 2:
+        return None
+    folds, same_sign, excl = 0, 0, 0
+    point = _diff_of(rows)
+    if point is None or point == 0:
+        return None
+    for g in groups:
+        kept = [r for r in rows if r[key] != g]
+        blk = _dr_of(kept, n_boot=n_boot, seed=seed)
+        if blk["mean"] is None:
+            continue
+        folds += 1
+        # A fold that lands exactly on zero is NOT the same sign as a negative
+        # pooled effect: `0 > 0` is False and so is `point > 0`, which would
+        # score a collapsed fold as stable.
+        if blk["mean"] and (blk["mean"] > 0) == (point > 0):
+            same_sign += 1
+        if _excludes_zero(blk):
+            excl += 1
+    if not folds:
+        return None
+    return {"folds": folds, "same_sign": same_sign, "excludes_zero": excl,
+            "dropped": [str(g) for g in groups]}
+
+
+def _diff_of(rows) -> "float | None":
+    a = [r["r"] for r in rows if r["removed"]]
+    b = [r["r"] for r in rows if not r["removed"]]
+    if not a or not b:
+        return None
+    return sum(a) / len(a) - sum(b) / len(b)
+
+
+def _dr_of(rows, *, n_boot, seed) -> dict:
+    by_day: dict = {}
+    for r in rows:
+        by_day.setdefault(r["day"], []).append((r["r"], r["removed"]))
+    return day_block_bootstrap_diff(by_day, n_boot=n_boot, seed=seed)
+
+
+def removed_vs_kept_expectancy(rows, *, n_boot=DEFAULT_BOOT,
+                               seed=DEFAULT_SEED) -> dict:
+    """The removed-vs-kept mean-R difference on the control, with both
+    leave-one-out families (#212).
+
+    `rows`: [{r, day, channel, removed}] — one per scored control trade in the
+    epoch's window, `removed=True` for the ones the filter skipped. NEGATIVE dR
+    means the removed set was worse than what was kept, i.e. the filter is
+    cutting losers.
+
+    WHY THIS EXISTS. `filter_removed_set` ruled on a win-rate bound, and on this
+    book that arm can essentially never fire: at `payoff_ratio 0.427` a bucket
+    losing -0.21R per trade still wins ~55% of the time, so the posterior upper
+    bound sits ABOVE the base rate while the money screams. The estimator was
+    specified for a book whose losses come from FREQUENCY; this book's losses
+    come from MAGNITUDE."""
+    rows = [r for r in rows or ()
+            if r.get("r") is not None and r.get("day") is not None]
+    blk = _dr_of(rows, n_boot=n_boot, seed=seed)
+    return {
+        "dR": blk["mean"], "ci": (blk["ci_low"], blk["ci_high"]),
+        "n_blocks": blk["n_blocks"], "degenerate": blk["degenerate"],
+        "n_removed": blk["n_a"], "n_kept": blk["n_b"],
+        "excludes_zero": _excludes_zero(blk),
+        "loco": _leave_one_out_family(rows, "channel", n_boot=n_boot, seed=seed),
+        "lodo": _leave_one_out_family(rows, "day", n_boot=n_boot, seed=seed),
+    }
+
+
+def _expectancy_verdict(exp) -> "str | None":
+    """REMOVES_LOSERS / REMOVES_WINNERS on the expectancy arm, or None.
+
+    Deliberately strict, because this criterion is the one that can fire on this
+    book: the interval must exclude zero over at least two day blocks AND every
+    leave-one-channel-out and leave-one-day-out fold must keep the sign. One
+    channel carrying the whole effect is exactly how #215's mined suite passed a
+    week before failing replication."""
+    if exp is None or exp["dR"] is None or not exp["excludes_zero"]:
+        return None
+    for fam in (exp["loco"], exp["lodo"]):
+        if not fam or fam["folds"] < 2 or fam["same_sign"] != fam["folds"]:
+            return None
+    return FILTER_REMOVES_LOSERS if exp["dR"] < 0 else FILTER_REMOVES_WINNERS
+
+
 FILTER_UNTESTED = "UNTESTED"
 FILTER_ACCUMULATE = "ACCUMULATE"
 FILTER_REMOVES_LOSERS = "REMOVES_LOSERS"
@@ -1679,7 +1854,8 @@ MIN_REMOVED_N = 30
 
 def filter_removed_set(skips, control_trades, *, base_rate,
                        min_n: int = MIN_REMOVED_N, cred: float = 0.90,
-                       eps: float = 0.0) -> dict:
+                       eps: float = 0.0, n_boot: int = DEFAULT_BOOT,
+                       seed: int = DEFAULT_SEED) -> dict:
     """Score a filter arm by what it REMOVED, accumulated and tested ONCE (#186).
 
     A filter arm trades fewer signals, so its own gross is smaller by
@@ -1720,7 +1896,28 @@ def filter_removed_set(skips, control_trades, *, base_rate,
     the bound that matters is the UPPER one. And the P&L sign must AGREE with it
     before either becomes a verdict — TP1 distance varies ~7x across channels, so
     a removed set can be low-win-rate and net-POSITIVE, and a filter that removes
-    money is not helping however its win rate reads."""
+    money is not helping however its win rate reads.
+
+    **TWO CO-EQUAL CRITERIA (#212).** The win-rate arm above cannot fire on this
+    book. At `payoff_ratio 0.427` (avg win +0.31R, avg loss -0.73R) a removed set
+    losing -0.21R per trade still wins ~55% of the time, so its posterior upper
+    bound lands ABOVE the base rate while the money screams — the estimator was
+    specified for losses that come from FREQUENCY, and these come from MAGNITUDE.
+    Both live epochs landed in exactly that hole, at N well above the floor, on
+    the first genuinely frozen window the experiment has ever produced.
+
+    So the arm rules `REMOVES_LOSERS` when EITHER the win-rate-and-sign test
+    fires, OR the removed-vs-kept mean-R difference clears a strictly harder bar:
+    a day-block CI excluding zero over at least two blocks, sign-stable across
+    EVERY leave-one-channel-out and leave-one-day-out fold. `criterion` says
+    which one spoke. When the two point opposite ways the verdict stays
+    `NO_EVIDENCE` — two criteria disagreeing is not a promotion.
+
+    The expectancy arm needs `day` (and, for LOCO, `source_id`/`channel`) on each
+    control trade. Without them it is simply absent and the win-rate arm rules
+    alone, exactly as before — an epoch is never ruled on a statistic that could
+    not be computed. `control_trades` must cover the epoch's window: everything
+    in it that is not in the removed set IS the kept set."""
     by_sig = {}
     for t in control_trades or ():
         sig = t.get("signal_id")
@@ -1755,6 +1952,24 @@ def filter_removed_set(skips, control_trades, *, base_rate,
             if pr not in (None, 0) and float(pr) != 0:
                 rs.append(pl / abs(float(pr)))
 
+        # The expectancy arm compares the removed set against what was KEPT, so
+        # it reads every scored control trade in the window, not only the skips.
+        exp_rows = []
+        for _sig, t in by_sig.items():
+            _pl, _pr = t.get("realized_pl"), t.get("planned_risk")
+            if _pl is None or _pr in (None, 0) or float(_pr) == 0:
+                continue
+            _day = _day_key(t)
+            if _day is None:
+                continue
+            exp_rows.append({"r": float(_pl) / abs(float(_pr)), "day": _day,
+                             "channel": _channel_key(t),
+                             "removed": _sig in sigs})
+        exp = (removed_vs_kept_expectancy(exp_rows, n_boot=n_boot, seed=seed)
+               if exp_rows else None)
+        if exp is not None and (not exp["n_removed"] or not exp["n_kept"]):
+            exp = None                            # one side empty: no contrast
+
         n_scored = len(pls)
         wins = sum(1 for p in pls if p > eps)
         n_flat = sum(1 for p in pls if abs(p) <= eps)
@@ -1765,6 +1980,14 @@ def filter_removed_set(skips, control_trades, *, base_rate,
         ci = ((round(post["ci_low"], 4), round(post["ci_high"], 4))
               if post else (None, None))
 
+        wr_verdict = None
+        if ci[1] is not None and ci[1] < base_rate and net < 0:
+            wr_verdict = FILTER_REMOVES_LOSERS
+        elif ci[0] is not None and ci[0] > base_rate and net > 0:
+            wr_verdict = FILTER_REMOVES_WINNERS
+        exp_verdict = _expectancy_verdict(exp)
+        criterion = None
+
         if not n_skipped:
             verdict, reason = FILTER_UNTESTED, "the filter never fired"
         elif n_decisive < min_n:
@@ -1772,17 +1995,33 @@ def filter_removed_set(skips, control_trades, *, base_rate,
             reason = (f"{n_decisive} decisive removals of the {min_n} needed. "
                       "Accumulate the NEXT weeks into this same epoch and test "
                       "once — do not read the interval yet")
-        elif ci[1] is not None and ci[1] < base_rate and net < 0:
-            verdict = FILTER_REMOVES_LOSERS
+        elif wr_verdict and exp_verdict and wr_verdict != exp_verdict:
+            verdict = FILTER_NO_EVIDENCE
+            reason = (f"the two criteria disagree: the win rate reads "
+                      f"{wr_verdict}, the removed-vs-kept expectancy "
+                      f"({exp['dR']}R, CI {exp['ci']}) reads {exp_verdict}. "
+                      "Two criteria pointing opposite ways is not a promotion")
+        elif wr_verdict == FILTER_REMOVES_LOSERS:
+            verdict, criterion = wr_verdict, "win_rate"
             reason = (f"the removed set won {ci[0]}-{ci[1]} against a base of "
                       f"{round(base_rate, 4)} and cost the control {net} — the "
                       "upper bound is below the base, so the filter is cutting "
                       "losers on the bound that matters for an exclusion")
-        elif ci[0] is not None and ci[0] > base_rate and net > 0:
-            verdict = FILTER_REMOVES_WINNERS
+        elif wr_verdict == FILTER_REMOVES_WINNERS:
+            verdict, criterion = wr_verdict, "win_rate"
             reason = (f"the removed set won {ci[0]}-{ci[1]} against a base of "
                       f"{round(base_rate, 4)} and MADE the control {net} — the "
                       "filter is cutting profit, not stops")
+        elif exp_verdict:
+            verdict, criterion = exp_verdict, "expectancy"
+            _worse = "worse" if exp["dR"] < 0 else "better"
+            reason = (f"the win rate cannot separate on this payoff geometry, "
+                      f"but the removed set ran {exp['dR']}R {_worse} than what "
+                      f"was kept, CI {exp['ci']} over {exp['n_blocks']} day "
+                      f"blocks, sign-stable on every leave-one-channel-out "
+                      f"({exp['loco']['same_sign']}/{exp['loco']['folds']}) and "
+                      f"leave-one-day-out ({exp['lodo']['same_sign']}/"
+                      f"{exp['lodo']['folds']}) fold")
         elif ci[0] is not None and (ci[1] < base_rate or ci[0] > base_rate):
             verdict = FILTER_NO_EVIDENCE
             reason = (f"the win rate and the P&L disagree: interval "
@@ -1802,7 +2041,17 @@ def filter_removed_set(skips, control_trades, *, base_rate,
             "win_rate_ci": ci, "base_rate": round(base_rate, 4),
             "mean_r": round(sum(rs) / len(rs), 4) if rs else None,
             "sum_r": round(sum(rs), 4) if rs else None,
-            "verdict": verdict, "reason": reason,
+            "verdict": verdict, "reason": reason, "criterion": criterion,
+            # The expectancy arm is reported whenever it could be computed, even
+            # when it rules nothing: a number that is hidden this week is a
+            # number recomputed by hand next week, which is what #186 exists to
+            # end. `n_blocks` rides with it because a one-block interval has no
+            # between-block variance and must never be read as tight.
+            "expectancy_dR": None if exp is None else exp["dR"],
+            "expectancy_ci": (None, None) if exp is None else exp["ci"],
+            "n_blocks": 0 if exp is None else exp["n_blocks"],
+            "loco_sign_stable": None if exp is None else exp["loco"],
+            "lodo_sign_stable": None if exp is None else exp["lodo"],
         }
 
     return {
