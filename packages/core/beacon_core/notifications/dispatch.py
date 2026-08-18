@@ -9,6 +9,7 @@ from typing import Optional
 from ..crypto import decrypt
 from ..logging import get_logger
 from ..settings_store import get_setting
+from ..timeutil import utcnow
 from . import config as C
 from . import deliveries as DL
 from . import templates as T
@@ -129,8 +130,22 @@ def _default_message(event_id: str, ctx: dict) -> tuple[str, str]:
     return _head, _body
 
 
+QUIET_HOURS_KEY = "quiet_hours"
+SUPPRESSED_QUIET = "suppressed_quiet_hours"
+
+
 async def _load(session) -> dict:
     return C.sanitize_config(await get_setting(session, C.SETTING_KEY, {}))
+
+
+async def _quiet_policy(session) -> dict:
+    """The quiet-hours policy, or an empty one. A policy that cannot be read is
+    no policy at all — never a reason to hold an alert."""
+    try:
+        return await get_setting(session, QUIET_HOURS_KEY, {}) or {}
+    except Exception as exc:                     # pragma: no cover - defensive
+        log.debug("quiet-hours policy unreadable: %s", exc)
+        return {}
 
 
 async def notify(session, event_id: str, ctx: Optional[dict] = None) -> dict:
@@ -150,6 +165,18 @@ async def notify(session, event_id: str, ctx: Optional[dict] = None) -> dict:
         return {"event": event_id, "results": {}}
 
     subject, text = format_message(event_id, ctx, stored.get("templates"))
+
+    # #210: quiet hours. HELD, not dropped — the outcome is recorded against the
+    # channels it would have gone to, so the Deliveries panel shows an intentional
+    # hold rather than the silence that makes an operator distrust the channel.
+    # Money and safety events are `critical` and outrank any floor an operator
+    # can set, so this can never mute an SL hit.
+    if C.is_quiet_suppressed(event_id, await _quiet_policy(session), utcnow()):
+        results = {ch_id: SUPPRESSED_QUIET for ch_id in targets}
+        log.info("notify %s: held by quiet hours (%s)", event_id, sorted(targets))
+        await DL.record(session, event_id, subject, results)
+        return {"event": event_id, "results": results, "suppressed": "quiet_hours"}
+
     results = {}
     for ch_id in targets:
         sender = SENDERS.get(ch_id)

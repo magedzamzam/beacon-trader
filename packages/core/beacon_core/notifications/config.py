@@ -91,6 +91,120 @@ EVENT_GROUPS = [
     ]},
 ]
 
+# --- Severity + the delivery policy (#210) ------------------------------------
+# Every routed event fired 24/7 at the same weight. On a busy XAUUSD day the
+# routine stream buries the money/safety events, and there was no way to say
+# "overnight, only the critical ones". `throttle.py` (#180) collapses ONE
+# event's bursts; this is the cross-event, time-of-day axis it cannot see.
+SEVERITY_RANK = {"info": 0, "summary": 1, "critical": 2}
+SEVERITIES = ["info", "summary", "critical"]
+
+EVENT_SEVERITY = {
+    # money and safety — these must survive any gate an operator sets
+    "tp_hit": "critical", "sl_hit": "critical", "trade_closed": "critical",
+    "broker_error": "critical", "arm_dark": "critical",
+    # the end-of-day roll-up: more than chatter, less than a stop-out
+    "daily_summary": "summary",
+    # routine flow
+    "new_signal": "info", "signal_validated": "info", "signal_rejected": "info",
+    "order_placed": "info", "order_filled": "info", "order_cancelled": "info",
+    "sl_moved": "info",
+}
+
+QUIET_HOURS_DEFAULT = {"enabled": False, "start_utc": "22:00",
+                       "end_utc": "06:00", "min_severity": "critical"}
+
+
+def event_severity(event_id: str) -> str:
+    """An unmapped event is `critical`: a new event type must not become
+    silenceable by having been forgotten here."""
+    return EVENT_SEVERITY.get(event_id, "critical")
+
+
+def _hhmm(v):
+    """"HH:MM" -> minutes since midnight, else None."""
+    if v is None:
+        return None
+    parts = str(v).strip().split(":")
+    if len(parts) < 2:
+        return None
+    try:
+        h, m = int(parts[0]), int(parts[1])
+    except (TypeError, ValueError):
+        return None
+    if not (0 <= h < 24 and 0 <= m < 60):
+        return None
+    return h * 60 + m
+
+
+def in_quiet_window(policy, now) -> bool:
+    """Is `now` (an aware/UTC datetime) inside the configured window?
+
+    Half-open `[start, end)`; `end <= start` crosses midnight, which is the only
+    reading that makes an overnight window expressible. An unreadable bound is
+    NOT quiet — a malformed policy must never be able to silence an alert."""
+    lo, hi = _hhmm((policy or {}).get("start_utc")), _hhmm((policy or {}).get("end_utc"))
+    if lo is None or hi is None or lo == hi:
+        return False
+    minute = now.hour * 60 + now.minute
+    return lo <= minute < hi if lo < hi else (minute >= lo or minute < hi)
+
+
+def is_quiet_suppressed(event_id: str, policy, now) -> bool:
+    """Should `event_id` be HELD (not dropped) right now?
+
+    Fail-loud by construction: disabled policy, unreadable window, unknown
+    min_severity and unmapped event all resolve to "deliver". The only way to
+    stop a notification is a policy that explicitly says so."""
+    policy = policy or {}
+    if not policy.get("enabled"):
+        return False
+    floor = SEVERITY_RANK.get(str(policy.get("min_severity") or "").strip().lower())
+    if floor is None:
+        return False
+    if not in_quiet_window(policy, now):
+        return False
+    return SEVERITY_RANK[event_severity(event_id)] < floor
+
+
+# --- Policy validation (shared by the API write path, #209/#210) --------------
+POLICY_KEYS = ("daily_summary", "arm_dark", "quiet_hours")
+
+
+def _num(v, default, lo, hi, *, cast=float):
+    try:
+        n = cast(v)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, n))
+
+
+def clean_policy(key: str, value) -> dict:
+    """Whitelist + clamp one policy block. The monitor and dispatch already read
+    these defensively, but the API should not PERSIST junk they then have to
+    tolerate — a stored `at_utc: "banana"` is a digest that silently never
+    arrives, and the operator has a settings screen telling them it is on."""
+    v = value if isinstance(value, dict) else {}
+    out = {"enabled": bool(v.get("enabled"))}
+    if key == "daily_summary":
+        at = v.get("at_utc")
+        out["at_utc"] = at if _hhmm(at) is not None else "00:15"
+    elif key == "arm_dark":
+        out["window_hours"] = _num(v.get("window_hours", 24), 24, 1, 168)
+        out["cooldown_hours"] = _num(v.get("cooldown_hours", 6), 6, 0.25, 168)
+        out["min_signals"] = _num(v.get("min_signals", 10), 10, 1, 1000, cast=int)
+        out["threshold"] = _num(v.get("threshold", 0.80), 0.80, 0.0, 1.0)
+    elif key == "quiet_hours":
+        for f, dflt in (("start_utc", "22:00"), ("end_utc", "06:00")):
+            got = v.get(f, dflt)
+            out[f] = got if _hhmm(got) is not None else dflt
+        sev = str(v.get("min_severity") or "").strip().lower()
+        out["min_severity"] = sev if sev in SEVERITY_RANK else "critical"
+    else:
+        raise ValueError(f"unknown policy key '{key}'")
+    return out
+
+
 CHANNEL_IDS = [c["id"] for c in CHANNELS]
 EVENT_IDS = [e["id"] for g in EVENT_GROUPS for e in g["events"]]
 _CHANNEL_BY_ID = {c["id"]: c for c in CHANNELS}
@@ -139,6 +253,10 @@ def catalog() -> dict:
         "fields_by_event": {e: _T.field_descriptor(e) for e in EVENT_IDS},
         "samples": {e: _T.sample_ctx(e) for e in EVENT_IDS},
         "emitted": {e: _T.is_emitted(e) for e in EVENT_IDS},
+        # #210: the operator setting a min-severity has to be able to see what
+        # that will and will not deliver, beside the control that sets it.
+        "severity": {e: event_severity(e) for e in EVENT_IDS},
+        "severities": SEVERITIES,
     }
 
 
