@@ -182,6 +182,12 @@ def filter_ctx(mc: MarketContext, *, sessions=None) -> dict:
     rule that fires live fires here — and one whose inputs are missing stays a
     no-op rather than deleting the signal (#164)."""
     ctx: dict = {"price": float(mc.current_price)}
+    # The signal's own instant, for the `time_window` leaf (#214). The replayed
+    # analogue of the executor's wall clock: live, a rule is evaluated within
+    # seconds of ingest, so the signal bar's timestamp is the same reading.
+    ts = getattr(mc.signal_bar, "ts", None)
+    if ts is not None:
+        ctx["ts"] = ts
     if sessions:
         ctx["sessions"] = list(sessions)
     if mc.adx:

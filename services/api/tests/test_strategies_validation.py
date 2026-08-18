@@ -172,6 +172,46 @@ def test_entry_filters_accepts_the_new_shadow_rule_types():
         assert out["rules"][0]["when"]["type"] == t
 
 
+# ------------------------------------------------------------- time_window
+# #214: hour-of-day is the strongest entry-side effect in the live book and
+# `session_in` (a NAME match) cannot express it. The evaluator is fail-open by
+# design, so an unreadable window would sit there as a permanently silent rule —
+# this is the layer that can afford to say no.
+TW = {"type": "time_window", "tz": "UTC", "from": "07:00", "to": "09:00"}
+
+
+def test_time_window_rule_round_trips():
+    out = S._clean_entry_filters({"rules": [_rule(dict(TW))]})
+    assert out["rules"][0]["when"] == TW
+    # a days filter survives cleaning, and an empty one is dropped as a blank
+    out = S._clean_entry_filters({"rules": [_rule({**TW, "days": ["mon", "fri"]})]})
+    assert out["rules"][0]["when"]["days"] == ["mon", "fri"]
+
+
+@pytest.mark.parametrize("when", [
+    {**TW, "from": "7am"},                      # unparseable bound
+    {**TW, "to": "25:00"},                      # out of range
+    {"type": "time_window", "to": "09:00"},     # no `from` at all
+    {"type": "time_window", "from": "07:00"},   # no `to` at all
+    {**TW, "to": "07:00"},                      # empty window
+    {**TW, "days": ["funday"]},                 # unknown day
+    {**TW, "days": "mon"},                      # days must be a list
+    {**TW, "tz": "Mars/Olympus"},               # unknown zone
+])
+def test_time_window_rejects_a_window_the_evaluator_could_not_read(when):
+    with pytest.raises(HTTPException) as exc:
+        S._clean_entry_filters({"rules": [_rule(when)]})
+    assert exc.value.status_code == 422
+
+
+def test_time_window_is_live_by_default_like_the_other_calendar_leaf():
+    """It reads the clock — there is no estimate to shadow, and no TA fetch it
+    can drag onto the entry path."""
+    rule = S._clean_entry_filters({"rules": [_rule(dict(TW))]})["rules"][0]
+    assert "mode" not in rule and ST.rule_mode(rule) == "live"
+    assert ST.ta_rule_requirements([rule]) == []
+
+
 @pytest.mark.parametrize("bad", [
     {"rules": [_rule({"type": "no_such_filter"})]},
     {"rules": [_rule({"type": "adx_regime"}, action="delete")]},

@@ -11,6 +11,7 @@ on a bare box and is safe from both the executor (snapshot at entry) and monitor
 """
 from __future__ import annotations
 
+import datetime as _dt
 from typing import NamedTuple
 
 from ..strategy.rules import DEFAULT_SL_RULES
@@ -640,6 +641,107 @@ def adx_rule_timeframes(rules, default: str = "4h") -> set:
     return tfs
 
 
+# ---- time_window -------------------------------------------------------------
+# Hour-of-day is the strongest entry-side effect visible in the live book, and
+# `session_in` cannot express it: a session is a NAME, and by session everything
+# is negative with a weak spread, while by hour the structure is sharp (#214).
+_WEEKDAYS = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+
+
+def _as_minute_of_day(v):
+    """"HH:MM" (or "HH:MM:SS") -> minutes since midnight, else None. `24:00` is
+    accepted as end-of-day so a window can close on the boundary."""
+    if v is None:
+        return None
+    txt = str(v).strip()
+    if not txt:
+        return None
+    parts = txt.split(":")
+    if len(parts) < 2 or len(parts) > 3:
+        return None
+    try:
+        h, m = int(parts[0]), int(parts[1])
+    except (TypeError, ValueError):
+        return None
+    if h == 24 and m == 0:
+        return 24 * 60
+    if not (0 <= h < 24 and 0 <= m < 60):
+        return None
+    return h * 60 + m
+
+
+def _as_datetime(v):
+    """A ctx timestamp as an AWARE datetime, else None. Accepts a datetime (a
+    naive one is read as UTC, which is what every producer here stores) or an
+    ISO-8601 string, including the `Z` suffix Postgres/JSON round-trips."""
+    if isinstance(v, _dt.datetime):
+        return v if v.tzinfo is not None else v.replace(tzinfo=_dt.timezone.utc)
+    if isinstance(v, str):
+        txt = v.strip()
+        if not txt:
+            return None
+        if txt.endswith(("Z", "z")):
+            txt = txt[:-1] + "+00:00"
+        try:
+            d = _dt.datetime.fromisoformat(txt)
+        except ValueError:
+            return None
+        return d if d.tzinfo is not None else d.replace(tzinfo=_dt.timezone.utc)
+    return None
+
+
+def _in_zone(when, moment):
+    """`moment` moved into the leaf's `tz`, or None when that zone is unknown.
+    Unknown zone -> UNKNOWN, never a silent UTC reading: a window an operator
+    wrote in New York time must not fire on London hours."""
+    tz = str(when.get("tz") or "UTC").strip()
+    if tz.upper() in ("UTC", "Z", "GMT"):
+        return moment.astimezone(_dt.timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+        return moment.astimezone(ZoneInfo(tz))
+    except Exception:
+        return None
+
+
+def _eval_time_window(when, ctx):
+    """`{type: time_window, tz, from, to, days}` — does the signal's own instant
+    fall inside a wall-clock window? Tri-state like every other leaf.
+
+    `[from, to)`, half-open, so back-to-back windows do not both claim the
+    boundary minute. `to <= from` CROSSES MIDNIGHT (22:00->06:00 is the evening
+    plus the early morning), which is the only reading that makes an overnight
+    window expressible at all. `days` (mon..sun) additionally restricts the
+    weekday OF THE TIMESTAMP itself, in the window's own zone.
+
+    UNKNOWN when: no timestamp in ctx, an unparseable/absent bound, an unknown
+    timezone, or an unparseable day name. Never False on a missing input — a
+    `{"not": ...}` around this leaf must not fire because we could not read the
+    clock (#184)."""
+    moment = _as_datetime(ctx.get("ts"))
+    if moment is None:
+        return None
+    lo = _as_minute_of_day(when.get("from"))
+    hi = _as_minute_of_day(when.get("to"))
+    if lo is None or hi is None or lo == hi:
+        return None                               # no window stated -> no-op
+    local = _in_zone(when, moment)
+    if local is None:
+        return None
+    days = when.get("days")
+    if days:
+        try:
+            want = {_WEEKDAYS[str(d).strip().lower()[:3]] for d in days}
+        except KeyError:
+            return None                           # unreadable day -> unknown
+        if local.weekday() not in want:
+            return False
+    minute = local.hour * 60 + local.minute
+    if lo < hi:
+        return lo <= minute < hi
+    return minute >= lo or minute < hi            # crosses midnight
+
+
 def _eval_leaf(when, ctx):
     """One LEAF condition against the context, tri-state.
 
@@ -661,6 +763,8 @@ def _eval_leaf(when, ctx):
         if not want:
             return None                               # no condition -> no-op
         return any(s in want for s in have)
+    if wtype == "time_window":
+        return _eval_time_window(when, ctx)
     if wtype == "adx_regime":
         return _eval_adx_regime(when, ctx)
     if wtype == "mc_probability":
@@ -766,6 +870,8 @@ def evaluate_filter_rules(rules, ctx) -> FilterDecision:
     a no-op (fail-open) — so rules needing entry-time features simply don't fire
     until those features are wired. Understood conditions:
       session_in {sessions:[...]}          ctx['session'] in list
+      time_window {tz, from, to, days}     ctx['ts'] inside a wall-clock window
+                                             (#214); half-open, crosses midnight
       always                               unconditional (baseline scaling)
       adx_regime {timeframe, trending,     ctx['adx'][tf] ADX trend state (#127);
                   min_adx, max_adx}          fail-open when ADX absent from ctx

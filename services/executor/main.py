@@ -8,7 +8,7 @@ crash never loses track of real money.
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from sqlalchemy import func, select
@@ -548,7 +548,11 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         _frules = (_entry_filters or {}).get("rules") or []
         if _frules:
             _active = await th_service.active_sessions(session)
-            _filter_ctx = {"sessions": _active, "price": float(current)}
+            # `ts` is the instant the entry decision is being made, which is
+            # what a `time_window` rule gates on (#214). Aware/UTC, so the leaf
+            # can move it into the window's own zone.
+            _filter_ctx = {"sessions": _active, "price": float(current),
+                           "ts": datetime.now(timezone.utc)}
             # #132: graduate the adx_regime filter (#127) from shadow to LIVE. Build
             # the per-TF ADX ctx by computing it in the hot path (features are
             # captured post-execution, so they're not persisted yet). Only fetches

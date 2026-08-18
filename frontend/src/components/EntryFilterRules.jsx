@@ -35,6 +35,11 @@ export const RULE_TYPES = {
     hint: "act only during the named trading sessions",
     blank: { type: "session_in", sessions: [] },
   },
+  time_window: {
+    label: "Time window",
+    hint: "act inside a wall-clock window — the hour grain a Session cannot express (#214). Half-open [from, to); to ≤ from crosses midnight.",
+    blank: { type: "time_window", tz: "UTC", from: "07:00", to: "09:00", days: [] },
+  },
   mc_probability: {
     label: "Monte Carlo (geometry)",
     hint: "act on what the SL/TP layout is worth with NO channel skill — a HIGH P(win) means a far stop and a near target, not an edge. SHADOW: inert until graduated.",
@@ -243,6 +248,34 @@ function RuleFields({ when, set, setMany, catalog }) {
             <option value="signal">reference (stop-and-reverse)</option>
             <option value="signal_flat">exits to flat</option>
           </Select></Field>
+      </div>
+    );
+  }
+  if (t === "time_window") {
+    const days = when.days || [];
+    const toggleDay = (d) =>
+      set("days", days.includes(d) ? days.filter((x) => x !== d) : [...days, d]);
+    return (
+      <div className="space-y-3">
+        <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
+          <Field label="From" hint="HH:MM, inclusive">
+            <Input type="time" value={when.from ?? ""} onChange={(e) => set("from", e.target.value)} /></Field>
+          <Field label="To" hint="HH:MM, exclusive · earlier than From crosses midnight">
+            <Input type="time" value={when.to ?? ""} onChange={(e) => set("to", e.target.value)} /></Field>
+          <Field label="Timezone" hint="IANA name, e.g. UTC or Europe/London">
+            <Input value={when.tz ?? "UTC"} onChange={(e) => set("tz", e.target.value)} /></Field>
+        </div>
+        <Field label="Days" hint="none selected = every day">
+          <div className="flex flex-wrap gap-1.5">
+            {["mon", "tue", "wed", "thu", "fri", "sat", "sun"].map((d) => (
+              <button key={d} type="button" onClick={() => toggleDay(d)}
+                className={`px-2 py-1 rounded text-xs border ${days.includes(d)
+                  ? "border-accent text-accent" : "border-edge text-muted"}`}>
+                {d}
+              </button>
+            ))}
+          </div>
+        </Field>
       </div>
     );
   }

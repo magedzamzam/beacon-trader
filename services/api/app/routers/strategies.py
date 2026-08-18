@@ -32,7 +32,7 @@ _SL_TRIGGERS = {"tp_hit", "price_move", "be_lock_at_r"}   # be_lock_at_r: #109
 # into the legacy entry_filters.trend_alignment block before saving, and the
 # evaluator has no case for it, so accepting one into `rules` would store a
 # permanently silent no-op.
-_FILTER_WHEN = {"always", "session_in", "adx_regime",
+_FILTER_WHEN = {"always", "session_in", "time_window", "adx_regime",
                 "mc_probability", "turtle_signal", "indicator"}
 _FILTER_ACTIONS = {"skip", "scale"}
 
@@ -87,6 +87,35 @@ def _clean_when(when: dict) -> dict:
     `execution.strategy._as_num` remains the runtime backstop for rows already
     stored."""
     return {k: v for k, v in when.items() if v != ""}
+
+
+def _check_time_window(when: dict, where: str) -> None:
+    """Validate a `time_window` leaf (#214). Strict where the evaluator is
+    fail-open: a window the evaluator cannot read is a permanently silent rule,
+    and an operator who wrote `7:00` or `Europe/Lundon` deserves to hear about it
+    at write time rather than a week later in the removed-set count."""
+    for key in ("from", "to"):
+        if ST._as_minute_of_day(when.get(key)) is None:
+            raise HTTPException(422, f"{where}: time_window needs '{key}' as "
+                                     f"HH:MM (got {when.get(key)!r})")
+    if ST._as_minute_of_day(when["from"]) == ST._as_minute_of_day(when["to"]):
+        raise HTTPException(422, f"{where}: time_window 'from' and 'to' are the "
+                                 "same minute — that window is empty")
+    days = when.get("days")
+    if days not in (None, "", []):
+        if not isinstance(days, (list, tuple)):
+            raise HTTPException(422, f"{where}: time_window 'days' must be a list")
+        for d in days:
+            if str(d).strip().lower()[:3] not in ST._WEEKDAYS:
+                raise HTTPException(422, f"{where}: unknown day '{d}' "
+                                         f"(use {', '.join(ST._WEEKDAYS)})")
+    tz = when.get("tz")
+    if tz not in (None, "") and str(tz).strip().upper() not in ("UTC", "Z", "GMT"):
+        try:
+            from zoneinfo import ZoneInfo
+            ZoneInfo(str(tz).strip())
+        except Exception:
+            raise HTTPException(422, f"{where}: unknown timezone '{tz}'")
 
 
 def _check_indicator_side(side: dict, where: str, *, need_op: bool) -> None:
@@ -170,6 +199,8 @@ def _clean_entry_filters(ef) -> dict | None:
             when = _clean_when(r["when"])
             if when.get("type") == "indicator":
                 _check_indicator_when(when, where)
+            elif when.get("type") == "time_window":
+                _check_time_window(when, where)
             out = {**r, "when": when}
             mode = _clean_mode(r, where)
             if mode:

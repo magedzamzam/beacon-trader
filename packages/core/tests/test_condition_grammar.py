@@ -39,6 +39,8 @@ CTX = {
         "4h": {"adx_14": {"adx": 31.2, "trending": True}},
     },
     "adx": {"4h": {"adx": 31.2, "trending": True}},
+    # Wed 2026-08-12, 08:30 UTC — inside the {07,08,11,12}Z bucket #214 screens.
+    "ts": "2026-08-12T08:30:00Z",
 }
 
 RSI_LT_70 = {"type": "indicator", "id": "rsi", "timeframe": "15m",
@@ -55,6 +57,8 @@ OB_PRESENT = {"type": "indicator", "id": "order_block", "timeframe": "15m",
 UNKNOWABLE = {"type": "indicator", "id": "ichimoku", "timeframe": "15m",
               "field": "tenkan", "op": "gt", "value": 1}
 IN_LONDON = {"type": "session_in", "sessions": ["London"]}
+MORNING_WINDOW = {"type": "time_window", "from": "07:00", "to": "09:00"}
+AFTERNOON_WINDOW = {"type": "time_window", "from": "13:00", "to": "15:00"}
 IN_NEW_YORK = {"type": "session_in", "sessions": ["New York"]}
 
 
@@ -72,7 +76,8 @@ def test_both_entry_points_agree_on_every_leaf():
     generator calls. If they can ever disagree, the shared grammar is a fiction
     and the backtest is measuring a different rule from the one that would run."""
     for cond in (RSI_LT_70, RSI_GT_70, MACD_CROSS_UP, FVG_PRESENT, OB_PRESENT,
-                 UNKNOWABLE, IN_LONDON, IN_NEW_YORK, {"type": "always"},
+                 UNKNOWABLE, IN_LONDON, IN_NEW_YORK, MORNING_WINDOW,
+                 AFTERNOON_WINDOW, {"type": "always"},
                  {"type": "nonsense"}, {}):
         assert ST._matches(cond, CTX) is ST.matches_condition(cond, CTX)
 
@@ -244,3 +249,119 @@ def test_a_composed_rule_that_cannot_be_evaluated_never_skips():
     rules = [{"enabled": True, "name": "c", "mode": "live", "action": "skip",
               "when": {"not": {"all": [UNKNOWABLE]}}}]
     assert ST.apply_filter_rules(rules, CTX)[1] is False
+
+
+# ---- time_window (#214) ------------------------------------------------------
+# Time-of-day carries -0.1455R on the live control book and `session_in` cannot
+# express it: a session is a name, and the hours that separate ({07,08,11,12}Z)
+# cut across session boundaries.
+def _tw(**kw):
+    return {"type": "time_window", **kw}
+
+
+def test_time_window_is_half_open_on_both_ends():
+    ctx = {"ts": "2026-08-12T09:00:00Z"}
+    assert ST.evaluate_condition(_tw(**{"from": "07:00", "to": "09:00"}), ctx) is False
+    assert ST.evaluate_condition(_tw(**{"from": "09:00", "to": "11:00"}), ctx) is True
+    # ...so back-to-back windows never both claim the boundary minute
+    assert ST.evaluate_condition(_tw(**{"from": "07:00", "to": "09:00"}),
+                       {"ts": "2026-08-12T08:59:00Z"}) is True
+
+
+def test_time_window_crossing_midnight_covers_both_sides():
+    night = _tw(**{"from": "22:00", "to": "06:00"})
+    for stamp, expected in (("2026-08-12T22:00:00Z", True),
+                            ("2026-08-12T23:59:00Z", True),
+                            ("2026-08-13T00:00:00Z", True),
+                            ("2026-08-13T05:59:00Z", True),
+                            ("2026-08-13T06:00:00Z", False),
+                            ("2026-08-13T12:00:00Z", False)):
+        assert ST.evaluate_condition(night, {"ts": stamp}) is expected, stamp
+
+
+def test_time_window_days_filter_restricts_the_weekday():
+    weekday_morning = _tw(days=["mon", "tue", "wed", "thu", "fri"],
+                          **{"from": "07:00", "to": "09:00"})
+    assert ST.evaluate_condition(weekday_morning, {"ts": "2026-08-12T08:00:00Z"}) is True
+    # 2026-08-15 is a Saturday: same clock time, excluded by the day filter
+    assert ST.evaluate_condition(weekday_morning, {"ts": "2026-08-15T08:00:00Z"}) is False
+    # a day name we cannot read is UNKNOWN, not a silently-dropped filter
+    assert ST.evaluate_condition(_tw(days=["funday"], **{"from": "07:00", "to": "09:00"}),
+                       {"ts": "2026-08-12T08:00:00Z"}) is None
+
+
+def test_time_window_is_unknown_not_false_on_a_missing_or_bad_input():
+    """Kleene, exactly as every other leaf: `not` over an unreadable clock must
+    stay inert, or a generator trades on the absence of evidence."""
+    w = _tw(**{"from": "07:00", "to": "09:00"})
+    for ctx in ({}, {"ts": None}, {"ts": ""}, {"ts": "not-a-timestamp"}):
+        assert ST.evaluate_condition(w, ctx) is None, ctx
+        assert ST.evaluate_condition({"not": w}, ctx) is None, ctx
+    stamped = {"ts": "2026-08-12T08:00:00Z"}
+    for bad in (_tw(**{"from": "07:00"}), _tw(**{"to": "09:00"}),
+                _tw(**{"from": "7am", "to": "9am"}),
+                _tw(**{"from": "25:00", "to": "09:00"}),
+                _tw(**{"from": "08:00", "to": "08:00"}), _tw()):
+        assert ST.evaluate_condition(bad, stamped) is None, bad
+
+
+def test_time_window_reads_the_zone_it_was_written_in():
+    """A window written in a named zone must not be read as UTC, and a zone we
+    cannot resolve is UNKNOWN rather than a wrong-by-an-hour gate."""
+    ctx = {"ts": "2026-08-12T08:30:00Z"}          # 12:30 in Dubai (UTC+4)
+    assert ST.evaluate_condition(_tw(tz="UTC", **{"from": "08:00", "to": "09:00"}), ctx) is True
+    dubai = _tw(tz="Asia/Dubai", **{"from": "08:00", "to": "09:00"})
+    assert ST.evaluate_condition(dubai, ctx) is False
+    assert ST.evaluate_condition(_tw(tz="Asia/Dubai", **{"from": "12:00", "to": "13:00"}),
+                                 ctx) is True
+    assert ST.evaluate_condition(_tw(tz="Mars/Olympus", **{"from": "08:00", "to": "09:00"}),
+                       ctx) is None
+
+
+def test_time_window_accepts_a_datetime_as_well_as_a_string():
+    """The executor puts an aware datetime in ctx; the replay harness puts a bar
+    timestamp. Both entry points must read the same clock."""
+    import datetime as dt
+    aware = dt.datetime(2026, 8, 12, 8, 30, tzinfo=dt.timezone.utc)
+    naive = dt.datetime(2026, 8, 12, 8, 30)       # stored UTC, read as UTC
+    w = _tw(**{"from": "07:00", "to": "09:00"})
+    assert ST.evaluate_condition(w, {"ts": aware}) is True
+    assert ST.evaluate_condition(w, {"ts": naive}) is True
+
+
+def test_time_window_composes_and_agrees_across_both_entry_points():
+    """The screened bucket is four disjoint hours, which is `any` over four
+    windows — and the same expression has to mean the same thing to the
+    generator, or the backtest is measuring a different rule."""
+    bad_hours = {"any": [_tw(**{"from": "07:00", "to": "09:00"}),
+                         _tw(**{"from": "11:00", "to": "13:00"})]}
+    for stamp, expected in (("2026-08-12T07:30:00Z", True),
+                            ("2026-08-12T09:30:00Z", False),
+                            ("2026-08-12T12:59:00Z", True),
+                            ("2026-08-12T13:00:00Z", False)):
+        ctx = {"ts": stamp}
+        assert ST.evaluate_condition(bad_hours, ctx) is expected, stamp
+        assert ST._matches(bad_hours, ctx) is ST.matches_condition(bad_hours, ctx)
+    trade_the_rest = {"not": bad_hours}
+    assert ST.evaluate_condition(trade_the_rest, {"ts": "2026-08-12T09:30:00Z"}) is True
+    assert ST.evaluate_condition(trade_the_rest, {}) is None
+
+
+def test_a_time_window_rule_needs_no_indicator_computed():
+    """It reads the clock, so it must not drag TA fetches onto the entry path."""
+    rules = [{"enabled": True, "action": "skip",
+              "when": _tw(**{"from": "07:00", "to": "09:00"})}]
+    assert ST.ta_rule_requirements(rules) == []
+    assert ST.adx_rule_timeframes(rules) == set()
+    # and it is a LIVE-by-default leaf, like session_in: nothing to shadow
+    assert ST.rule_mode(rules[0]) == "live"
+
+
+def test_a_time_window_skip_rule_removes_the_signal_it_names():
+    rules = [{"enabled": True, "action": "skip", "name": "skip_bad_hours",
+              "when": _tw(**{"from": "07:00", "to": "09:00"})}]
+    d = ST.evaluate_filter_rules(rules, {"ts": "2026-08-12T08:00:00Z"})
+    assert d.skip is True and d.reasons == ["skip_bad_hours"]
+    assert ST.evaluate_filter_rules(rules, {"ts": "2026-08-12T10:00:00Z"}).skip is False
+    # no clock at all -> fail open, the signal trades (#164)
+    assert ST.evaluate_filter_rules(rules, {"price": 2000.0}).skip is False
