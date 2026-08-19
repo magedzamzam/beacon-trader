@@ -191,7 +191,23 @@ hypothesis-generating only — see `services/replay/README.md` and §2 above.
 ## 6. Deploy / rebuild gotchas
 
 - `packages/core/beacon_core` is `pip install`ed into **every** Python image → a core change
-  means rebuilding **all** python services: `docker compose build api executor monitor telegram`.
+  means rebuilding **all** python services. The full deploy, which is the only form that
+  keeps provenance:
+
+  ```bash
+  cd /home/beacon-trader && sudo git pull && SHA=$(sudo git rev-parse --short HEAD) && sudo GIT_SHA=$SHA docker compose build api candle-sync engine-producer excursion-scorer executor telegram monitor && sudo GIT_SHA=$SHA docker compose up -d
+  ```
+
+  - `sudo` on both: bare `git` gives `dubious ownership`, bare `docker` gives `permission
+    denied on /var/run/docker.sock`.
+  - `GIT_SHA` on **both** build and up — it is a build arg that becomes `BEACON_GIT_SHA` in
+    the image (#218). Drop it and every python image reports an empty SHA, so the box cannot
+    say what is running on it.
+  - `up -d` with **no service list**, and last: it reconciles compose-file changes (a new
+    service, a changed command) that a per-service `up` silently skips.
+  - Verify with something that would FAIL on a silent no-op — import the symbol you added,
+    not just `echo $BEACON_GIT_SHA`. A deadlock cascade inside the restart window is normal;
+    judge health after it.
 - Frontend is a baked Vite build → a JSX change needs `docker compose build frontend`
   (a restart won't do). `redis` never needs rebuilding.
 - Schema is `Base.metadata.create_all` on startup: **new tables** appear automatically, **new
