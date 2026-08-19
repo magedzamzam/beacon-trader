@@ -232,3 +232,45 @@ def test_warmup_still_applies_to_an_old_bar():
     out = P.evaluate_at(G.RulesSpec(RUN43), _Provider(), frame, 3,
                         frame[3].ts + dt.timedelta(minutes=15), _ctx(50))
     assert out["signal"] is None and out["reason"] == "warmup"
+
+# --- the row has to be insertable (#239) ------------------------------------
+
+def test_a_shadow_row_carries_a_dedupe_hash():
+    """`signals.dedupe_hash` is NOT NULL. This row was the one path that never
+    set it, so every generated signal died on a constraint violation — the
+    engine could not have written a signal even on a bar it saw."""
+    parsed, _ = G.build_signal(G.RulesSpec(RUN43), "BUY", 100.0, _Provider(),
+                               dt.datetime(2026, 8, 18, 9, tzinfo=UTC), _ctx())
+    row = P.shadow_signal_row(parsed, source_id=42,
+                              closed_at=dt.datetime(2026, 8, 18, 9, tzinfo=UTC))
+    assert row["dedupe_hash"] and len(row["dedupe_hash"]) == 64
+
+
+def test_the_same_bar_hashes_the_same_and_a_different_bar_does_not():
+    parsed, _ = G.build_signal(G.RulesSpec(RUN43), "BUY", 100.0, _Provider(),
+                               dt.datetime(2026, 8, 18, 9, tzinfo=UTC), _ctx())
+    a = P.shadow_dedupe_hash(42, parsed, dt.datetime(2026, 8, 18, 9, tzinfo=UTC))
+    b = P.shadow_dedupe_hash(42, parsed, dt.datetime(2026, 8, 18, 9, tzinfo=UTC))
+    c = P.shadow_dedupe_hash(42, parsed, dt.datetime(2026, 8, 18, 9, 15, tzinfo=UTC))
+    assert a == b and a != c
+
+
+def test_two_bars_with_identical_geometry_are_two_signals():
+    """A range that touches the same level twice produces the same entry and
+    stop on two different bars. Those are two observations of the strategy, not
+    a repost — so the bar, not the geometry, is the identity."""
+    parsed, _ = G.build_signal(G.RulesSpec(RUN43), "BUY", 100.0, _Provider(),
+                               dt.datetime(2026, 8, 18, 9, tzinfo=UTC), _ctx())
+    same_geometry, _ = G.build_signal(G.RulesSpec(RUN43), "BUY", 100.0, _Provider(),
+                                      dt.datetime(2026, 8, 18, 14, tzinfo=UTC), _ctx())
+    assert parsed.entry_from == same_geometry.entry_from
+    assert (P.shadow_dedupe_hash(42, parsed, dt.datetime(2026, 8, 18, 9, tzinfo=UTC))
+            != P.shadow_dedupe_hash(42, same_geometry,
+                                    dt.datetime(2026, 8, 18, 14, tzinfo=UTC)))
+
+
+def test_two_sources_on_one_bar_do_not_collide():
+    parsed, _ = G.build_signal(G.RulesSpec(RUN43), "BUY", 100.0, _Provider(),
+                               dt.datetime(2026, 8, 18, 9, tzinfo=UTC), _ctx())
+    at = dt.datetime(2026, 8, 18, 9, tzinfo=UTC)
+    assert P.shadow_dedupe_hash(42, parsed, at) != P.shadow_dedupe_hash(43, parsed, at)
