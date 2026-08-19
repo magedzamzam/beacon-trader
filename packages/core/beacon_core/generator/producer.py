@@ -27,6 +27,7 @@ source, which is the only record that outlives the process.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 from typing import Optional
 
 from beacon_core.generator import rules as G
@@ -140,6 +141,27 @@ def evaluate_latest(spec: G.RulesSpec, provider, frame, cond_ctx: dict,
                        last_signal_at=last_signal_at, count_today=count_today)
 
 
+
+def shadow_dedupe_hash(source_id: int, parsed, closed_at: dt.datetime) -> str:
+    """The engine signal's identity: this source, this BAR (#239).
+
+    `signals.dedupe_hash` is NOT NULL, and this row was the one path that never
+    set it -- so every generated signal failed to insert with a constraint
+    violation, no matter how many bars the producer looked at. The catch-up fix
+    surfaced it on the first bar it repaired; before that nothing ever got far
+    enough to try.
+
+    Keyed on the BAR, not on the geometry the channel hash uses
+    (`source:symbol:direction:entry:sl`). Two different bars can legitimately
+    produce the same entry and stop -- a range that touches the same level
+    twice -- and those are two separate observations of the strategy, not a
+    repost. The bar is what makes them distinct, and keying on it makes the
+    write idempotent on exactly the thing `_already_emitted` checks."""
+    key = "engine:%s:%s:%s:%s" % (source_id, parsed.symbol, parsed.direction,
+                                  closed_at.isoformat())
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
 def shadow_signal_row(parsed, source_id: int, closed_at: dt.datetime) -> dict:
     """The `signals` row for a generated signal, as a plain dict.
 
@@ -153,6 +175,7 @@ def shadow_signal_row(parsed, source_id: int, closed_at: dt.datetime) -> dict:
     from the moment the condition became true, and a producer that ran late
     would otherwise score itself from whenever it happened to wake up."""
     return {
+        "dedupe_hash": shadow_dedupe_hash(source_id, parsed, closed_at),
         "source_id": source_id,
         "symbol": parsed.symbol,
         "direction": parsed.direction,
