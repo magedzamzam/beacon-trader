@@ -455,10 +455,11 @@ async def candle_freshness(session, *, symbol: str = "XAUUSD",
         "stale_after_hours": stale_after_hours,
         "is_stale": bool(age_h is not None and age_h > stale_after_hours),
         "sources": sorted(s for s in sources if s),
-        "note": ("Candles are imported MANUALLY (history_price.py -> CSV -> DB); "
-                 "nothing in the repo writes this table, so it does not refresh "
-                 "on its own. A stale store makes replay label trades "
-                 "`horizon_capped` and makes the R-ladder stop covering recent "
-                 "signals — both silently, which is why the age is reported "
-                 "rather than left to be noticed (#190)."),
+        "note": ("The `candle-sync` service polls the broker every 5 minutes "
+                 "and writes this table (#224/#239); it was a MANUAL CSV import "
+                 "until 2026-08-18, which is how the store went 15 days stale. "
+                 "A stale store makes replay label trades `horizon_capped` and "
+                 "makes the R-ladder stop covering recent signals — both "
+                 "silently, which is why the age is reported rather than left "
+                 "to be noticed (#190)."),
     }
