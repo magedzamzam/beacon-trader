@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from beacon_core.analysis.bayes import posterior
@@ -30,29 +30,42 @@ async def summary(account_id: int | None = None, date_from: str | None = None,
     if account_id is not None:
         q = q.join(Trade, Trade.id == Leg.trade_id).where(Trade.account_id == account_id)
     q = _leg_dates(q, frm, to)
-    closed = (await db.execute(q)).scalars().all()
+    every = (await db.execute(q)).scalars().all()
+    # The AUDITABLE book (#234): every figure below is computed over the legs
+    # whose money was settled against their own position. Counting the rest
+    # would put 53,068.3 AED of other positions' closes into this total, and
+    # 555 of the 5,061 legs are affected -- enough to move the win rate by four
+    # points, not a rounding difference.
+    closed = [l for l in every if ATTR.is_auditable(l.pl_attribution)]
     wins = [l for l in closed if l.outcome == "tp_hit"]
     losses = [l for l in closed if l.outcome == "sl_hit"]
-    total_pl = sum((float(l.realized_pl) for l in closed if l.realized_pl is not None), 0.0)
+    book = ATTR.auditable_pl(every)
     win_rate = (len(wins) / len(closed) * 100.0) if closed else 0.0
     gross_win = sum((float(l.realized_pl) for l in wins if l.realized_pl), 0.0)
     gross_loss = abs(sum((float(l.realized_pl) for l in losses if l.realized_pl), 0.0))
     pf = (gross_win / gross_loss) if gross_loss else None
-    return {"total_pl": round(total_pl, 2), "win_rate": round(win_rate, 2),
+    return {"total_pl": book["pl"], "win_rate": round(win_rate, 2),
             "closed_legs": len(closed), "wins": len(wins), "losses": len(losses),
             "profit_factor": round(pf, 2) if pf else None,
-            "attribution": _attribution(closed)}
+            "basis": "auditable",
+            # Never the total alone. Excluding these makes the book read better
+            # while the legs really traded, so the restated figure is
+            # INCOMPLETE rather than corrected, and a caller has to be able to
+            # say by how much.
+            "excluded_legs": book["excluded_legs"],
+            "excluded_pl": book["excluded_pl"],
+            "as_reported": book["as_reported"],
+            "attribution": _attribution(every)}
 
 
 def _attribution(closed) -> dict:
     """How much of `total_pl` rests on money settled against the leg's OWN
     position (#234).
 
-    Reported BESIDE the total rather than subtracted from it. 506 legs carry
-    another position's amount to the cent -- 47,524.5 AED, 30% of acct7's book
-    -- and quietly netting that out would restate three months of reported P&L
-    the moment this deploys. The operator gets to see the size of the doubt and
-    decide; the number itself does not move under them."""
+    The headline `total_pl` is now the auditable basis, so this is the receipt
+    for what was left out: which basis each excluded leg was on and what it was
+    carrying. 517 of them hold another position's amount to the cent -- across
+    lots differing by up to 3.6x -- and 38 more simply cannot be traced."""
     out = {"unauditable_legs": 0, "unauditable_pl": 0.0, "by_basis": {}}
     for l in closed:
         basis = l.pl_attribution or ATTR.ATTR_EXACT
@@ -82,6 +95,13 @@ async def by_source(account_id: int | None = None, min_significant: int = 30,
          .join(Signal, Signal.id == Trade.signal_id)
          .outerjoin(Source, Source.id == Signal.source_id)   # keep orphaned (source-deleted) trades
          .where(Leg.status == "closed")
+         # Same auditable basis as /summary (#234), or the per-channel numbers
+         # and the total would be on different books. It is not cosmetic here:
+         # source 12 reads -37,660.8 across every leg and -2,945.0 across the
+         # ones we can audit, and it is one of the four channels the live
+         # channel-selection arm skips.
+         .where(or_(Leg.pl_attribution.is_(None),
+                    Leg.pl_attribution == ATTR.ATTR_EXACT))
          .group_by(Source.id, Source.name, Leg.tp_index, Leg.outcome))
     if account_id is not None:
         q = q.where(Trade.account_id == account_id)
@@ -153,6 +173,11 @@ async def equity_curve(account_id: int | None = None, date_from: str | None = No
     q = (select(Leg.closed_at, Leg.realized_pl)
          .join(Trade, Trade.id == Leg.trade_id)
          .where(Leg.status == "closed", Leg.closed_at.isnot(None))
+         # Auditable basis, matching /summary (#234). A curve that ended at a
+         # different number from the headline total would be read as one of
+         # them being broken.
+         .where(or_(Leg.pl_attribution.is_(None),
+                    Leg.pl_attribution == ATTR.ATTR_EXACT))
          .order_by(Leg.closed_at.asc()))
     if account_id is not None:
         q = q.where(Trade.account_id == account_id)
