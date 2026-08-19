@@ -272,6 +272,12 @@ class Leg(Base):
     fill_price: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)
     close_price: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)
     realized_pl: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)
+    # HOW realized_pl was obtained (#234): exact | unattributed | heuristic |
+    # duplicate. Without it a figure copied from another position's close is
+    # indistinguishable from the leg's own settled amount -- which is how 506
+    # legs came to carry 47,524.5 AED of somebody else's money. See
+    # `execution/attribution.py`; only `exact` may enter a per-leg statistic.
+    pl_attribution: Mapped[str | None] = mapped_column(String(16), nullable=True)
     sl_moved: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
     closed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

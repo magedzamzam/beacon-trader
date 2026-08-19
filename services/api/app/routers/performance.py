@@ -3,6 +3,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from beacon_core.analysis.bayes import posterior
+from beacon_core.execution import attribution as ATTR
 from beacon_core.db.models import Leg, Signal, Source, Trade
 from beacon_core.timeutil import parse_iso_utc as _parse_dt
 from ..deps import get_db
@@ -39,7 +40,30 @@ async def summary(account_id: int | None = None, date_from: str | None = None,
     pf = (gross_win / gross_loss) if gross_loss else None
     return {"total_pl": round(total_pl, 2), "win_rate": round(win_rate, 2),
             "closed_legs": len(closed), "wins": len(wins), "losses": len(losses),
-            "profit_factor": round(pf, 2) if pf else None}
+            "profit_factor": round(pf, 2) if pf else None,
+            "attribution": _attribution(closed)}
+
+
+def _attribution(closed) -> dict:
+    """How much of `total_pl` rests on money settled against the leg's OWN
+    position (#234).
+
+    Reported BESIDE the total rather than subtracted from it. 506 legs carry
+    another position's amount to the cent -- 47,524.5 AED, 30% of acct7's book
+    -- and quietly netting that out would restate three months of reported P&L
+    the moment this deploys. The operator gets to see the size of the doubt and
+    decide; the number itself does not move under them."""
+    out = {"unauditable_legs": 0, "unauditable_pl": 0.0, "by_basis": {}}
+    for l in closed:
+        basis = l.pl_attribution or ATTR.ATTR_EXACT
+        pl = float(l.realized_pl) if l.realized_pl is not None else 0.0
+        b = out["by_basis"].setdefault(basis, {"legs": 0, "pl": 0.0})
+        b["legs"] += 1
+        b["pl"] = round(b["pl"] + pl, 2)
+        if not ATTR.is_auditable(l.pl_attribution):
+            out["unauditable_legs"] += 1
+            out["unauditable_pl"] = round(out["unauditable_pl"] + pl, 2)
+    return out
 
 
 @router.get("/by_source")
