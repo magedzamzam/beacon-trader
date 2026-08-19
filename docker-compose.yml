@@ -136,6 +136,40 @@ services:
       redis:
         condition: service_healthy
 
+  # Scores every signal's forward excursion (#232). `recompute` is the label the
+  # R-ladder, the Bayesian layer and the whole shadow experiment read; it lived
+  # behind a POST endpoint nothing called, so 394 signals went 15 days unscored
+  # and three weeklies in a row had to report that no per-source exit argument
+  # could be made.
+  #
+  # Hourly, not every 5 minutes: the horizon is 1440 one-minute bars, so a
+  # signal's label cannot change once it is a day old, and the pass re-reads the
+  # whole candle window each time. --days 30 bounds what it re-derives.
+  #
+  # The probe asks whether anything SCOREABLE is unscored, not whether the
+  # process is alive — liveness was green throughout the 15-day stall, because
+  # nothing was running at all. 150 min tolerates two missed hourly passes.
+  # Signals the candles do not yet reach are excluded: that is candle-sync's
+  # health to report, and this probe should not go red for its neighbour.
+  excursion-scorer:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+      args:
+        GIT_SHA: "${GIT_SHA:-}"                                    # (#218)
+    restart: unless-stopped
+    env_file: .env
+    command: ["python", "/app/scripts/excursion_scorer.py", "--loop", "3600"]
+    healthcheck:
+      test: ["CMD", "python", "/app/scripts/excursion_scorer.py", "--healthcheck", "150"]
+      interval: 15m
+      timeout: 60s
+      start_period: 5m
+      retries: 2
+    depends_on:
+      redis:
+        condition: service_healthy
+
   # Offline replay + backtest harness (#169). RESEARCH, not trading.
   #
   # Deliberately different from every service above, and each difference is the

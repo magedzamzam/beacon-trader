@@ -70,6 +70,29 @@ async def load_bars(session, symbol: str, timeframe: str = "1m") -> tuple[list, 
     return ts, bars
 
 
+def signal_clock(s):
+    """When the signal BECAME TRUE — the moment forward R is measured from.
+
+    `created_at` is the write time, and for a channel signal that is the only
+    clock there is: the parser stamps nothing else, and `signal_at` is NULL on
+    every one of the 1,263 rows in the live table. For an ENGINE signal (#224)
+    it is not — the producer knows the exact bar close its condition fired on
+    and stamps `signal_at` with it, precisely so a producer that woke up late
+    does not score itself from whenever it happened to wake.
+
+    Anchoring on `created_at` would hand the engine a window starting up to one
+    producer tick AFTER the entry price it is measured against was fixed, so an
+    adverse move inside that gap is invisible while the entry is not. Small in
+    minutes, but signed the same way every time, and the whole point of the
+    shadow ledger is that the engine is scored on the same terms as the
+    channels it is being compared against.
+
+    COALESCE rather than a switch on source kind: a no-op on every row that
+    exists today, correct on every row the producer writes.
+    """
+    return getattr(s, "signal_at", None) or s.created_at
+
+
 def _window(ts: list, bars: list, start, horizon_bars: int) -> list:
     """The bars from `start` forward. `bisect_left` on the ascending open times
     gives the first bar that opened at or after the entry — a bar already in
@@ -275,7 +298,7 @@ async def recompute(session, *, symbol: str = "XAUUSD", timeframe: str = "1m",
 
         for basis in (BASIS_SIGNAL, BASIS_FILL):
             if basis == BASIS_SIGNAL:
-                entry, start, trade_id = entry_sig, s.created_at, None
+                entry, start, trade_id = entry_sig, signal_clock(s), None
                 clock = BASIS_SIGNAL
             else:
                 fb = fills.get(s.id)
