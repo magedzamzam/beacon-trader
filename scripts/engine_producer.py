@@ -42,6 +42,11 @@ from beacon_core.market import bars as B
 from beacon_core.market.context import ContextBuilder
 
 DEFAULT_LOOKBACK_DAYS = 7
+# How far back one pass may repair. 16 bars is 4h on a 15m frame:
+# enough to cover a deploy, a restart or a slow broker fetch, and far
+# too short to replay a week of stale conditions as though they had
+# just fired.
+DEFAULT_CATCHUP_BARS = 16
 
 
 async def _load_bars(session, symbol: str, since: dt.datetime):
@@ -87,7 +92,8 @@ async def _already_emitted(session, source_id: int, closed_at: dt.datetime) -> b
 
 
 async def run_once(session, symbol: str, lookback_days: int,
-                   dry_run: bool = False) -> dict:
+                   dry_run: bool = False,
+                   catchup_bars: int = DEFAULT_CATCHUP_BARS) -> dict:
     sources = (await session.execute(
         select(Source).where(Source.kind == KIND_ENGINE,
                              Source.archived.is_(False)))).scalars().all()
@@ -118,29 +124,47 @@ async def run_once(session, symbol: str, lookback_days: int,
             continue
 
         frame = B.resample(bars, spec.timeframe)
-        idx, bar, closed_at = P.latest_closed_bar(frame, now, spec.tf_minutes)
-        if bar is None or await _already_emitted(session, src.id, closed_at):
-            out["reasons"]["already_emitted"] = \
-                out["reasons"].get("already_emitted", 0) + 1
-            continue
-
-        cond_ctx = G.condition_context(spec, builder, bar.close, closed_at)
-        last_at, n_today = await _ledger_caps(session, src.id, closed_at)
-        res = P.evaluate_latest(spec, builder, frame, cond_ctx, now,
+        # EVERY closed bar we have not already ruled on, oldest first -- not
+        # just the newest (#239). The newest-only read silently dropped any bar
+        # the producer was not awake for, and with a 30-minute candle poll
+        # against a 15-minute frame that was most of them.
+        window = P.closed_bars(frame, now, spec.tf_minutes, limit=catchup_bars)
+        # `last_at` is the newest signal for the source, full stop -- the
+        # cooldown is a duration and does not reset at midnight. The DAILY cap
+        # does, so each day the window touches is seeded from the ledger on its
+        # own rather than charging yesterday's emissions against today.
+        last_at, _ = await _ledger_caps(session, src.id, now)
+        per_day = {}
+        for idx, bar, closed_at in window:
+            day = closed_at.date()
+            if day not in per_day:
+                _, per_day[day] = await _ledger_caps(session, src.id, closed_at)
+            n_today = per_day[day]
+            if await _already_emitted(session, src.id, closed_at):
+                out["reasons"]["already_emitted"] = \
+                    out["reasons"].get("already_emitted", 0) + 1
+                continue
+            cond_ctx = G.condition_context(spec, builder, bar.close, closed_at)
+            res = P.evaluate_at(spec, builder, frame, idx, closed_at, cond_ctx,
                                 last_signal_at=last_at, count_today=n_today)
-        if res["signal"] is None:
-            key = res["reason"] or "no_trigger"
-            out["reasons"][key] = out["reasons"].get(key, 0) + 1
-            continue
+            if res["signal"] is None:
+                key = res["reason"] or "no_trigger"
+                out["reasons"][key] = out["reasons"].get(key, 0) + 1
+                continue
 
-        row = P.shadow_signal_row(res["signal"], src.id, res["closed_at"])
-        print("source %s: SHADOW %s %s @ %s sl=%s tps=%s"
-              % (src.id, row["direction"], row["symbol"], row["signal_at"],
-                 row["sl"], row["tps"]), flush=True)
-        out["emitted"] += 1
-        if not dry_run:
-            session.add(Signal(**row))
-            await session.commit()
+            row = P.shadow_signal_row(res["signal"], src.id, res["closed_at"])
+            print("source %s: SHADOW %s %s @ %s sl=%s tps=%s"
+                  % (src.id, row["direction"], row["symbol"], row["signal_at"],
+                     row["sl"], row["tps"]), flush=True)
+            out["emitted"] += 1
+            # Carried forward in-loop rather than re-read: the caps have to see
+            # a signal this pass just wrote, or a catch-up over a quiet gap
+            # would emit one per bar and call it a strategy.
+            last_at = res["closed_at"]
+            per_day[closed_at.date()] = n_today + 1
+            if not dry_run:
+                session.add(Signal(**row))
+                await session.commit()
     return out
 
 
@@ -150,6 +174,8 @@ async def main():
     ap.add_argument("--lookback-days", type=int, default=DEFAULT_LOOKBACK_DAYS)
     ap.add_argument("--loop", type=int, default=0,
                     help="repeat every N seconds instead of exiting (0 = one pass)")
+    ap.add_argument("--catchup-bars", type=int, default=DEFAULT_CATCHUP_BARS,
+                    help="how many recently-closed bars one pass may repair")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
 
@@ -159,7 +185,8 @@ async def main():
         while True:
             try:
                 async with Session() as s:
-                    res = await run_once(s, a.symbol, a.lookback_days, a.dry_run)
+                    res = await run_once(s, a.symbol, a.lookback_days,
+                                         a.dry_run, a.catchup_bars)
                 print("engine producer: %s" % res, flush=True)
             except Exception as exc:            # a bad pass must not kill the loop
                 print("engine producer pass failed: %s" % exc, flush=True)

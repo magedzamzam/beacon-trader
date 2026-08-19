@@ -85,15 +85,21 @@ services:
         GIT_SHA: "${GIT_SHA:-}"                                    # (#218)
     restart: unless-stopped
     env_file: .env
-    command: ["python", "/app/scripts/candle_sync.py", "--loop", "1800"]
+    # 5 minutes, not 30 (#239). The engine trades a 15m frame and reads only
+    # closed bars, so a 30-minute poll meant the candles for bar N did not
+    # exist until bar N+1 was already newest -- the producer never saw N at
+    # all. The poll has to be faster than the shortest frame anything
+    # decides on. It costs no rate limit worth counting: one prices call per
+    # pass, 288/day.
+    command: ["python", "/app/scripts/candle_sync.py", "--loop", "300"]
     # Override the api image's HTTP probe -- this container serves no port. The
     # health that matters here is the STORE's freshness, not the process's
     # liveness: a probe on "is it running?" would have been green through the
-    # whole 15-day stall, because nothing was running it at all. 90 min allows
-    # two missed 30-min passes before it goes red, and the check treats the
+    # whole 15-day stall, because nothing was running it at all. 30 min allows
+    # several missed 5-min passes before it goes red, and the check treats the
     # weekend market close as healthy rather than crying wolf every Saturday.
     healthcheck:
-      test: ["CMD", "python", "/app/scripts/candle_sync.py", "--healthcheck", "90"]
+      test: ["CMD", "python", "/app/scripts/candle_sync.py", "--healthcheck", "30"]
       interval: 10m
       timeout: 30s
       start_period: 2m

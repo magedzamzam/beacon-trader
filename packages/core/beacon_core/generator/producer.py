@@ -64,18 +64,43 @@ def suppressed_by_ledger(spec: G.RulesSpec, closed_at: dt.datetime,
     return None
 
 
-def evaluate_latest(spec: G.RulesSpec, provider, frame, cond_ctx: dict,
-                    now: dt.datetime, *, last_signal_at=None,
-                    count_today: int = 0) -> dict:
-    """Decide whether the newest closed bar produces a signal.
+def closed_bars(frame, now: dt.datetime, tf_minutes: int, *, limit: int = 16):
+    """Every bar that has CLOSED, oldest first, capped at the newest `limit`.
 
-    Returns a dict that always says what happened, because "nothing emitted" has
-    several very different causes and a producer that cannot tell them apart is
-    one nobody can debug: `{"signal", "closed_at", "direction", "reason"}`."""
-    idx, bar, closed_at = latest_closed_bar(frame, now, spec.tf_minutes)
-    if bar is None:
-        return {"signal": None, "closed_at": None, "direction": None,
-                "reason": "no_closed_bar"}
+    The producer used to read ONLY the newest closed bar, and that quietly threw
+    away most of its own signals (#239). The input runs on its own clock: while
+    `candle-sync` polled every 30 minutes against a 15-minute trigger frame, the
+    candles for bar N did not exist until bar N+1 was already the newest, so bar
+    N was never evaluated by anything. Measured over 14 days the engine
+    triggered on 54 bars and the live path saw a fraction of them -- and a
+    restart, a deploy or a slow broker fetch dropped more.
+
+    Bounded rather than unbounded: after an outage the honest thing is to catch
+    up the last few hours, not to replay a week of stale conditions into the
+    ledger as though they had just fired. The caps still apply on top, and
+    `_already_emitted` makes a re-run a no-op, so the bound only decides how far
+    back a gap can be repaired."""
+    step = dt.timedelta(minutes=tf_minutes)
+    out = []
+    for i in range(len(frame) - 1, -1, -1):
+        closed_at = frame[i].ts + step
+        if closed_at > now:
+            continue
+        out.append((i, frame[i], closed_at))
+        if limit and len(out) >= limit:
+            break
+    return list(reversed(out))
+
+
+def evaluate_at(spec: G.RulesSpec, provider, frame, idx: int,
+                closed_at: dt.datetime, cond_ctx: dict, *,
+                last_signal_at=None, count_today: int = 0) -> dict:
+    """Decide whether ONE closed bar produces a signal.
+
+    Split out of `evaluate_latest` so the same decision can be applied to a bar
+    the producer was not awake for. Nothing about the decision changes with
+    which bar it is -- that is the point, and it is why a missed bar can be
+    repaired at all."""
     if idx < G.MIN_WARMUP_BARS:
         return {"signal": None, "closed_at": closed_at, "direction": None,
                 "reason": "warmup"}
@@ -90,13 +115,29 @@ def evaluate_latest(spec: G.RulesSpec, provider, frame, cond_ctx: dict,
         return {"signal": None, "closed_at": closed_at, "direction": direction,
                 "reason": capped}
 
-    parsed, drop = G.build_signal(spec, direction, bar.close, provider,
+    parsed, drop = G.build_signal(spec, direction, frame[idx].close, provider,
                                   closed_at, cond_ctx)
     if parsed is None:
         return {"signal": None, "closed_at": closed_at, "direction": direction,
                 "reason": "dropped_geometry:%s" % drop}
     return {"signal": parsed, "closed_at": closed_at, "direction": direction,
             "reason": None}
+
+
+def evaluate_latest(spec: G.RulesSpec, provider, frame, cond_ctx: dict,
+                    now: dt.datetime, *, last_signal_at=None,
+                    count_today: int = 0) -> dict:
+    """Decide whether the newest closed bar produces a signal.
+
+    Returns a dict that always says what happened, because "nothing emitted" has
+    several very different causes and a producer that cannot tell them apart is
+    one nobody can debug: `{"signal", "closed_at", "direction", "reason"}`."""
+    idx, bar, closed_at = latest_closed_bar(frame, now, spec.tf_minutes)
+    if bar is None:
+        return {"signal": None, "closed_at": None, "direction": None,
+                "reason": "no_closed_bar"}
+    return evaluate_at(spec, provider, frame, idx, closed_at, cond_ctx,
+                       last_signal_at=last_signal_at, count_today=count_today)
 
 
 def shadow_signal_row(parsed, source_id: int, closed_at: dt.datetime) -> dict:

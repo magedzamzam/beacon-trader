@@ -168,3 +168,67 @@ def test_the_signal_is_stamped_at_the_bar_close_not_the_write_time():
     late = closed + dt.timedelta(minutes=7)
     out = P.evaluate_latest(G.RulesSpec(RUN43), _Provider(), frame, _ctx(50), late)
     assert out["closed_at"] == closed
+
+# --- catching up bars the producer was not awake for (#239) -----------------
+
+def test_only_closed_bars_are_offered():
+    """A bucket still forming is not offered for catch-up either — the whole
+    point of reading closed bars is that the high has printed."""
+    frame = _frame(10)
+    last = frame[-1]
+    got = P.closed_bars(frame, last.ts + dt.timedelta(minutes=5), 15)
+    assert all(closed <= last.ts + dt.timedelta(minutes=5) for _, _, closed in got)
+    assert got[-1][1] is frame[-2]          # newest closed, not the forming one
+
+
+def test_bars_come_back_oldest_first():
+    """Order is the whole correctness argument: caps are applied as the bars
+    actually happened, so a catch-up cannot emit a later bar and then let an
+    earlier one through the cooldown."""
+    frame = _frame(10)
+    got = P.closed_bars(frame, frame[-1].ts + dt.timedelta(minutes=15), 15)
+    closes = [c for _, _, c in got]
+    assert closes == sorted(closes)
+
+
+def test_the_repair_window_is_bounded():
+    """After an outage the honest thing is to repair the last few hours, not to
+    replay a week of stale conditions into the ledger as if they had just
+    fired."""
+    frame = _frame(200)
+    got = P.closed_bars(frame, frame[-1].ts + dt.timedelta(minutes=15), 15, limit=16)
+    assert len(got) == 16
+    assert got[-1][1] is frame[-1]          # bounded from the NEWEST end
+
+
+def test_the_newest_bar_is_the_same_decision_either_way():
+    """`evaluate_latest` is now a wrapper. If the two paths could disagree, a
+    bar would be judged differently depending on whether the producer happened
+    to be awake for it — which is exactly the bug this fixes."""
+    frame = _frame()
+    now = frame[-1].ts + dt.timedelta(minutes=15)
+    spec = G.RulesSpec(RUN43)
+    idx, bar, closed = P.latest_closed_bar(frame, now, 15)
+    a = P.evaluate_latest(spec, _Provider(), frame, _ctx(50), now)
+    b = P.evaluate_at(spec, _Provider(), frame, idx, closed, _ctx(50))
+    assert a["reason"] == b["reason"] and a["direction"] == b["direction"]
+    assert a["closed_at"] == b["closed_at"]
+
+
+def test_a_repaired_bar_is_still_subject_to_the_caps():
+    """Catching up must not become a way around the cooldown."""
+    spec = G.RulesSpec(RUN43)               # cooldown 4 bars x 15m = 60 min
+    frame = _frame()
+    idx, bar, closed = P.latest_closed_bar(
+        frame, frame[-1].ts + dt.timedelta(minutes=15), 15)
+    recent = closed - dt.timedelta(minutes=30)
+    out = P.evaluate_at(spec, _Provider(), frame, idx, closed, _ctx(50),
+                        last_signal_at=recent)
+    assert out["signal"] is None and out["reason"] == "n_suppressed_cooldown"
+
+
+def test_warmup_still_applies_to_an_old_bar():
+    frame = _frame(40)
+    out = P.evaluate_at(G.RulesSpec(RUN43), _Provider(), frame, 3,
+                        frame[3].ts + dt.timedelta(minutes=15), _ctx(50))
+    assert out["signal"] is None and out["reason"] == "warmup"
