@@ -85,6 +85,12 @@ ADDITIVE_MIGRATIONS: tuple[str, ...] = (
     "ADD COLUMN IF NOT EXISTS epoch_digest VARCHAR(40)",       # String(40) (#200)
     "ALTER TABLE execution_strategies "
     "ADD COLUMN IF NOT EXISTS epoch_started_at TIMESTAMPTZ",   # DateTime(tz) (#200)
+    # How a leg's realized_pl was obtained (#234). NULL on every existing row
+    # until the backfill below classifies it, and `attribution.is_auditable`
+    # reads NULL as auditable on purpose -- treating unclassified history as
+    # excluded would silently empty every report the moment this deploys.
+    "ALTER TABLE legs "
+    "ADD COLUMN IF NOT EXISTS pl_attribution VARCHAR(16)",     # String(16) (#234)
 )
 
 # One-off data backfills, applied on startup AFTER the ALTERs above. Kept apart
@@ -100,6 +106,40 @@ STARTUP_BACKFILLS: tuple[str, ...] = (
     # first verdict in three epochs.
     "UPDATE execution_strategies SET epoch_started_at = updated_at "
     "WHERE epoch_started_at IS NULL",
+    # #234: classify the closed book ONCE, from the marks the defect left
+    # behind. Ordered `exact` FIRST on purpose: a leg holding its own activity
+    # money row with no `reconcile_unmatched` event against it is sound, and
+    # testing for the duplicate shape first would have condemned the ~438 legs
+    # that were the SOURCE of a borrowed amount rather than the borrower.
+    #
+    # `duplicate` (517 legs, -56,408.3): no activity row of its own AND another
+    # leg, in a DIFFERENT trade, carries the identical amount to the cent.
+    # `unattributed` (38, +3,340.0): unauditable but with no twin to point at.
+    # `exact` (4,498, -233,206.3): the rest.
+    #
+    # The VALUE IS LEFT IN PLACE. Nulling it here would restate three months of
+    # reported P&L as a side effect of a deploy, and that is the operator's
+    # call to make deliberately, not a migration's to make quietly. The flag is
+    # what lets a report exclude them; `execution/attribution` decides, this
+    # only labels.
+    #
+    # Self-limiting by `pl_attribution IS NULL`, so a second run matches
+    # nothing rather than reclassifying a leg the live path has since stamped.
+    "UPDATE legs l SET pl_attribution = CASE"
+    "  WHEN EXISTS (SELECT 1 FROM position_activities pa"
+    "                WHERE pa.leg_id = l.id AND pa.realized_pl IS NOT NULL)"
+    "   AND NOT EXISTS (SELECT 1 FROM events e"
+    "                    WHERE e.leg_id = l.id AND e.kind = 'reconcile_unmatched')"
+    "    THEN 'exact'"
+    "  WHEN EXISTS (SELECT 1 FROM legs o"
+    "                WHERE o.broker_position_ref = l.broker_position_ref"
+    "                  AND o.id <> l.id AND o.trade_id <> l.trade_id"
+    "                  AND round(o.realized_pl::numeric,2)"
+    "                      = round(l.realized_pl::numeric,2))"
+    "    THEN 'duplicate'"
+    "  ELSE 'unattributed' END"
+    " WHERE l.status = 'closed' AND l.realized_pl IS NOT NULL"
+    "   AND l.pl_attribution IS NULL",
 )
 
 

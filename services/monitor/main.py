@@ -27,6 +27,7 @@ from beacon_core.db.base import Session, init_models
 from beacon_core.db.models import (Account, Broker, Event, ExecutionStrategy, Leg,
                                    PositionActivity, Signal, Source, Trade,
                                    StagedEntry, StagedTranche)
+from beacon_core.execution import attribution as ATTR
 from beacon_core.execution import strategy as ST
 from beacon_core.execution import staging as STG
 from beacon_core.brokers import build_adapter, symbol_map
@@ -703,7 +704,14 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
             if m is None and require_txn:
                 return False
 
-            realized_pl = m.get("pl") if m is not None else None
+            # WHETHER the leg closed and WHICH transaction settled it are two
+            # questions, and only the second one needs the dealId (#234). An
+            # instrument-level match answers the first -- the position is gone
+            # from the broker -- and nothing at all about the second, so its
+            # money is not read here. Reading it is what put another position's
+            # amount on 506 legs, to the cent, across lots differing by 3.6x.
+            basis = ATTR.classify(m, leg.broker_position_ref)
+            realized_pl = m.get("pl") if basis == ATTR.ATTR_EXACT else None
 
             # The transaction has no close level on this API, so derive a close
             # price for the ledger from the live price vs the leg's levels.
@@ -729,39 +737,58 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                 outcome = _classify_outcome(close_px, entry_px, tp, sl,
                                             bool(leg.sl_moved), tol, realized_pl)
 
-            if realized_pl is None:
-                # No broker row — heuristic P&L in INSTRUMENT currency.
-                dist = (close_px - entry_px)
-                if trade.direction == "SELL":
-                    dist = -dist
-                realized_pl = dist * lot * vpp
-                src = "heuristic"
-            else:
+            if basis == ATTR.ATTR_EXACT:
                 src = "broker"
                 # `size` can arrive unsigned; a stop-out is always a loss. The
                 # rule lives in `analysis/broker_truth` so the activity audit
                 # below applies the SAME one — it did not, and the two ledgers
                 # drifted apart by twice the ratcheted losses (#202).
                 realized_pl = BT.signed_close_pl(realized_pl, outcome)
+            elif basis == ATTR.ATTR_HEURISTIC:
+                # No broker row at all — price-derived P&L in INSTRUMENT
+                # currency, stamped as the estimate it is rather than passing
+                # for a settled amount.
+                dist = (close_px - entry_px)
+                if trade.direction == "SELL":
+                    dist = -dist
+                realized_pl = dist * lot * vpp
+                src = "heuristic"
+            else:
+                # A transaction exists but it is not this leg's. Both ways of
+                # filling the gap are the bug: copy the foreign amount (what
+                # produced the 47,524.5), or substitute the price estimate,
+                # which would dress an unknown as a measurement and read as
+                # settled money in every rollup downstream.
+                realized_pl = None
+                src = ATTR.ATTR_UNATTRIBUTED
 
             # Was this close attributed by the EXACT position dealId (source of
             # truth), or only heuristically? Surface the latter so a mis-matched
             # leg P&L is auditable instead of silently trusted (#9).
-            _exact = m is not None and str(m.get("deal_id") or "") == str(leg.broker_position_ref or "")
+            _exact = basis == ATTR.ATTR_EXACT
             leg.outcome = outcome
             leg.close_price = close_px
             leg.realized_pl = realized_pl
+            leg.pl_attribution = basis
             leg.status = "closed"
             leg.closed_at = utcnow()
-            if m is not None and m.get("deal_id") and not leg.broker_position_ref:
-                leg.broker_position_ref = str(m.get("deal_id"))
+            # The leg's position ref is NOT taken from the matched transaction.
+            # It only ever could be when the match was heuristic (an exact match
+            # needs the ref to have existed already), and adopting a foreign
+            # dealId is what made the defect permanent: the leg then carried
+            # another position's identity, so every later query saw a
+            # well-referenced leg and nothing could find the error again short
+            # of comparing lot sizes (#234, #9 step 4).
             session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="closed",
-                              payload={"outcome": outcome, "pl": str(realized_pl), "source": src}))
+                              payload={"outcome": outcome, "source": src, "basis": basis,
+                                       "pl": None if realized_pl is None else str(realized_pl)}))
             if not _exact:
                 session.add(Event(trade_id=trade.id, leg_id=leg.id,
                                   kind="reconcile_unmatched",
                                   payload={"reason": "no exact dealId close txn",
-                                           "attributed_via": src, "pl": str(realized_pl),
+                                           "attributed_via": src, "basis": basis,
+                                           "pl": None if realized_pl is None else str(realized_pl),
+                                           "candidate_deal_id": str((m or {}).get("deal_id") or ""),
                                            "position_ref": str(leg.broker_position_ref or "")}))
             await bus.publish(CH_TRADE_EVENT, {"trade_id": trade.id, "leg_id": leg.id,
                                                "outcome": outcome})
@@ -770,7 +797,8 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                 _notify(_ev, {"symbol": trade.symbol, "direction": trade.direction,
                               "size": str(leg.lot) if leg.lot is not None else None,
                               "price": str(close_px) if close_px is not None else None,
-                              "pl": str(realized_pl), "detail": f"TP{leg.tp_index} — {outcome}"})
+                              "pl": None if realized_pl is None else str(realized_pl),
+                              "detail": f"TP{leg.tp_index} — {outcome}"})
             return True
 
         async def _audit_activities():
