@@ -14,6 +14,7 @@ from collections import defaultdict
 from typing import Optional
 
 from .bayes import posterior
+from ..execution import attribution as ATTR
 from ._util import dig_num, adverse_side
 from ..logging import get_logger
 
@@ -115,6 +116,59 @@ def channel_verdict_rollup(rows, significance_n: int = SIGNIFICANCE_N) -> dict:
     }
 
 
+def partial_ladder():
+    """A trade with at least one closed leg whose money is not its own (#234).
+
+    The restatement (#237) put `trades.realized_pl` on the auditable basis, so a
+    total is no longer contaminated -- but a trade whose ladder was PARTLY
+    excluded now carries a partial total, and counting it as a whole
+    observation understates |R| on exactly the trades most likely to be
+    interesting. 118 of 1,253 closed trades are in this state.
+
+    So per-channel work drops the trade WHOLE rather than keeping a partial
+    one. It is the only basis on which two channels are compared on the same
+    terms -- and re-deriving the #220 channel selection on it moved source 12
+    from -0.326R (worst channel, skipped) to +0.027R (indistinguishable from
+    break-even), which is the size of error this predicate exists to prevent.
+
+    NULL is auditable: it is what every row predating the column carries, and
+    treating unclassified history as partial would empty the report."""
+    from sqlalchemy import and_, exists, select
+    from ..db.models import Leg, Trade
+    return exists(select(Leg.id).where(and_(
+        Leg.trade_id == Trade.id,
+        Leg.status == "closed",
+        Leg.pl_attribution.isnot(None),
+        Leg.pl_attribution != ATTR.ATTR_EXACT)))
+
+
+async def attribution_exclusion(session, frm=None, to=None) -> dict:
+    """What a per-channel report LEFT OUT by dropping partial ladders.
+
+    Reported, never silent. A channel table that quietly shed a tenth of its
+    trades reads as a channel table over the whole book, and the excluded
+    trades are not neutral -- they are concentrated in exactly the channels the
+    attribution defect hit hardest (source 12: 7 of 18 in the #220 window)."""
+    from sqlalchemy import func, select
+    from ..db.models import Signal, Source, Trade
+
+    q = (select(Source.name, func.count(Trade.id))
+         .select_from(Trade)
+         .join(Signal, Signal.id == Trade.signal_id)
+         .outerjoin(Source, Source.id == Signal.source_id)
+         .where(Trade.status == "closed", partial_ladder())
+         .group_by(Source.name))
+    if frm is not None:
+        q = q.where(Signal.created_at >= frm)
+    if to is not None:
+        q = q.where(Signal.created_at < to)
+    rows = (await session.execute(q)).all()
+    by_channel = {name or "Unattributed": int(n) for name, n in rows}
+    return {"excluded_trades": sum(by_channel.values()),
+            "by_channel": by_channel,
+            "basis": "auditable — trades with any non-exact closed leg dropped whole"}
+
+
 def _channel_verdict_query():
     """The labelled analytics→trade join behind channel_verdict_report, factored
     out so it's compile-testable on a bare box. Anchors the FROM on SignalAnalytics
@@ -127,7 +181,10 @@ def _channel_verdict_query():
             .select_from(SignalAnalytics)
             .join(Signal, Signal.id == SignalAnalytics.signal_id)
             .join(Trade, Trade.signal_id == SignalAnalytics.signal_id)
-            .outerjoin(Source, Source.id == Signal.source_id))
+            .outerjoin(Source, Source.id == Signal.source_id)
+            # Auditable basis (#234/#237): a partly-excluded ladder is dropped
+            # whole rather than counted at its partial total.
+            .where(~partial_ladder()))
 
 
 async def channel_verdict_report(session, frm=None, to=None,
@@ -144,9 +201,11 @@ async def channel_verdict_report(session, frm=None, to=None,
     if to is not None:
         q = q.where(Signal.created_at < to)
     rows = (await session.execute(q)).all()
-    return channel_verdict_rollup(
+    out = channel_verdict_rollup(
         [{"channel": name, "realized_pl": pl} for name, pl in rows],
         significance_n=significance_n)
+    out["attribution"] = await attribution_exclusion(session, frm, to)
+    return out
 
 
 async def channel_regime_report(session, frm=None, to=None) -> dict:
@@ -161,7 +220,11 @@ async def channel_regime_report(session, frm=None, to=None) -> dict:
                 Trade.realized_pl)
          .join(Signal, Signal.id == SignalAnalytics.signal_id)
          .join(Trade, Trade.signal_id == SignalAnalytics.signal_id)
-         .outerjoin(Source, Source.id == Signal.source_id))
+         .outerjoin(Source, Source.id == Signal.source_id)
+         # Same auditable basis as `channel_verdict_report` (#234/#237) — the
+         # verdict summarises this table, so the two cannot be on different
+         # books without one of them looking broken.
+         .where(~partial_ladder()))
     if frm is not None:
         q = q.where(Signal.created_at >= frm)
     if to is not None:
