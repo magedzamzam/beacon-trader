@@ -7,6 +7,7 @@ from beacon_core.analysis import excursion as EX
 from beacon_core.analysis import excursion_store as EXS
 from beacon_core.analysis import feature_vector as FV
 from beacon_core.analysis.report import (execution_tax_report, excursion_report,
+                                         shadow_engine_report,
                                          stop_geometry_report)
 from beacon_core.execution import bayes_gate as BG
 from beacon_core.db.models import (SignalFeature, SignalAnalytics, AiAssessment,
@@ -281,6 +282,23 @@ async def excursion_ladder(date_from: str = None, date_to: str = None,
         raise HTTPException(400, "basis must be 'signal' or 'fill'")
     return await excursion_report(db, parse_iso_utc(date_from),
                                   parse_iso_utc(date_to), basis=basis)
+
+
+@router.get("/shadow_engine")
+async def shadow_engine(date_from: str = None, date_to: str = None,
+                        basis: str = EXS.BASIS_SIGNAL,
+                        db: AsyncSession = Depends(get_db)):
+    """Engine-generated signals (#224) against the channel book they have to
+    beat, on the exit-independent excursion label.
+
+    The engine's signals are never traded, so this label is the ONLY measurement
+    they will ever have — and it is the same one the channels are scored on,
+    which is what makes the comparison fair. `ready` says whether N is there
+    yet; before that the numbers are a sanity check, not a verdict."""
+    if basis not in (EXS.BASIS_SIGNAL, EXS.BASIS_FILL):
+        raise HTTPException(400, "basis must be 'signal' or 'fill'")
+    return await shadow_engine_report(db, parse_iso_utc(date_from),
+                                      parse_iso_utc(date_to), basis=basis)
 
 
 @router.post("/excursion/recompute")

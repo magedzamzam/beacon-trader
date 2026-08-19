@@ -24,6 +24,7 @@ EXPECTED = {
     ("GET", "/analysis/excursion"),
     ("POST", "/analysis/excursion/recompute"),
     ("GET", "/analysis/stop-geometry"),          # #189, shadow
+    ("GET", "/analysis/shadow_engine"),          # #239, Lever 5 measurement
 }
 
 

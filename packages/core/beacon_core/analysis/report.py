@@ -2121,3 +2121,93 @@ async def stop_geometry_report(session, frm=None, to=None,
     out["floor"] = floor
     out["labels"] = labels
     return out
+
+# --- the engine's own signals, beside the channels it has to beat (#239) -----
+
+ENGINE_MIN_N = 30
+
+
+def shadow_engine_rollup(rows, *, min_n: int = ENGINE_MIN_N) -> dict:
+    """Engine-generated signals against the channel book, on one basis.
+
+    `rows`: {channel, kind, tp1_r, mfe_r, mae_r, race, ladder, horizon_capped}.
+
+    WHY A SEPARATE VIEW when the engine already appears in the per-channel
+    ladder: the question is not "how does BeaconSharpe rank", it is "is
+    generating our own signals better than buying them". That is a comparison
+    between one row and the pool, and pooling the channels is the only way to
+    state it — a per-row table invites picking whichever channel makes the
+    engine look good.
+
+    Reports `ready` explicitly. At roughly 3 signals a day, N>=30 is ten days,
+    and every number before that is a number somebody will quote anyway unless
+    the object says out loud that it is too early."""
+    eng_rows = [r for r in rows if (r.get("kind") == "engine")]
+    ch_rows = [r for r in rows if (r.get("kind") != "engine")]
+
+    def stats(rs):
+        mfe = sorted(float(r["mfe_r"]) for r in rs if r.get("mfe_r") is not None)
+        mae = sorted(float(r["mae_r"]) for r in rs if r.get("mae_r") is not None)
+        n = len(mfe)
+        if not n:
+            return {"n": 0}
+        races = [r.get("race") for r in rs]
+        return {
+            "n": n,
+            "median_mfe_r": round(mfe[n // 2], 3),
+            "median_mae_r": round(mae[len(mae) // 2], 3) if mae else None,
+            "reach_1r": round(sum(1 for m in mfe if m >= 1.0) / n, 3),
+            "reach_2r": round(sum(1 for m in mfe if m >= 2.0) / n, 3),
+            "tp1_first": round(races.count("tp1") / n, 3),
+            "sl_first": round(races.count("sl") / n, 3),
+        }
+
+    per_engine = {}
+    for r in eng_rows:
+        per_engine.setdefault(r.get("channel") or "engine", []).append(r)
+
+    engines = {name: stats(rs) for name, rs in per_engine.items()}
+    channels = stats(ch_rows)
+    out = {"engines": engines, "channels_pooled": channels, "min_n": min_n,
+           "ready": all(e.get("n", 0) >= min_n for e in engines.values()) if engines else False}
+
+    # The one comparison worth stating, and only where it can be stated.
+    for name, e in engines.items():
+        if e.get("n") and channels.get("n"):
+            e["reach_1r_vs_channels"] = round(
+                e["reach_1r"] - channels["reach_1r"], 3)
+            e["median_mfe_vs_channels"] = round(
+                e["median_mfe_r"] - channels["median_mfe_r"], 3)
+        e["verdict"] = ("too early — %d of %d signals" % (e.get("n", 0), min_n)
+                        if e.get("n", 0) < min_n else "N reached; rule on it")
+    return out
+
+
+async def shadow_engine_report(session, frm=None, to=None,
+                               basis: str = "signal") -> dict:
+    """`shadow_engine_rollup` off the persisted excursions. Read-only."""
+    from sqlalchemy import select
+    from ..db.models import Signal, SignalExcursion, Source
+
+    q = (select(Source.name, Source.kind, SignalExcursion.tp1_r,
+                SignalExcursion.mfe_r, SignalExcursion.mae_r,
+                SignalExcursion.race, SignalExcursion.ladder,
+                SignalExcursion.horizon_capped)
+         .select_from(SignalExcursion)
+         .join(Signal, Signal.id == SignalExcursion.signal_id)
+         .outerjoin(Source, Source.id == Signal.source_id)
+         .where(SignalExcursion.basis == basis))
+    if frm is not None:
+        q = q.where(Signal.created_at >= frm)
+    if to is not None:
+        q = q.where(Signal.created_at < to)
+    rows = (await session.execute(q)).all()
+    out = shadow_engine_rollup(
+        [{"channel": name, "kind": kind, "tp1_r": tp1, "mfe_r": mfe,
+          "mae_r": mae, "race": race, "ladder": ladder, "horizon_capped": capped}
+         for name, kind, tp1, mfe, mae, race, ladder, capped in rows])
+    out["basis"] = basis
+    # The ladder's own gate travels with it (#187) — these numbers are only as
+    # good as the reconstruction they are read off.
+    out["gate"] = await excursion_gate(session, basis=basis, frm=frm, to=to)
+    return out
