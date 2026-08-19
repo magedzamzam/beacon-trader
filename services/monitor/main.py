@@ -1060,8 +1060,14 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
         still_staged = await _staged_pending(session, trade.id)
         closed = (await session.execute(select(Leg).where(
             Leg.trade_id == trade.id, Leg.status == "closed"))).scalars().all()
+        # AUDITABLE legs only (#234). A leg whose money came from another
+        # position's close is not this trade's P&L, and summing it in is how
+        # 53,068.3 AED of other people's losses entered the book. The leg rows
+        # keep their values, so the old total stays recomputable -- see
+        # `scripts/restate_book.py`, which is also what restated the history.
         trade.realized_pl = sum((Decimal(str(l.realized_pl)) for l in closed
-                                 if l.realized_pl is not None), Decimal("0"))
+                                 if l.realized_pl is not None
+                                 and ATTR.is_auditable(l.pl_attribution)), Decimal("0"))
         if not remaining and not still_staged:     # #129: don't close while a tranche is pending
             was_closed = trade.status == "closed"
             trade.status = "closed"

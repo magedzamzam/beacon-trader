@@ -114,3 +114,32 @@ def split_by_basis(legs) -> dict:
             else leg.get("pl_attribution")
         out.setdefault(basis or ATTR_EXACT, []).append(leg)
     return out
+
+def auditable_pl(legs) -> dict:
+    """The book on the auditable basis, WITH what it left out (#234).
+
+    Never returns the total alone. Excluding 555 legs makes the book 53,068.3
+    AED less negative, and a bare figure would read as the bot having improved
+    when what actually happened is that we stopped counting legs whose money we
+    cannot verify. The excluded set is not zero -- those legs really traded --
+    so the restated book is INCOMPLETE, not corrected, and every caller has to
+    be able to say so.
+    """
+    total = excluded = 0.0
+    n = n_excluded = 0
+    for leg in legs or ():
+        pl = leg.get("realized_pl") if isinstance(leg, dict) \
+            else getattr(leg, "realized_pl", None)
+        if pl is None:
+            continue
+        basis = leg.get("pl_attribution") if isinstance(leg, dict) \
+            else getattr(leg, "pl_attribution", None)
+        if is_auditable(basis):
+            total += float(pl)
+            n += 1
+        else:
+            excluded += float(pl)
+            n_excluded += 1
+    return {"pl": round(total, 2), "legs": n,
+            "excluded_pl": round(excluded, 2), "excluded_legs": n_excluded,
+            "as_reported": round(total + excluded, 2), "basis": "auditable"}

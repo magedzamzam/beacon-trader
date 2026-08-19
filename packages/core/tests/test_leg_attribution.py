@@ -156,3 +156,63 @@ def test_the_backfill_classifies_rather_than_deletes():
     assert "SET pl_attribution" in stmt
     assert "realized_pl = NULL" not in stmt and "realized_pl=NULL" not in stmt
     assert "pl_attribution IS NULL" in stmt        # self-limiting
+
+# --- the restated book -------------------------------------------------------
+
+class _Leg:
+    def __init__(self, pl, basis=None):
+        self.realized_pl, self.pl_attribution = pl, basis
+
+
+def test_the_book_never_comes_back_without_what_it_left_out():
+    """A bare restated total reads as the bot having improved. It did not — we
+    stopped counting 555 legs whose money we cannot verify, and those legs
+    really traded."""
+    book = ATTR.auditable_pl([_Leg(-100.0, "exact"), _Leg(-829.42, "duplicate")])
+    assert book["pl"] == -100.0
+    assert book["excluded_pl"] == -829.42 and book["excluded_legs"] == 1
+    assert book["as_reported"] == -929.42          # the two must reconcile
+    assert book["basis"] == "auditable"
+
+
+def test_the_restatement_reconciles_exactly():
+    legs = [_Leg(-100.0, "exact"), _Leg(50.0, None), _Leg(-829.42, "duplicate"),
+            _Leg(12.5, "unattributed"), _Leg(7.0, "heuristic")]
+    book = ATTR.auditable_pl(legs)
+    assert round(book["pl"] + book["excluded_pl"], 2) == book["as_reported"]
+    assert book["legs"] == 2 and book["excluded_legs"] == 3
+
+
+def test_unpriced_legs_are_not_zeroes_in_either_column():
+    """A leg the fix left NULL is absent from the book, not a zero in it —
+    counting it as 0.00 would claim we know it broke even."""
+    book = ATTR.auditable_pl([_Leg(None, "unattributed"), _Leg(-100.0, "exact")])
+    assert book["pl"] == -100.0 and book["legs"] == 1
+    assert book["excluded_legs"] == 0
+
+
+def test_history_the_classifier_never_reached_still_counts():
+    book = ATTR.auditable_pl([_Leg(-100.0, None)])
+    assert book["pl"] == -100.0 and book["excluded_legs"] == 0
+
+
+def test_the_monitor_totals_a_trade_on_the_auditable_basis():
+    """The trade ledger is derived from the legs on every tick, so if it summed
+    them all it would re-import the excluded money the moment a trade ticked
+    again — silently undoing the restatement one trade at a time."""
+    import ast
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.normpath(os.path.join(
+        here, "..", "..", "..", "services", "monitor", "main.py"))
+    src = io.open(path, encoding="utf-8").read()
+    tree = ast.parse(src)
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Attribute) and t.attr == "realized_pl"
+                and isinstance(t.value, ast.Name) and t.value.id == "trade"
+                for t in node.targets):
+            found.append(ast.unparse(node.value))
+    assert found, "the trade total is no longer computed here — did it move?"
+    assert all("is_auditable" in f for f in found), found
