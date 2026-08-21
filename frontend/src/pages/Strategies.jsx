@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
-import { GitBranch, Trash2, LogIn, Filter, LogOut } from "lucide-react";
+import { GitBranch, Trash2, LogIn, Filter, LogOut, Layers } from "lucide-react";
 import { Card, Table, Th, Td, Badge, Empty } from "../components/ui";
 import { Field, Input, Select, Toggle, Button, ErrorNote, ConfigRow } from "../components/form";
 import SlRulesEditor from "../components/SlRulesEditor";
 import StagedEntryEditor from "../components/StagedEntryEditor";
-import LadderEditor, { DEFAULT_LADDER } from "../components/LadderEditor";
+import LadderEditor from "../components/LadderEditor";
 import EntryFilterRules from "../components/EntryFilterRules";
 import HelpHint from "../components/HelpHint";
 import { api } from "../lib/api";
@@ -68,8 +68,7 @@ const ENTRY_DEFAULTS = {
 };
 const BLANK = () => ({
   id: null, account_id: "", source_id: "", label: "", enabled: true,
-  entry: { ...ENTRY_DEFAULTS, entry_style: "", ladder: DEFAULT_LADDER.map((r) => ({ ...r })),
-           staged: { ...STAGED_DEFAULTS } },
+  entry: { ...ENTRY_DEFAULTS, entry_style: "", staged: { ...STAGED_DEFAULTS } },
   entryOn: {},        // which entry settings this strategy actually sets
   rules: [],          // unified entry-filter rules (Trend Alignment / ADX Regime / Session)
   exit: { sl_rules: [], cancel_pending_on_stop: true },
@@ -140,8 +139,6 @@ export default function Strategies() {
                  .filter(([, v]) => v !== null && v !== "")
                  .map(([k, v]) => [k, v])),
                entry_style: ep.entry_style || "",
-               ladder: Array.isArray(ep.ladder) && ep.ladder.length
-                 ? ep.ladder.map((r) => ({ ...r })) : DEFAULT_LADDER.map((r) => ({ ...r })),
                staged: { ...STAGED_DEFAULTS, ...(ep.staged || {}) } },
       entryOn,
       // Unified rule list: the legacy trend_alignment block becomes the first rule.
@@ -171,9 +168,8 @@ export default function Strategies() {
     }
     if (on.beyond_tolerance) entry_policy.beyond_tolerance = form.entry.beyond_tolerance;
     if (on.honor_market_hint) entry_policy.honor_market_hint = !!form.entry.honor_market_hint;
-    if (on.staged) {                       // #250: staged entry is on/off + a ladder
-      entry_policy.entry_style = "staged";
-      entry_policy.ladder = form.entry.ladder;
+    if (on.staged) {                       // #250: staged entry is on or off. The
+      entry_policy.entry_style = "staged";  // ladder itself is the GLOBAL grid.
       const staged = {};
       for (const [k, val] of Object.entries(form.entry.staged || {})) {
         const nv = num(val);
@@ -211,6 +207,7 @@ export default function Strategies() {
   const scopeLabel = `${acctName(form.account_id)} · ${srcName(form.source_id)}`;
   return (
     <div className="space-y-5">
+      <LadderGrid />
       <ResolvePreview accounts={accounts} sources={sources} />
       {/* Editor */}
       <Card>
@@ -259,14 +256,17 @@ export default function Strategies() {
               inherited from the next-less-specific strategy, down to the (Any, Any) row. Turning one on here
               overrides it for this scope only.</p>
 
-            <ConfigRow label="Staged entry — the ladder"
+            <ConfigRow label="Staged entry"
                        hint="deploy the signal in rungs instead of all at once (#250)"
                        summary="off · single shot"
                        active={!!form.entryOn.staged}
                        onChange={(v) => setSub("entryOn", "staged", v)}>
               <div className="space-y-3 pt-2">
-                <LadderEditor rows={form.entry.ladder}
-                              onChange={(rows) => setSub("entry", "ladder", rows)} />
+                <p className="text-[11px] text-muted">
+                  On. Which ladder this channel's signals run is decided by the signal itself —
+                  its entry shape and its take-profit count — from the <b>ladder grid</b> at the
+                  top of this page. There is nothing per-channel to set here.
+                </p>
                 <StagedEntryEditor value={form.entry.staged}
                   onChange={(k, val) => setSub("entry", "staged", { ...form.entry.staged, [k]: val })} />
               </div>
@@ -445,6 +445,89 @@ export default function Strategies() {
         )}
       </Card>
     </div>
+  );
+}
+
+
+// GLOBAL staged-entry ladder grid (#250). NOT per-channel: which ladder a signal
+// runs follows from the signal's own shape — a single entry level or a zone, and
+// how many TPs it carries — so it is defined once here rather than copied onto
+// every strategy row. A strategy only chooses whether staged entry is on.
+//
+// A grid rather than one table because #250's ladders are not one shape
+// truncated: its 3-TP ladder opens TP3 as a MID-triggered STOP, its 4-TP ladder
+// opens TP3 immediately at signal time. No single table could be both.
+function LadderGrid() {
+  const [grid, setGrid] = useState(null);
+  const [zone, setZone] = useState(2);
+  const [n, setN] = useState(3);
+  const [err, setErr] = useState(null);
+  const [saved, setSaved] = useState(false);
+  const [configured, setConfigured] = useState(false);
+
+  useEffect(() => {
+    api.ladders()
+      .then((d) => { setGrid(d.ladders); setConfigured(!!d.configured); })
+      .catch((e) => setErr(e.message));
+  }, []);
+
+  const cell = grid?.[zone]?.[n] || grid?.[String(zone)]?.[String(n)] || [];
+  const setCell = (rows) => {
+    setSaved(false);
+    setGrid((g) => ({ ...g, [zone]: { ...(g[zone] || g[String(zone)]), [n]: rows } }));
+  };
+  const save = async () => {
+    setErr(null);
+    try {
+      const d = await api.saveLadders(grid);
+      setGrid(d.ladders); setConfigured(true); setSaved(true);
+    } catch (e) { setErr(e.message); }
+  };
+
+  return (
+    <Card>
+      <div className="px-4 py-3 border-b border-edge flex items-center gap-2 flex-wrap">
+        <Layers className="w-4 h-4 text-beacon" />
+        <span className="text-sm font-medium">Staged entry — ladder grid</span>
+        <span className="text-muted text-xs">· global · one ladder per signal shape</span>
+        <div className="ml-auto flex items-center gap-2">
+          {!configured && <span className="text-[11px] text-muted">showing defaults</span>}
+          {saved && <span className="text-xs text-long">Saved</span>}
+          <Button onClick={save} disabled={!grid}>Save grid</Button>
+        </div>
+      </div>
+
+      <div className="px-4 py-2 text-[11px] text-muted border-b border-edge">
+        Which ladder a signal runs follows from <b>the signal</b>, not the channel: whether it
+        carries one entry level or a zone, and how many take-profits it has. Pick a cell below to
+        edit it. On the Strategies editor a channel only switches staged entry <b>on or off</b>.
+      </div>
+
+      <div className="px-4 py-3 flex items-end gap-3 flex-wrap border-b border-edge">
+        <Field label="Entry shape">
+          <Select value={zone} onChange={(e) => setZone(Number(e.target.value))}>
+            <option value={1}>1-Zone — a single entry level</option>
+            <option value={2}>2-Zone — an entry range</option>
+          </Select>
+        </Field>
+        <Field label="Take-profits on the signal">
+          <Select value={n} onChange={(e) => setN(Number(e.target.value))}>
+            {[1, 2, 3, 4, 5, 6, 7, 8].map((k) => (
+              <option key={k} value={k}>{k} TP{k === 1 ? "" : "s"}</option>
+            ))}
+          </Select>
+        </Field>
+        <span className="text-[11px] text-muted pb-2">
+          A signal with more than 8 take-profits runs the 8-TP ladder.
+        </span>
+      </div>
+
+      <ErrorNote>{err}</ErrorNote>
+      <div className="p-4">
+        {!grid ? <Empty>Loading the grid…</Empty>
+          : <LadderEditor rows={cell} onChange={setCell} />}
+      </div>
+    </Card>
   );
 }
 

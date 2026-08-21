@@ -94,45 +94,117 @@ def _row(when, action, order=None, level=None, target=None) -> dict:
     return r
 
 
-# The table an operator starts from.
+# ============================ the ladder matrix ===============================
+# ONE TABLE PER SIGNAL SHAPE. #250 specifies different ladders for a single-level
+# entry and a zone, and different ladders again by how many TPs the signal
+# carries -- and those are not one shape truncated. Its 3-TP ladder opens TP3 as
+# a MID-triggered STOP; its 4-TP ladder opens TP3 immediately at signal time. No
+# single static table can be both, which is exactly why the ladder is configured
+# as a GRID: zone shape x TP count, and each cell is the whole ladder for that
+# shape. Nothing is inferred and nothing is truncated.
 #
-# WRITTEN TO DEPTH ON PURPOSE. Rows targeting a TP the signal does not have are
-# not created, so ONE table degrades correctly: on a 2-TP signal this is exactly
-# #250's 2-TP ladder, on a 3-TP signal exactly its 3-TP one, and on a 5-TP signal
-# it keeps alternating instead of abandoning TP4 and TP5. The first version
-# stopped at TP3 and silently left the deepest targets of a 4- or 5-TP signal
-# untraded — and this book runs ladders 2-5 deep.
-#
-# The alternation is #250's: a position at MID, then a STOP back at the entry,
-# repeating outward. One deliberate difference from the issue's 4+ variant, which
-# also pulls TP3 forward to signal time — that makes the 3-TP and 4-TP ladders
-# structurally different shapes rather than one shape truncated, which no single
-# table can express. Add a `signal / open / POSITION / ENTRY-FROM / TP3` row if
-# you want the issue's version; the table is editable precisely so that is your
-# call and not this file's.
-DEFAULT_LADDER = [
-    _row(WHEN_SIGNAL, DO_OPEN, ORDER_POSITION, LVL_ENTRY_FROM, 1),
-    _row(WHEN_MID, DO_OPEN, ORDER_POSITION, LVL_MID, 2),
-    _row(WHEN_MID, DO_OPEN, ORDER_STOP, LVL_ENTRY_FROM, 3),
-    _row(WHEN_MID, DO_OPEN, ORDER_POSITION, LVL_MID, 4),
-    _row(WHEN_MID, DO_OPEN, ORDER_STOP, LVL_ENTRY_FROM, 5),
-    _row(WHEN_MID, DO_OPEN, ORDER_POSITION, LVL_MID, 6),
-    _row(WHEN_MID, DO_OPEN, ORDER_STOP, LVL_ENTRY_FROM, 7),
-    _row(WHEN_MID, DO_OPEN, ORDER_POSITION, LVL_MID, 8),
-    _row(WHEN_TP1, DO_CANCEL),
-]
+# The grid is GLOBAL. A strategy switches staged entry on or off; which ladder it
+# runs follows from the signal, not from the channel. That keeps the per-channel
+# surface to one toggle and means a ladder is defined once rather than copied
+# across every strategy row that wants it.
+ZONE_SINGLE = 1                 # entry_from == entry_to
+ZONE_RANGE = 2                  # a zone: two distinct entry edges
+ZONES = (ZONE_SINGLE, ZONE_RANGE)
+MAX_TPS = 8                     # deeper ladders reuse the 8-TP cell
 
-# #250's two-level ladder, which needs the far edge and therefore the ENTRY-TO
-# trigger. Kept next to the default so the shape is written down somewhere:
-# a LIMIT rests at the far edge, and its fill is what arms the STOP behind it.
-TWO_LEVEL_LADDER = [
-    _row(WHEN_SIGNAL, DO_OPEN, ORDER_POSITION, LVL_ENTRY_FROM, 1),
-    _row(WHEN_SIGNAL, DO_OPEN, ORDER_LIMIT, LVL_ENTRY_TO, 1),
-    _row(WHEN_ENTRY_TO, DO_OPEN, ORDER_STOP, LVL_ENTRY_FROM, 2),
-    _row(WHEN_MID, DO_OPEN, ORDER_STOP, LVL_ENTRY_TO, 2),
-    _row(WHEN_MID, DO_OPEN, ORDER_STOP, LVL_ENTRY_TO, 3),
-    _row(WHEN_TP1, DO_CANCEL),
-]
+
+def zone_kind(sig) -> int:
+    """Which half of the grid this signal reads from."""
+    return (ZONE_SINGLE if Decimal(str(sig.entry_from)) == Decimal(str(sig.entry_to))
+            else ZONE_RANGE)
+
+
+def _single_zone(n: int) -> list:
+    """#250's single-level ladders, cell by cell rather than by one rule.
+
+    The shapes are not a single pattern truncated, which is the whole reason the
+    grid exists: at 3 TPs, TP3 is a MID-triggered STOP; at 4+, TP3 is pulled
+    forward to signal time and TP4 becomes the STOP instead. From TP5 the issue's
+    alternation runs position-at-MID / STOP-at-entry outward."""
+    rows = [_row(WHEN_SIGNAL, DO_OPEN, ORDER_POSITION, LVL_ENTRY_FROM, 1)]
+    if n == 1:
+        rows.append(_row(WHEN_TP1, DO_CANCEL))
+        return rows
+    if n <= 3:
+        rows.append(_row(WHEN_MID, DO_OPEN, ORDER_POSITION, LVL_MID, 2))
+        if n == 3:
+            rows.append(_row(WHEN_MID, DO_OPEN, ORDER_STOP, LVL_ENTRY_FROM, 3))
+        rows.append(_row(WHEN_TP1, DO_CANCEL))
+        return rows
+    # 4+: TP1 and TP3 open at once; MID takes TP2 and arms the STOP for TP4.
+    rows += [_row(WHEN_SIGNAL, DO_OPEN, ORDER_POSITION, LVL_ENTRY_FROM, 3),
+             _row(WHEN_MID, DO_OPEN, ORDER_POSITION, LVL_MID, 2),
+             _row(WHEN_MID, DO_OPEN, ORDER_STOP, LVL_ENTRY_FROM, 4)]
+    for tp in range(5, n + 1):             # ... TP5 position, TP6 STOP, TP7, TP8
+        if tp % 2:
+            rows.append(_row(WHEN_MID, DO_OPEN, ORDER_POSITION, LVL_MID, tp))
+        else:
+            rows.append(_row(WHEN_MID, DO_OPEN, ORDER_STOP, LVL_ENTRY_FROM, tp))
+    rows.append(_row(WHEN_TP1, DO_CANCEL))
+    return rows
+
+
+def _range_zone(n: int) -> list:
+    """#250's zone ladders. A position at the near edge and a LIMIT resting at the
+    far one; the LIMIT filling -- price reaching ENTRY-TO -- is what arms the STOP
+    behind it, and MID arms one at the far edge."""
+    rows = [_row(WHEN_SIGNAL, DO_OPEN, ORDER_POSITION, LVL_ENTRY_FROM, 1)]
+    if n == 1:
+        rows += [_row(WHEN_SIGNAL, DO_OPEN, ORDER_LIMIT, LVL_ENTRY_TO, 1),
+                 _row(WHEN_TP1, DO_CANCEL)]
+        return rows
+    if n == 2:
+        rows += [_row(WHEN_SIGNAL, DO_OPEN, ORDER_LIMIT, LVL_ENTRY_TO, 1),
+                 _row(WHEN_ENTRY_TO, DO_OPEN, ORDER_STOP, LVL_ENTRY_FROM, 2),
+                 _row(WHEN_MID, DO_OPEN, ORDER_STOP, LVL_ENTRY_TO, 2)]
+    elif n == 3:
+        rows += [_row(WHEN_SIGNAL, DO_OPEN, ORDER_POSITION, LVL_ENTRY_FROM, 2),
+                 _row(WHEN_SIGNAL, DO_OPEN, ORDER_LIMIT, LVL_ENTRY_TO, 1),
+                 _row(WHEN_SIGNAL, DO_OPEN, ORDER_LIMIT, LVL_ENTRY_TO, 3),
+                 _row(WHEN_ENTRY_TO, DO_OPEN, ORDER_STOP, LVL_ENTRY_FROM, 2),
+                 _row(WHEN_MID, DO_OPEN, ORDER_STOP, LVL_ENTRY_TO, 3)]
+    else:                                  # 4+
+        rows += [_row(WHEN_SIGNAL, DO_OPEN, ORDER_POSITION, LVL_ENTRY_FROM, 3),
+                 _row(WHEN_SIGNAL, DO_OPEN, ORDER_LIMIT, LVL_ENTRY_TO, 2),
+                 _row(WHEN_SIGNAL, DO_OPEN, ORDER_LIMIT, LVL_ENTRY_TO, 4),
+                 _row(WHEN_ENTRY_TO, DO_OPEN, ORDER_STOP, LVL_ENTRY_FROM, 1),
+                 _row(WHEN_ENTRY_TO, DO_OPEN, ORDER_STOP, LVL_ENTRY_FROM, 3)]
+        for tp in range(5, n + 1):         # "then from MID, keep alternating"
+            rows.append(_row(WHEN_MID, DO_OPEN, ORDER_STOP, LVL_ENTRY_TO, tp))
+    rows.append(_row(WHEN_TP1, DO_CANCEL))
+    return rows
+
+
+# zone kind -> TP count -> the ladder. Built rather than typed out so the 16 cells
+# cannot drift from each other by a transcription slip; edit a cell on the page
+# and the stored grid overrides it.
+DEFAULT_MATRIX = {
+    ZONE_SINGLE: {n: _single_zone(n) for n in range(1, MAX_TPS + 1)},
+    ZONE_RANGE: {n: _range_zone(n) for n in range(1, MAX_TPS + 1)},
+}
+
+
+def rows_for(matrix, sig) -> list:
+    """The ladder this signal runs: its zone shape, its TP count.
+
+    A signal with more than MAX_TPS targets reads the deepest cell -- the extra
+    rows would have nothing to target anyway, and `plan_ladder` drops rows whose
+    TP does not exist, so nothing is invented at either end."""
+    matrix = matrix or DEFAULT_MATRIX
+    zone = zone_kind(sig)
+    n = min(len(sig.tps or []), MAX_TPS)
+    if n < 1:
+        return []
+    cell = (matrix.get(zone) or matrix.get(str(zone)) or {})
+    rows = cell.get(n) or cell.get(str(n))
+    if rows:
+        return rows
+    return DEFAULT_MATRIX[zone][n]
 
 
 # ============================ validation ======================================
@@ -178,6 +250,61 @@ def clean_ladder(raw) -> Optional[List[dict]]:
     if not any(r["when"] == WHEN_SIGNAL for r in out):
         raise ValueError("a ladder needs at least one row that fires when the "
                          "signal arrives, or nothing is ever opened")
+    return out
+
+
+def clean_matrix(raw) -> Optional[dict]:
+    """Validate a whole ladder GRID from the UI/API, or None when there is none.
+
+    Keys arrive as JSON strings and come back as ints, so the grid a caller reads
+    is shaped the same however it was stored. A cell that fails validation raises
+    — the API turns that into a 422 — because a grid quietly missing a cell would
+    send those signals down `DEFAULT_MATRIX` without anyone being told."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("ladders must be an object keyed by zone")
+    out: dict = {}
+    for zk, cells in raw.items():
+        try:
+            zone = int(zk)
+        except (TypeError, ValueError):
+            raise ValueError(f"unknown zone key {zk!r} — expected 1 or 2")
+        if zone not in ZONES:
+            raise ValueError(f"unknown zone {zone} — expected 1 (single) or 2 (range)")
+        if not isinstance(cells, dict):
+            raise ValueError(f"zone {zone} must be an object keyed by TP count")
+        by_n: dict = {}
+        for nk, rows in cells.items():
+            try:
+                n = int(nk)
+            except (TypeError, ValueError):
+                raise ValueError(f"zone {zone}: unknown TP-count key {nk!r}")
+            if not (1 <= n <= MAX_TPS):
+                raise ValueError(f"zone {zone}: TP count {n} is outside 1..{MAX_TPS}")
+            try:
+                cleaned = clean_ladder(rows)
+            except ValueError as exc:
+                raise ValueError(f"zone {zone}, {n}-TP ladder: {exc}")
+            if cleaned:
+                by_n[n] = cleaned
+        if by_n:
+            out[zone] = by_n
+    return out or None
+
+
+def matrix_with_defaults(stored) -> dict:
+    """The stored grid overlaid on DEFAULT_MATRIX, cell by cell.
+
+    Overlaid rather than replaced: editing the 3-TP zone ladder must not blank
+    the fifteen cells nobody touched."""
+    out = {z: dict(cells) for z, cells in DEFAULT_MATRIX.items()}
+    try:
+        stored = clean_matrix(stored) or {}
+    except ValueError:
+        return out                       # unreadable stored grid -> the defaults
+    for zone, cells in stored.items():
+        out.setdefault(zone, {}).update(cells)
     return out
 
 
@@ -242,10 +369,9 @@ def plan_ladder(sig, rows: Optional[List[dict]] = None, *,
     the single-shot one does. Without them a parse artifact — tp=1530 on gold near
     4180 — becomes a rung, and the two entry styles stop being comparable on the
     very signals the guard exists to throw away (#152)."""
-    rows = rows or DEFAULT_LADDER
+    rows = rows if rows is not None else rows_for(DEFAULT_MATRIX, sig)
     tps = list(sig.tps or [])
     legs: List[PlannedLeg] = []
-    seen = set()                     # (entry, tp_index) already claimed by a rung
     for r in rows:
         if r.get("action") != DO_OPEN:
             continue
@@ -280,17 +406,14 @@ def plan_ladder(sig, rows: Optional[List[dict]] = None, *,
         wait_for = trigger_level(r["when"], sig)
         if r["when"] != WHEN_SIGNAL and wait_for is None:
             continue                     # a trigger this signal cannot produce
-        # COLLAPSE DUPLICATES. On a single-level signal ENTRY-TO *is* ENTRY-FROM,
-        # so a table written for a zone — a position at the near edge and a LIMIT
-        # at the far one — resolves both rows to the same price for the same
-        # target. That is not a second opinion, it is the same order twice: it
-        # splits the budget an extra way and rests two orders on one level. The
-        # first row to claim a (level, target) keeps it, so one table stays
-        # correct on both signal shapes instead of needing one table per shape.
-        key = (entry, idx)
-        if key in seen:
-            continue
-        seen.add(key)
+        # No de-duplication here, deliberately. It was needed when ONE table had to
+        # serve both signal shapes: on a single-level signal a zone table's near
+        # and far rows collapsed onto one price and double-ordered. The grid gives
+        # each shape its own cell, so that can no longer happen — and the zone
+        # ladders genuinely DO place two orders at the same level for the same
+        # target (#250's 3-TP zone cell opens a position at ENTRY-FROM for TP2 and
+        # later arms a STOP there for TP2 as well, which is the confirmation
+        # adding size). Collapsing those would silently delete half the ladder.
         legs.append(PlannedLeg(
             side=sig.direction, entry=entry, tp=Decimal(str(tp)),
             sl=Decimal(str(sig.sl)), tp_index=idx, order_type=r["order"],
@@ -301,7 +424,7 @@ def plan_ladder(sig, rows: Optional[List[dict]] = None, *,
 
 def cancel_rows(rows: Optional[List[dict]] = None) -> List[str]:
     """The triggers on which the monitor must pull every remaining order."""
-    return [r["when"] for r in (rows or DEFAULT_LADDER) if r.get("action") == DO_CANCEL]
+    return [r["when"] for r in (rows or []) if r.get("action") == DO_CANCEL]
 
 
 # ============================ sizing ==========================================

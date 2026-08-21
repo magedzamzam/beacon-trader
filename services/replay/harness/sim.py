@@ -180,7 +180,11 @@ def plan_trade(*, signal: ParsedSignal, signal_id: int, source_id, account_id: i
     ladder_rows = None
     if want_staged:
         staged_cfg = STG.staged_config(ep.get("staged"))
-        ladder_rows = ep.get("ladder") or LAD.DEFAULT_LADDER
+        # Same grid live reads, so a backtested ladder is the ladder that runs.
+        # A variant may carry its own `staged_ladders` to test a different grid;
+        # absent, it is the shipped default.
+        ladder_rows = LAD.rows_for(
+            LAD.matrix_with_defaults(getattr(variant, "staged_ladders", None)), signal)
         # Same guards, and the same whole-signal chase skip, as the control arm —
         # a replayed staged arm that took signals live skipped would be comparing
         # different populations (#152/#155).

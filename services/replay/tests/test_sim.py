@@ -259,15 +259,17 @@ def test_the_replayed_ladder_risks_what_the_single_shot_would_have():
     assert plain.planned_risk - staged.planned_risk < Decimal("1")
 
 
-def test_a_ladder_falls_back_to_single_shot_when_no_row_fits_the_signal():
-    """The same shape as the executor's fallback: a table whose rows all target
-    TPs this signal does not have leaves nothing to place, so the account runs
-    the ordinary fanout rather than nothing at all."""
-    one_tp = signal(entry=4000.0, entry_to=3990.0, sl=3980.0, tps=(4010.0,))
-    table = [{"when": "signal", "action": "open", "order": "POSITION",
-              "level": "ENTRY_FROM", "target": 3}]
-    trade, why, *_ = _staged_plan(_staged_variant(ladder=table), one_tp, [4020] * 5)
-    assert why is None and trade.entry_style == sim.SINGLE_SHOT
+def test_the_replay_reads_the_same_grid_cell_the_signal_would_run_live():
+    """Criterion 6: which ladder a backtest runs must be the one live would run,
+    and that follows from the signal — its entry shape and its TP count."""
+    zone = signal(entry=4000.0, entry_to=3990.0, sl=3980.0,
+                  tps=(4010.0, 4020.0, 4030.0))
+    assert LAD.zone_kind(zone) == LAD.ZONE_RANGE
+    assert LAD.rows_for(None, zone) is LAD.DEFAULT_MATRIX[LAD.ZONE_RANGE][3]
+
+    flat = signal(entry=4000.0, entry_to=4000.0, sl=3980.0, tps=(4010.0, 4020.0))
+    assert LAD.zone_kind(flat) == LAD.ZONE_SINGLE
+    assert LAD.rows_for(None, flat) is LAD.DEFAULT_MATRIX[LAD.ZONE_SINGLE][2]
 
 
 def test_a_mid_rung_deploys_when_price_reaches_mid():

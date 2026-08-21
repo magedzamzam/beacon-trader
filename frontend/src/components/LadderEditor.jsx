@@ -2,7 +2,7 @@ import { Plus, Trash2, RotateCcw } from "lucide-react";
 import { Select, NumberInput, Button } from "./form";
 
 /**
- * LadderEditor (#250) — the staged entry, as a table you can read.
+ * LadderEditor (#250) — ONE CELL of the global ladder grid, as a table you can read.
  *
  *   IF                  THEN     ORDER      LEVEL        TARGET
  *   signal arrives      open     POSITION   ENTRY-FROM   TP1
@@ -11,8 +11,13 @@ import { Select, NumberInput, Button } from "./form";
  *   price reaches TP1   cancel   —          —            —
  *
  * Every row is one order: when to place it, what kind, at which level, for which
- * target. This replaces the thirteen tuning numbers staged entry used to carry,
+ * target. This replaced the thirteen tuning numbers staged entry used to carry,
  * none of which anyone ever changed.
+ *
+ * Presentational and cell-agnostic: the caller (LadderGrid) decides WHICH ladder
+ * is being edited — a signal shape and a TP count — and this just edits the rows
+ * it is handed. An empty cell is legitimate and means "no ladder for that shape";
+ * a signal matching it runs the ordinary single-shot entry.
  *
  * Values mirror beacon_core.execution.ladder — keep the four option lists below
  * in step with WHENS / ACTIONS / ORDERS / LEVELS there. A value this offers that
@@ -38,35 +43,6 @@ const LEVELS = [
   ["MID", "MID"],
 ];
 
-// Mirrors beacon_core.execution.ladder.DEFAULT_LADDER. Written to depth on
-// purpose: rows targeting a TP the signal lacks are not created, so one table
-// degrades to #250's 2-TP and 3-TP ladders and keeps alternating past TP3
-// instead of leaving the deepest targets of a 4- or 5-TP signal untraded.
-export const DEFAULT_LADDER = [
-  { when: "signal", action: "open", order: "POSITION", level: "ENTRY_FROM", target: 1 },
-  { when: "mid", action: "open", order: "POSITION", level: "MID", target: 2 },
-  { when: "mid", action: "open", order: "STOP", level: "ENTRY_FROM", target: 3 },
-  { when: "mid", action: "open", order: "POSITION", level: "MID", target: 4 },
-  { when: "mid", action: "open", order: "STOP", level: "ENTRY_FROM", target: 5 },
-  { when: "mid", action: "open", order: "POSITION", level: "MID", target: 6 },
-  { when: "mid", action: "open", order: "STOP", level: "ENTRY_FROM", target: 7 },
-  { when: "mid", action: "open", order: "POSITION", level: "MID", target: 8 },
-  { when: "tp1", action: "cancel_all" },
-];
-
-// #250's ZONE ladder — the shape that needs the far edge. A LIMIT rests at
-// ENTRY-TO and its fill is what arms the STOP behind it. On a single-level
-// signal ENTRY-TO is ENTRY-FROM, so those rows collapse onto the near edge and
-// the duplicates are dropped rather than double-ordered.
-export const TWO_LEVEL_LADDER = [
-  { when: "signal", action: "open", order: "POSITION", level: "ENTRY_FROM", target: 1 },
-  { when: "signal", action: "open", order: "LIMIT", level: "ENTRY_TO", target: 1 },
-  { when: "entry_to", action: "open", order: "STOP", level: "ENTRY_FROM", target: 2 },
-  { when: "mid", action: "open", order: "STOP", level: "ENTRY_TO", target: 2 },
-  { when: "mid", action: "open", order: "STOP", level: "ENTRY_TO", target: 3 },
-  { when: "tp1", action: "cancel_all" },
-];
-
 const label = (list, v) => (list.find(([k]) => k === v) || [, v])[1];
 
 /** The row in plain language, so the table can be checked without decoding it. */
@@ -76,7 +52,7 @@ function readback(r) {
 }
 
 export default function LadderEditor({ rows, onChange }) {
-  const list = rows && rows.length ? rows : DEFAULT_LADDER;
+  const list = rows || [];
   const update = (i, patch) => onChange(list.map((r, j) => (j === i ? { ...r, ...patch } : r)));
   const remove = (i) => onChange(list.filter((_, j) => j !== i));
   const add = () => onChange([...list, { when: "mid", action: "open", order: "POSITION", level: "MID", target: 1 }]);
@@ -146,11 +122,8 @@ export default function LadderEditor({ rows, onChange }) {
 
       <div className="flex items-center gap-2">
         <Button variant="ghost" onClick={add}><Plus className="w-4 h-4 inline -mt-0.5" /> Add row</Button>
-        <Button variant="ghost" onClick={() => onChange(DEFAULT_LADDER.map((r) => ({ ...r })))}>
-          <RotateCcw className="w-3.5 h-3.5 inline -mt-0.5" /> Default ladder
-        </Button>
-        <Button variant="ghost" onClick={() => onChange(TWO_LEVEL_LADDER.map((r) => ({ ...r })))}>
-          <RotateCcw className="w-3.5 h-3.5 inline -mt-0.5" /> Zone ladder
+        <Button variant="ghost" onClick={() => onChange([])}>
+          <RotateCcw className="w-3.5 h-3.5 inline -mt-0.5" /> Clear this cell
         </Button>
       </div>
 

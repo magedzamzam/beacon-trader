@@ -35,6 +35,15 @@ def _sell(**kw):
     return _sig(**base)
 
 
+def _one_zone(**kw):
+    """A single-level signal — entry_from == entry_to — so it reads the 1-ZONE
+    half of the grid. `_sig()` is a zone and reads the other half."""
+    base = dict(entry_from="4180", entry_to="4180", sl="4168",
+                tps=("4190", "4200", "4210"))
+    base.update(kw)
+    return _sig(**base)
+
+
 def _both_totals(sig, risk, price="4178", rows=None):
     """(single-shot total risk, ladder total risk) for the same signal."""
     single = build_plan(sig, current_price=Decimal(price))
@@ -77,11 +86,12 @@ def test_the_guarantee_holds_under_per_tp_allocation_too():
 def test_a_rung_nearer_the_stop_carries_a_bigger_lot_for_the_same_money():
     """Why entering at MID is worth anything: the same cash buys more size when
     the stop is closer. Equal risk per rung, unequal lots."""
-    rungs = L.plan_ladder(_sig())
+    rungs = L.plan_ladder(_sig(entry_to="4176"))
     L.size_ladder(rungs, budget=Decimal("300"), instrument=INSTR)
-    by_level = {r.entry: r for r in rungs}
-    entry_rung = by_level[Decimal("4180")]
-    mid_rung = next(r for r in rungs if r.tranche == L.WHEN_MID and r.entry == Decimal("4172"))
+    rungs = L.plan_ladder(_one_zone())          # the 1-ZONE cell has a MID rung
+    L.size_ladder(rungs, budget=Decimal("300"), instrument=INSTR)
+    entry_rung = next(r for r in rungs if r.entry == Decimal("4180"))
+    mid_rung = next(r for r in rungs if r.entry == Decimal("4174"))
     assert mid_rung.entry > entry_rung.sl
     assert mid_rung.lot > entry_rung.lot          # closer stop -> more size
     assert abs(mid_rung.risk_cash - entry_rung.risk_cash) < Decimal("1")
@@ -146,10 +156,13 @@ def test_a_rung_whose_target_sits_behind_its_own_entry_is_dropped():
     assert rungs[0].tranche == L.WHEN_SIGNAL or rungs[0].entry == Decimal("4172")
 
 
-def test_cancel_rows_are_instructions_not_legs():
-    rungs = L.plan_ladder(_sig())
-    assert all(r.tranche != L.WHEN_TP1 for r in rungs)
-    assert L.cancel_rows() == [L.WHEN_TP1]
+@pytest.mark.parametrize("zone", [L.ZONE_SINGLE, L.ZONE_RANGE])
+@pytest.mark.parametrize("n", [1, 2, 3, 4, 5, 6, 7, 8])
+def test_every_cell_cancels_on_tp1_and_never_makes_a_leg_for_it(zone, n):
+    rows = L.DEFAULT_MATRIX[zone][n]
+    assert L.cancel_rows(rows) == [L.WHEN_TP1]
+    sig = _one_zone() if zone == L.ZONE_SINGLE else _sig()
+    assert all(r.tranche != L.WHEN_TP1 for r in L.plan_ladder(sig, rows))
 
 
 def test_the_trigger_level_is_carried_on_every_deferred_rung():
@@ -157,13 +170,14 @@ def test_the_trigger_level_is_carried_on_every_deferred_rung():
     level, not its own entry. Those coincide for `mid / POSITION / MID` and part
     company for `mid / STOP / ENTRY-FROM`, which waits at MID and rests at the
     entry."""
-    rungs = L.plan_ladder(_sig())
-    mid = L.mid_level(Decimal("4176"), Decimal("4168"))
-    for r in rungs:
+    sig = _sig()                                    # a zone: entry_to and mid triggers
+    want = {L.WHEN_ENTRY_TO: Decimal("4176"),
+            L.WHEN_MID: L.mid_level(Decimal("4176"), Decimal("4168"))}
+    for r in L.plan_ladder(sig):
         if r.tranche == L.WHEN_SIGNAL:
             assert r.trigger is None                # goes out now
         else:
-            assert r.trigger == mid                 # every other default row is MID-triggered
+            assert r.trigger == want[r.tranche]
 
 
 # --- validation --------------------------------------------------------------
@@ -206,8 +220,11 @@ def test_a_table_that_never_opens_anything_is_refused():
                          "level": "MID", "target": 1}])
 
 
-def test_the_default_table_is_valid_by_its_own_rules():
-    assert L.clean_ladder(L.DEFAULT_LADDER) == L.DEFAULT_LADDER
+@pytest.mark.parametrize("zone", [L.ZONE_SINGLE, L.ZONE_RANGE])
+@pytest.mark.parametrize("n", [1, 2, 3, 4, 5, 6, 7, 8])
+def test_every_cell_of_the_grid_is_valid_by_its_own_rules(zone, n):
+    rows = L.DEFAULT_MATRIX[zone][n]
+    assert L.clean_ladder(rows) == rows
 
 # --- covering the spectrum #250 specifies ------------------------------------
 
@@ -267,28 +284,75 @@ def test_the_two_level_ladder_reproduces_250s_zone_spec():
     arms a STOP back at the near edge; MID arms one at the far edge."""
     sig = _sig(entry_from="4180", entry_to="4176", sl="4168",
                tps=("4190", "4200", "4210"))
-    rungs = L.plan_ladder(sig, L.TWO_LEVEL_LADDER)
+    rungs = L.plan_ladder(sig, L.DEFAULT_MATRIX[L.ZONE_RANGE][3])
     shape = {(str(r.trigger), r.order_type, str(r.entry), r.tp_index) for r in rungs}
-    assert ("None", "POSITION", "4180", 1) in shape        # now, at the near edge
-    assert ("None", "LIMIT", "4176", 1) in shape           # now, resting at the far edge
-    assert ("4176", "STOP", "4180", 2) in shape            # the LIMIT filled -> STOP behind it
-    assert ("4172", "STOP", "4176", 2) in shape            # MID -> STOP at the far edge
+    # "1 position at ENTRY-FROM -> TP1, 1 position at ENTRY-FROM -> TP2,
+    #  a LIMIT at ENTRY-TO -> TP1, a LIMIT at ENTRY-TO -> TP3"
+    assert ("None", "POSITION", "4180", 1) in shape
+    assert ("None", "POSITION", "4180", 2) in shape
+    assert ("None", "LIMIT", "4176", 1) in shape
+    assert ("None", "LIMIT", "4176", 3) in shape
+    # "LIMITs filled -> open a STOP order at ENTRY-FROM -> TP2"
+    assert ("4176", "STOP", "4180", 2) in shape
+    # "Price reaches MID -> open a STOP order at ENTRY-TO -> TP3"
+    assert ("4172", "STOP", "4176", 3) in shape
 
 
-def test_a_zone_table_collapses_safely_on_a_single_level_signal():
-    """ENTRY-TO *is* ENTRY-FROM there, so the near and far rows resolve to one
-    price. That is the same order twice, not a second opinion: it would split the
-    budget an extra way and rest two orders on one level."""
-    one_level = _sig(entry_from="4180", entry_to="4180", sl="4168",
-                     tps=("4190", "4200", "4210"))
-    rungs = L.plan_ladder(one_level, L.TWO_LEVEL_LADDER)
-    seen = [(r.entry, r.tp_index) for r in rungs]
-    assert len(seen) == len(set(seen)), seen
-    assert all(r.entry == Decimal("4180") for r in rungs)
+def test_a_zone_cell_may_place_two_orders_on_one_level_for_one_target():
+    """#250's 3-TP zone ladder opens a position at ENTRY-FROM for TP2 AND later
+    arms a STOP there for TP2 as well — the confirmation adding size. Collapsing
+    those as duplicates would silently delete half the ladder, which is why the
+    grid replaced de-duplication rather than keeping both."""
+    sig = _sig(entry_from="4180", entry_to="4176", sl="4168",
+               tps=("4190", "4200", "4210"))
+    at_entry_for_tp2 = [r for r in L.plan_ladder(sig, L.DEFAULT_MATRIX[L.ZONE_RANGE][3])
+                        if r.entry == Decimal("4180") and r.tp_index == 2]
+    assert len(at_entry_for_tp2) == 2
+    assert {r.order_type for r in at_entry_for_tp2} == {"POSITION", "STOP"}
 
 
-def test_the_two_level_table_is_valid_by_its_own_rules():
-    assert L.clean_ladder(L.TWO_LEVEL_LADDER) == L.TWO_LEVEL_LADDER
+def test_the_grid_picks_the_cell_that_matches_the_signal():
+    """Which ladder runs follows from the SIGNAL — its entry shape and its TP
+    count — not from the channel. That is what the grid buys: #250's 3-TP and
+    4-TP ladders are different shapes, not one truncated, so no single table
+    could have been both."""
+    assert L.zone_kind(_one_zone()) == L.ZONE_SINGLE
+    assert L.zone_kind(_sig()) == L.ZONE_RANGE
+    assert L.rows_for(None, _one_zone(tps=("4190", "4200"))) is L.DEFAULT_MATRIX[L.ZONE_SINGLE][2]
+    assert L.rows_for(None, _sig(tps=("4190", "4200", "4210"))) is L.DEFAULT_MATRIX[L.ZONE_RANGE][3]
+
+
+def test_a_signal_deeper_than_the_grid_reads_the_deepest_cell():
+    deep = _one_zone(tps=tuple(str(4190 + 10 * i) for i in range(11)))
+    assert len(deep.tps) == 11
+    assert L.rows_for(None, deep) is L.DEFAULT_MATRIX[L.ZONE_SINGLE][L.MAX_TPS]
+
+
+def test_a_stored_grid_overlays_the_defaults_rather_than_replacing_them():
+    """Editing one cell must not blank the fifteen nobody touched."""
+    mine = [{"when": "signal", "action": "open", "order": "POSITION",
+             "level": "ENTRY_FROM", "target": 1}]
+    grid = L.matrix_with_defaults({"1": {"3": mine}})
+    assert grid[L.ZONE_SINGLE][3] == mine                       # my edit
+    assert grid[L.ZONE_SINGLE][2] == L.DEFAULT_MATRIX[L.ZONE_SINGLE][2]   # untouched
+    assert grid[L.ZONE_RANGE][3] == L.DEFAULT_MATRIX[L.ZONE_RANGE][3]
+
+
+def test_an_unreadable_stored_grid_falls_back_to_the_defaults():
+    assert L.matrix_with_defaults("nonsense") == L.DEFAULT_MATRIX
+    assert L.matrix_with_defaults(None) == L.DEFAULT_MATRIX
+
+
+@pytest.mark.parametrize("bad", [
+    {"9": {"3": []}},                                     # no such zone
+    {"1": {"99": [{"when": "signal", "action": "open", "order": "POSITION",
+                   "level": "ENTRY_FROM", "target": 1}]}},   # TP count out of range
+    {"1": {"3": [{"when": "whenever", "action": "open", "order": "POSITION",
+                  "level": "MID", "target": 1}]}},           # bad row
+])
+def test_a_bad_grid_is_refused_with_the_cell_named(bad):
+    with pytest.raises(ValueError):
+        L.clean_matrix(bad)
 
 
 def test_deduping_never_drops_a_genuinely_distinct_rung():
@@ -309,6 +373,8 @@ def test_the_deep_default_still_risks_what_the_single_shot_would_have():
     risk = RiskConfig(basis="capital_percent", value=Decimal("1"), allocation="even")
     sig = _sig(tps=("4190", "4200", "4210", "4220", "4230"))
     target, total, rungs = _both_totals(sig, risk)
-    assert len(rungs) == 5
+    # A zone cell can carry more rungs than the signal has TPs — several orders
+    # can target one TP from different levels. What must not change is the total.
+    assert len(rungs) >= 5
     assert total <= target
     assert target - total < Decimal(len(rungs)) * INSTR.lot_step * Decimal("40")

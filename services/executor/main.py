@@ -483,7 +483,12 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         is_staged = str(planner_cfg.get("entry_style") or "") == "staged"
         ladder_rows = None
         if is_staged:
-            ladder_rows = planner_cfg.get("ladder") or LAD.DEFAULT_LADDER
+            # The ladder is GLOBAL: which one this signal runs follows from its
+            # own shape (single entry level vs a zone, and how many TPs), not from
+            # the channel. The strategy only chose to switch staged entry on.
+            _grid = LAD.matrix_with_defaults(
+                await get_setting(session, "staged_ladders", None))
+            ladder_rows = LAD.rows_for(_grid, parsed)
             # The chase guard decides whether the SIGNAL is taken at all, and it
             # must decide that the same way for both entry styles or the A/B is
             # comparing different populations (#155). build_plan is pure and

@@ -83,8 +83,12 @@ def test_a_tp_inside_the_brokers_minimum_distance_is_dropped_on_both_paths():
                       min_stop_distance=Decimal("5"))
     assert any(not l.valid and "min distance" in (l.skip_reason or "")
                for l in plan.legs)
+    # Per LEG, exactly as build_plan judges it: the rung resting at 4045 is 0.1
+    # from that TP and goes; the one at the far edge is 5.1 away and stays.
     rungs = L.plan_ladder(_sig(tps=near_tp), min_stop_distance=Decimal("5"))
-    assert all(r.tp != Decimal("4044.9") for r in rungs)
+    assert rungs
+    assert all(abs(r.tp - r.entry) >= Decimal("5") for r in rungs)
+    assert not any(r.entry == Decimal("4045") and r.tp == Decimal("4044.9") for r in rungs)
 
 
 # ---- #154: the risk match ----------------------------------------------------

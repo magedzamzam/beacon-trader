@@ -16,6 +16,7 @@ from beacon_core.execution import strategy as ST
 from beacon_core.execution import staging as STG
 from beacon_core.execution import ladder as LAD
 from beacon_core.execution.strategy import ENTRY_POLICY_KEYS
+from beacon_core.settings_store import get_setting, set_setting
 from beacon_core.ta import registry as TA
 from beacon_core.timeutil import utcnow
 from ..deps import get_db
@@ -90,18 +91,12 @@ def _clean_entry_policy(ep) -> dict | None:
         return None
     if not isinstance(ep, dict):
         raise HTTPException(422, "entry_policy must be an object")
+    # `ladder` is deliberately absent: the grid is global (see /strategies/ladders).
+    # A stale client still sending one has it dropped rather than stored, so a
+    # per-strategy copy cannot sit in the DB looking authoritative.
     out = {k: ep[k] for k in ENTRY_POLICY_KEYS
            if k in ep and ep[k] is not None
-           and k not in ("entry_style", "staged", "sl_distance", "ladder")}
-    if ep.get("ladder") is not None:
-        # RAISES on a bad row rather than dropping it (#250): a ladder quietly
-        # missing a rung is a different strategy from the one that was saved.
-        try:
-            rows = LAD.clean_ladder(ep["ladder"])
-        except ValueError as exc:
-            raise HTTPException(422, str(exc))
-        if rows:
-            out["ladder"] = rows
+           and k not in ("entry_style", "staged", "sl_distance")}
     _sl_distance = _clean_sl_distance(ep.get("sl_distance"))
     if _sl_distance is not None:
         out["sl_distance"] = _sl_distance
@@ -513,3 +508,39 @@ async def delete(strategy_id: int, db: AsyncSession = Depends(get_db)):
     await db.delete(row)
     await db.commit()
     return {"ok": True, "deleted": strategy_id}
+
+
+# ------------------------------------------------------- the ladder grid (#250)
+# GLOBAL, not per-strategy. #250 specifies a different ladder for a single-level
+# entry than for a zone, and different ladders again by TP count — and those are
+# not one shape truncated (its 3-TP ladder opens TP3 as a MID-triggered STOP; its
+# 4-TP ladder opens TP3 at signal time). So the ladder is a GRID, zone shape x TP
+# count, and which cell a signal runs follows from the signal. A strategy only
+# says whether staged entry is on.
+@router.get("/ladders")
+async def get_ladders(db: AsyncSession = Depends(get_db)):
+    stored = await get_setting(db, "staged_ladders", None)
+    return {"ladders": LAD.matrix_with_defaults(stored),
+            "zones": list(LAD.ZONES), "max_tps": LAD.MAX_TPS,
+            # False -> the page can say "these are the defaults, nothing saved yet"
+            "configured": stored is not None}
+
+
+@router.put("/ladders")
+async def put_ladders(body: dict, db: AsyncSession = Depends(get_db)):
+    """Store the grid. Cells equal to the shipped default are NOT stored, so the
+    setting stays a record of what was deliberately changed rather than a frozen
+    copy of every default — which would silently pin the fifteen cells nobody
+    touched against any future correction to them."""
+    try:
+        clean = LAD.clean_matrix(body.get("ladders", body))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    diff = {}
+    for zone, cells in (clean or {}).items():
+        for n, rows in cells.items():
+            if rows != LAD.DEFAULT_MATRIX.get(zone, {}).get(n):
+                diff.setdefault(str(zone), {})[str(n)] = rows
+    await set_setting(db, "staged_ladders", diff)
+    return {"ladders": LAD.matrix_with_defaults(diff),
+            "zones": list(LAD.ZONES), "max_tps": LAD.MAX_TPS, "configured": True}

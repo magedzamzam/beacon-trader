@@ -125,6 +125,9 @@ export const api = {
   resolveStrategy: (accountId, sourceId) =>
     req(`/strategies/resolve?account_id=${accountId}&source_id=${sourceId}`),
   saveStrategy: (body) => req("/strategies", { method: "PUT", body: JSON.stringify(body) }),
+  // The staged-entry ladder GRID (#250): global, zone shape x TP count.
+  ladders: () => req("/strategies/ladders"),
+  saveLadders: (ladders) => req("/strategies/ladders", { method: "PUT", body: JSON.stringify({ ladders }) }),
   deleteStrategy: (id) => req(`/strategies/${id}`, { method: "DELETE" }),
   // per-(account, source) risk overrides (#84) — risk lives on Risk & Limits
   riskOverrides: () => req("/risk-limits/overrides"),

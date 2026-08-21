@@ -23,6 +23,7 @@ import pytest
 from fastapi import HTTPException
 
 from beacon_core.analysis import epochs as EP
+from beacon_core.execution import ladder as LAD
 from beacon_core.execution import strategy as ST
 from beacon_core.ta import registry as TA
 
@@ -560,36 +561,42 @@ def test_an_unparseable_sl_distance_is_refused():
 
 
 # ------------------------------------------------------------ ladder (#250)
-def test_a_valid_ladder_is_stored_normalised():
-    out = S._clean_entry_policy({"ladder": [
-        {"when": "signal", "action": "open", "order": "position",
-         "level": "entry_from", "target": "1"},
-        {"when": "tp1", "action": "cancel_all"}]})
-    assert out["ladder"][0]["order"] == "POSITION"
-    assert out["ladder"][0]["level"] == "ENTRY_FROM"
-    assert out["ladder"][0]["target"] == 1
-    assert out["ladder"][1] == {"when": "tp1", "action": "cancel_all"}
-
-
-@pytest.mark.parametrize("bad", [
-    [{"when": "eventually", "action": "open", "order": "POSITION",
-      "level": "MID", "target": 1}],
-    [{"when": "signal", "action": "open", "order": "POSITION",
-      "level": "MID", "target": 0}],
-    [{"when": "mid", "action": "open", "order": "POSITION",
-      "level": "MID", "target": 1}],                       # never opens anything
-])
-def test_a_bad_ladder_row_is_a_422_not_a_silently_dropped_rung(bad):
-    """A ladder missing a rung is a different strategy from the one that was
-    saved, so the write fails loudly instead of storing something else."""
-    with pytest.raises(HTTPException) as exc:
-        S._clean_entry_policy({"ladder": bad})
-    assert exc.value.status_code == 422
-
-
-def test_ladder_is_a_known_entry_policy_key():
+# The ladder is GLOBAL — a grid of zone shape x TP count in the `staged_ladders`
+# setting, served by /strategies/ladders. It is deliberately NOT an entry_policy
+# key: which ladder a signal runs follows from the signal's own shape, not from
+# the channel, and a per-strategy copy would sit in the DB looking authoritative.
+def test_ladder_is_not_an_entry_policy_key():
     from beacon_core.execution.strategy import ENTRY_POLICY_KEYS
-    assert "ladder" in ENTRY_POLICY_KEYS
+    assert "ladder" not in ENTRY_POLICY_KEYS
+
+
+def test_a_stale_client_sending_a_ladder_has_it_dropped_not_stored():
+    out = S._clean_entry_policy({"ttl_minutes": 45, "ladder": [
+        {"when": "signal", "action": "open", "order": "POSITION",
+         "level": "ENTRY_FROM", "target": 1}]})
+    assert out == {"ttl_minutes": 45}
+
+
+def test_the_grid_validates_every_cell_and_names_the_bad_one():
+    good = {"1": {"3": [{"when": "signal", "action": "open", "order": "position",
+                         "level": "entry_from", "target": "1"}]}}
+    cleaned = LAD.clean_matrix(good)
+    assert cleaned[1][3][0]["order"] == "POSITION"
+
+    with pytest.raises(ValueError) as exc:
+        LAD.clean_matrix({"1": {"3": [{"when": "whenever", "action": "open",
+                                       "order": "POSITION", "level": "MID",
+                                       "target": 1}]}})
+    assert "zone 1, 3-TP ladder" in str(exc.value)
+
+
+def test_only_the_cells_that_differ_from_the_default_are_worth_storing():
+    """The PUT stores the DIFF, so the setting records what was deliberately
+    changed rather than freezing a copy of every default — which would pin the
+    fifteen untouched cells against any future correction to them."""
+    unchanged = LAD.DEFAULT_MATRIX[LAD.ZONE_SINGLE][3]
+    grid = LAD.matrix_with_defaults({"1": {"3": unchanged}})
+    assert grid[LAD.ZONE_SINGLE][3] == unchanged
 
 
 def test_sl_distance_is_a_known_entry_policy_key():
