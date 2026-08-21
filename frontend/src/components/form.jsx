@@ -69,22 +69,6 @@ export function Toggle({ checked, onChange, label }) {
   );
 }
 
-// Labeled numeric slider with a live readout — reusable anywhere a bounded
-// numeric knob reads better than a raw number box (fractions, ATR multiples).
-// `format` customises the readout (e.g. percent); `suffix` appends a unit.
-export function Slider({ value, onChange, min = 0, max = 1, step = 0.05, suffix, format }) {
-  const v = value === "" || value == null ? Number(min) : Number(value);
-  return (
-    <div className="flex items-center gap-2.5">
-      <input type="range" min={min} max={max} step={step} value={v}
-        onChange={(e) => onChange(Number(e.target.value))}
-        className="flex-1 h-1.5 rounded-full appearance-none cursor-pointer bg-edge accent-beacon" />
-      <span className="num text-xs text-beacon w-16 text-right tabular-nums">
-        {format ? format(v) : v}{suffix ? ` ${suffix}` : ""}
-      </span>
-    </div>
-  );
-}
 
 export function Button({ variant = "primary", children, ...p }) {
   const v = {

@@ -30,12 +30,10 @@ const trendRuleToBlock = (r) => ({
 
 // Mirrors beacon_core.execution.staging.DEFAULT_STAGED (keep in sync). Drives the
 // #129 confirmation-staged entry; inert unless entry_style === "staged".
+// #250 froze the thirteen tuning knobs that used to live here as engine constants
+// — nobody had ever changed one — leaving only the two #158 order-age brakes.
 const STAGED_DEFAULTS = {
-  toe_in_tps: 1, runner_tps: 1, max_deferred_fraction: 0.6, min_deferred_fraction: 0.2,
-  reclaim_break_atr: 0.35, reclaim_break_cash: 0, reclaim_break_max_frac_of_stop: 0.5,
-  reclaim_break_abs_cap: 8, stop_offset_atr: 0.1,
-  runner_ttl_minutes: 45, reclaim_pending_ttl_minutes: 60, reclaim_armed_ttl_minutes: 60,
-  min_stop_atr: 0.5,
+  deployed_ttl_minutes: 0, max_entry_age_minutes: 0,
 };
 
 /**

@@ -4,6 +4,8 @@ Covers the partition (by TP tier), the break-distance clamps, and the DECIDE
 engine over the four synthetic price paths the acceptance criteria name:
 straight-to-SL, pullback-continue, V-bounce, fakeout-reclaim — plus the
 conservative-only invariant of the modifier-decider pipeline."""
+import pytest
+
 from beacon_core.execution import staging as S
 from beacon_core.execution.staging import StagingContext as C, DEFAULT_STAGED as D
 
@@ -46,9 +48,12 @@ def test_break_distance_clamps():
     assert S.break_distance(D, atr=14.0, sl_dist=8.0) == 4.0
     # loose stop -> ATR term wins, but abs cap 8.0 bites at high ATR
     assert S.break_distance(D, atr=40.0, sl_dist=100.0) == 8.0     # 0.35*40=14 -> cap 8
-    # no ATR -> cash fallback (0 default -> None, fail-safe: never arms)
+    # No ATR -> the cash fallback, which is frozen at 0 (#250) and therefore off:
+    # break_distance returns None and the reclaim tranche never arms without a
+    # defined break. That was already the default; #250 removed the ability to
+    # set it, not the behaviour.
     assert S.break_distance(D, atr=None, sl_dist=8.0) is None
-    assert S.break_distance({**D, "reclaim_break_cash": 3.0}, atr=None, sl_dist=100.0) == 3.0
+    assert S.break_distance({**D, "reclaim_break_cash": 3.0}, atr=None, sl_dist=100.0) is None
 
 
 # ---- shared geometry for the DECIDE paths (BUY, zone 4180/4176, SL 4168, ATR 14) ----
@@ -346,20 +351,57 @@ def test_clean_entry_style():
 
 
 def test_clean_staged_config_valid_and_coerced():
-    out = S.clean_staged_config({"toe_in_tps": "2", "reclaim_break_atr": "0.4",
-                                 "enabled": True, "runner_ttl_minutes": 30})
-    assert out == {"toe_in_tps": 2, "reclaim_break_atr": 0.4, "enabled": True,
-                   "runner_ttl_minutes": 30}
+    out = S.clean_staged_config({"enabled": True, "deployed_ttl_minutes": "30"})
+    assert out == {"enabled": True, "deployed_ttl_minutes": 30}
     assert S.clean_staged_config({"nonsense_key": 5}) is None      # unknown keys dropped
     assert S.clean_staged_config(None) is None
 
 
+# The 13 that #250 deleted. Named individually so this fails loudly if one is
+# ever quietly reintroduced as config instead of as a constant.
+_DELETED_KNOBS = ("toe_in_tps", "runner_tps", "max_deferred_fraction",
+                  "min_deferred_fraction", "reclaim_break_atr", "reclaim_break_cash",
+                  "reclaim_break_max_frac_of_stop", "reclaim_break_abs_cap",
+                  "stop_offset_atr", "runner_ttl_minutes",
+                  "reclaim_pending_ttl_minutes", "reclaim_armed_ttl_minutes",
+                  "min_stop_atr")
+
+
+@pytest.mark.parametrize("knob", _DELETED_KNOBS)
+def test_a_deleted_tuning_knob_is_dropped_never_stored(knob):
+    """DROPPED, not rejected (#250). A saved row written by an older client still
+    carries these; 422-ing them would make the whole strategy unsaveable, and the
+    value would be ignored at read time anyway."""
+    assert S.clean_staged_config({knob: 0.5}) is None
+    assert S.clean_staged_config({"enabled": True, knob: 0.5}) == {"enabled": True}
+
+
+@pytest.mark.parametrize("knob", _DELETED_KNOBS)
+def test_a_deleted_knob_is_absent_from_the_effective_config(knob):
+    assert knob not in S.staged_config({knob: 0.5})
+    assert knob not in S.DEFAULT_STAGED
+
+
+def test_the_frozen_geometry_still_holds_the_values_it_shipped_with():
+    """#250 removed the CHOICE, not the behaviour. If a constant here ever drifts
+    from the default it replaced, staged entry silently changes shape — so the
+    numbers are pinned, and changing one has to be deliberate."""
+    assert (S.TOE_IN_TPS, S.RUNNER_TPS) == (1, 1)
+    assert (S.MIN_DEFERRED_FRACTION, S.MAX_DEFERRED_FRACTION) == (0.20, 0.60)
+    assert S.RECLAIM_BREAK_ATR == 0.35 and S.RECLAIM_BREAK_CASH == 0.0
+    assert S.RECLAIM_BREAK_MAX_FRAC_OF_STOP == 0.5
+    assert S.RECLAIM_BREAK_ABS_CAP == 8.0
+    assert S.STOP_OFFSET_ATR == 0.10
+    assert S.RUNNER_TTL_MINUTES == 45
+    assert S.RECLAIM_PENDING_TTL_MINUTES == 60
+    assert S.RECLAIM_ARMED_TTL_MINUTES == 60
+    assert S.MIN_STOP_ATR == 0.5
+
+
 def test_clean_staged_config_rejects_bad_values():
-    for bad in ({"max_deferred_fraction": 1.5},        # frac out of range
-                {"reclaim_break_atr": -1},             # negative
-                {"toe_in_tps": "abc"},                 # non-numeric
-                {"enabled": "yes"},                    # bool required
-                {"min_deferred_fraction": 0.8, "max_deferred_fraction": 0.5}):  # min>max
+    for bad in ({"enabled": "yes"},                    # bool required
+                {"deployed_ttl_minutes": -1},          # negative
+                {"max_entry_age_minutes": "abc"}):     # non-numeric
         try:
             S.clean_staged_config(bad)
             assert False, f"expected reject for {bad}"
@@ -372,10 +414,17 @@ def test_clean_staged_config_rejects_bad_values():
         pass
 
 
+def test_the_158_safety_bounds_stay_configurable():
+    """Not tuning numbers — brakes. Off by default, and #250's list of 13 leaves
+    them out on purpose."""
+    out = S.clean_staged_config({"deployed_ttl_minutes": 30, "max_entry_age_minutes": 90})
+    assert out == {"deployed_ttl_minutes": 30, "max_entry_age_minutes": 90}
+
+
 def test_staged_config_overlay_completes_cfg():
-    cfg = S.staged_config({"reclaim_break_atr": 0.5})
-    assert cfg["reclaim_break_atr"] == 0.5             # override applied
-    assert cfg["runner_ttl_minutes"] == D["runner_ttl_minutes"]   # default filled
+    cfg = S.staged_config({"deployed_ttl_minutes": 30})
+    assert cfg["deployed_ttl_minutes"] == 30           # override applied
+    assert cfg["enabled"] == D["enabled"]              # default filled
     assert S.staged_config(None) == D                 # no stored -> pure defaults
 
 

@@ -78,53 +78,56 @@ MODE_MARKET = "MARKET"
 MODE_STOP = "STOP"      # reclaim re-entry (fills when price trades back through)
 
 
-# Defaults grounded in the gold dumps (1h ATR ~12-16, zone widths ~$3-4, deep->SL
-# stops ~$6-12, TP ladders 2-5 deep). All tunable per (account, source) from the UI.
+# --- the geometry, FROZEN (#250) ---------------------------------------------
+# These were 13 per-(account, source) settings. Not one of them was ever changed
+# from the value below: every `staged` block ever written, live or in replay, is
+# exactly {"enabled": true} (checked across execution_strategies and every
+# replay run config in the 2026-08-20 dump). A setting nobody has set is not a
+# knob, it is undocumented surface area — it still has to be validated, stored,
+# rendered, cascaded and reasoned about, and it makes the engine look tunable
+# when the honest answer is that nobody knows what these should be.
+#
+# So they are constants now. Staged entry is on/off plus the two #158
+# safety bounds below, and nothing to tune. The values are
+# unchanged, so behaviour is identical; what is gone is the pretence of choice.
+# Grounded in the gold dumps (1h ATR ~12-16, zone widths ~$3-4, deep->SL stops
+# ~$6-12, TP ladders 2-5 deep).
+#
+# #250 replaces this partition/reclaim model outright with a fixed ladder driven
+# only by entry-level count and TP count. When that lands, most of what is below
+# goes with it — which is the other reason not to spend a config surface on it.
+TOE_IN_TPS = 1                      # nearest TP tiers deployed immediately
+RUNNER_TPS = 1                      # farthest TP tiers deployed at the deep edge
+MAX_DEFERRED_FRACTION = 0.60        # cap the deferred share of the ladder
+MIN_DEFERRED_FRACTION = 0.20        # ensure a tail exists (2-TP -> defer TP2)
+RECLAIM_BREAK_ATR = 0.35            # break this far beyond deep to arm (~$5 @ ATR14)
+RECLAIM_BREAK_CASH = 0.0            # used only when ATR is unavailable (0 = off)
+RECLAIM_BREAK_MAX_FRAC_OF_STOP = 0.5   # never arm past half-way to SL (protects R)
+RECLAIM_BREAK_ABS_CAP = 8.0         # hard $ cap (guards ATR-spike regimes)
+STOP_OFFSET_ATR = 0.10              # offset the reclaim STOP beyond deep (~$1.5)
+RUNNER_TTL_MINUTES = 45             # give up waiting for the deep-edge touch
+RECLAIM_PENDING_TTL_MINUTES = 60    # give up waiting for a break beyond deep
+RECLAIM_ARMED_TTL_MINUTES = 60      # give up waiting for the reclaim fill
+MIN_STOP_ATR = 0.5                  # below this, fall back to a single-shot entry
+
+# NOT frozen: the two #158 bounds below stay configurable. They are not tuning
+# numbers — they are safety valves that are OFF by default and exist to stop a
+# late-deploying tranche resting an order long after the control account's is
+# gone. #250's list of 13 excludes them for that reason. Nothing sets them today
+# either, but "we never needed the brake" is not an argument for removing it.
 DEFAULT_STAGED = {
-    "enabled": False,               # master flag; entry_style == "staged" turns it on
-    # --- partition (by_tp_tier): nearest TP -> toe-in, FARTHEST TP -> runner
-    #     (best R:R), the MIDDLE TPs -> the deferred reclaim tail. Self-scaling:
-    #     deeper ladders defer more size. ---
-    "toe_in_tps": 1,                # count of nearest TP tiers deployed immediately
-    "runner_tps": 1,                # count of farthest TP tiers deployed at the deep edge
-    "max_deferred_fraction": 0.60,  # cap the deferred share of the ladder
-    "min_deferred_fraction": 0.20,  # ensure a tail exists (2-TP -> defer TP2)
-    # --- break-then-reclaim geometry (ATR-relative, with clamps + cash fallback) ---
-    "reclaim_break_atr": 0.35,      # price must trade this far beyond the deep edge to arm (~$5 @ ATR14)
-    "reclaim_break_cash": 0.0,      # used only when ATR is unavailable (0 = disabled)
-    "reclaim_break_max_frac_of_stop": 0.5,   # never arm past half-way to SL (protects R)
-    "reclaim_break_abs_cap": 8.0,   # hard $ cap (guards ATR-spike regimes)
-    "stop_offset_atr": 0.10,        # offset the reclaim STOP trigger beyond the deep edge (~$1.5)
-    # --- per-tranche TTLs (minutes), each measured from when the tranche entered
-    #     its current wait state (the reclaim-armed clock starts on ARM, not open) ---
-    "runner_ttl_minutes": 45,       # give up waiting for the deep-edge touch (< the 60 entry TTL)
-    "reclaim_pending_ttl_minutes": 60,   # give up waiting for a break beyond deep
-    "reclaim_armed_ttl_minutes": 60,     # give up waiting for the reclaim fill
-    # --- how long a tranche's order may REST once deployed, and the absolute age
-    #     of the whole staged entry (#158). A tranche deploys late by design, and
-    #     its legs get a fresh TTL clock from that moment — so an unfilled staged
-    #     order can outlive a control account's by the pending wait. These two make
-    #     that window deliberate instead of inherited:
-    "deployed_ttl_minutes": 0,      # 0 = inherit the resolved entry TTL (today's behaviour)
-    "max_entry_age_minutes": 0,     # 0 = off; hard ceiling measured from the SIGNAL,
-                                    # expires any still-working staged leg past it
-    # --- guardrail: below this the stop is too tight to stage a break around;
-    #     the caller falls back to a single-shot entry. ---
-    "min_stop_atr": 0.5,
+    "enabled": False,               # entry_style == "staged" turns the engine on
+    "deployed_ttl_minutes": 0,      # 0 = inherit the resolved entry TTL (#158)
+    "max_entry_age_minutes": 0,     # 0 = off; ceiling measured from the SIGNAL (#158)
 }
 
 
 # ============================ config validation ===============================
-# Per-key kind for the staged block. "frac" = 0..1, "float+"/"int+" = non-negative.
+# Per-key kind for the staged block. One key: staged entry is on or off (#250).
+# A tuning key from an older client is DROPPED by clean_staged_config rather than
+# rejected, so a stale saved row cannot 422 the whole strategy on its next save.
 _STAGED_SPEC = {
     "enabled": "bool",
-    "toe_in_tps": "int+", "runner_tps": "int+",
-    "max_deferred_fraction": "frac", "min_deferred_fraction": "frac",
-    "reclaim_break_atr": "float+", "reclaim_break_cash": "float+",
-    "reclaim_break_max_frac_of_stop": "frac", "reclaim_break_abs_cap": "float+",
-    "stop_offset_atr": "float+",
-    "runner_ttl_minutes": "int+", "reclaim_pending_ttl_minutes": "int+",
-    "reclaim_armed_ttl_minutes": "int+", "min_stop_atr": "float+",
     "deployed_ttl_minutes": "int+", "max_entry_age_minutes": "int+",
 }
 
@@ -170,9 +173,6 @@ def clean_staged_config(raw) -> Optional[dict]:
         if k not in _STAGED_SPEC or v is None:
             continue
         out[k] = _coerce(_STAGED_SPEC[k], k, v)
-    lo, hi = out.get("min_deferred_fraction"), out.get("max_deferred_fraction")
-    if lo is not None and hi is not None and lo > hi:
-        raise ValueError("min_deferred_fraction cannot exceed max_deferred_fraction")
     return out or None
 
 
@@ -216,7 +216,7 @@ def reclaim_stop_level(direction: str, deep_edge: float, atr: Optional[float],
     """Trigger level for the reclaim STOP: the deep edge, optionally offset by
     `stop_offset_atr` so a fill needs a slightly stronger reclaim. Offset is added
     in the profit/fill direction (BUY STOP above deep, SELL STOP below deep)."""
-    off = float(cfg.get("stop_offset_atr") or 0.0) * float(atr) if atr else 0.0
+    off = STOP_OFFSET_ATR * float(atr) if atr else 0.0
     return deep_edge + off if direction == "BUY" else deep_edge - off
 
 
@@ -230,20 +230,16 @@ def break_distance(cfg: dict, atr: Optional[float],
     `reclaim_break_max_frac_of_stop` of the deep-edge→SL distance (so a re-entry is
     never armed past half-way to the stop), and never more than the absolute
     `reclaim_break_abs_cap` (guards 4h/daily ATR spikes)."""
-    m = cfg.get("reclaim_break_atr")
-    if atr and m:
-        base = float(atr) * float(m)
+    if atr and RECLAIM_BREAK_ATR:
+        base = float(atr) * RECLAIM_BREAK_ATR
     else:
-        c = cfg.get("reclaim_break_cash")
-        base = float(c) if c else None
+        base = RECLAIM_BREAK_CASH or None
     if base is None:
         return None
-    frac = cfg.get("reclaim_break_max_frac_of_stop")
-    if frac and sl_dist:
-        base = min(base, float(frac) * float(sl_dist))
-    cap = cfg.get("reclaim_break_abs_cap")
-    if cap:
-        base = min(base, float(cap))
+    if RECLAIM_BREAK_MAX_FRAC_OF_STOP and sl_dist:
+        base = min(base, RECLAIM_BREAK_MAX_FRAC_OF_STOP * float(sl_dist))
+    if RECLAIM_BREAK_ABS_CAP:
+        base = min(base, RECLAIM_BREAK_ABS_CAP)
     return base
 
 
@@ -301,10 +297,9 @@ def entry_expiry_reason(cfg: dict, *, leg_age_minutes: float,
 def stop_too_tight(sl_dist: float, atr: Optional[float], cfg: dict) -> bool:
     """True when |entry-SL| is below `min_stop_atr` ATRs — too tight to bother
     staging a break-then-reclaim around (the caller falls back to a plain entry)."""
-    m = cfg.get("min_stop_atr")
-    if not (atr and m):
+    if not (atr and MIN_STOP_ATR):
         return False
-    return sl_dist < float(m) * float(atr)
+    return sl_dist < MIN_STOP_ATR * float(atr)
 
 
 # ============================ partition =======================================
@@ -328,22 +323,22 @@ def partition_tps(tps: list, cfg: dict) -> dict:
     if n == 1:
         return {TOE_IN: [1], RUNNER: [], RECLAIM: []}          # all toe-in
 
-    t = max(1, int(cfg.get("toe_in_tps", 1)))
-    r = max(0, int(cfg.get("runner_tps", 1)))
+    t = max(1, TOE_IN_TPS)
+    r = max(0, RUNNER_TPS)
     toe = idx[:t]
     run = [i for i in idx[max(t, n - r):]] if r > 0 else []    # farthest r, no overlap with toe
     rec = [i for i in idx if i not in toe and i not in run]
 
     # min tail: if the tier split left no deferred legs, move the farthest runner
     # leg into the tail (the 2-TP case) so there is always something to confirm.
-    min_frac = float(cfg.get("min_deferred_fraction", 0.0) or 0.0)
+    min_frac = MIN_DEFERRED_FRACTION
     if not rec and run and (min_frac > 0.0):
         rec = [run[-1]]
         run = run[:-1]
 
     # max tail: cap the deferred share; push the excess NEAREST reclaim legs back
     # to the runner so no more than the cap is gated behind a reclaim.
-    max_frac = float(cfg.get("max_deferred_fraction", 1.0) or 1.0)
+    max_frac = MAX_DEFERRED_FRACTION
     if max_frac < 1.0 and rec:
         max_rec = int(max_frac * n + 1e-9)
         while len(rec) > max(1, max_rec):
@@ -424,7 +419,7 @@ def build_staged_legs(*, direction: str, tps: list, near_edge, deep_edge, sl, at
     role_by_tp = {i: role for role, idxs in part.items() for i in idxs}
     atrD = _D(atr) if atr is not None else None
     priceD = _D(current_price) if current_price is not None else None
-    off = (_D(cfg.get("stop_offset_atr") or 0) * atrD) if atrD else _D(0)
+    off = (_D(STOP_OFFSET_ATR) * atrD) if atrD else _D(0)
     reclaim_trig = deep + off if direction == "BUY" else deep - off
 
     # --- toe-in mode, decided ONCE (it is the same for every toe-in leg) --------
@@ -540,7 +535,7 @@ def _mechanical_decision(role, state, ctx: StagingContext, cfg: dict,
             # this never increases the tranche's risk versus the resting LIMIT.
             return StagingDecision(DEPLOY, role, mode=MODE_MARKET, level=ctx.deep_edge,
                                    reason="price reached deep edge -> deploy MARKET")
-        if minutes_in_state >= float(cfg.get("runner_ttl_minutes", 60)):
+        if minutes_in_state >= RUNNER_TTL_MINUTES:
             return StagingDecision(EXPIRE, role, reason="runner TTL: deep edge untouched")
         return StagingDecision(WAIT, role, reason="waiting for deep edge")
 
@@ -551,11 +546,11 @@ def _mechanical_decision(role, state, ctx: StagingContext, cfg: dict,
                 lvl = reclaim_stop_level(ctx.direction, ctx.deep_edge, ctx.atr, cfg)
                 return StagingDecision(DEPLOY, role, mode=MODE_STOP, level=lvl,
                                        reason="broke beyond deep edge -> arm reclaim STOP")
-            if minutes_in_state >= float(cfg.get("reclaim_pending_ttl_minutes", 60)):
+            if minutes_in_state >= RECLAIM_PENDING_TTL_MINUTES:
                 return StagingDecision(EXPIRE, role, reason="reclaim TTL: no break beyond deep")
             return StagingDecision(WAIT, role, reason="waiting for break beyond deep edge")
         if state == ARMED:
-            if minutes_in_state >= float(cfg.get("reclaim_armed_ttl_minutes", 60)):
+            if minutes_in_state >= RECLAIM_ARMED_TTL_MINUTES:
                 return StagingDecision(EXPIRE, role, reason="reclaim TTL: armed but never reclaimed")
             return StagingDecision(WAIT, role, reason="armed; waiting for reclaim fill")
         return StagingDecision(WAIT, role, reason=f"reclaim {state}")
