@@ -29,6 +29,7 @@ from beacon_core.execution import strategy as ST
 from beacon_core.execution import staging as STG
 from beacon_core.execution import placement as PLACE     # broker-refusal recovery (#221)
 from beacon_core.execution import sl_override as SLO     # per-channel stop (#249)
+from beacon_core.execution import ladder as LAD          # staged-entry ladder (#250)
 from beacon_core.brokers import build_adapter, symbol_map
 from beacon_core.brokers import fx
 from beacon_core.tasks import spawn_bg
@@ -145,28 +146,6 @@ async def _trend_read(adapter, epic: str, timeframe: str, ema_period: int,
         if a and a > 0:
             dist_atr = abs(price - val) / a
     return above, slope, dist_atr
-
-
-async def _atr_on(adapter, epic: str, timeframe: str, period: int = 14):
-    """Absolute ATR(period) on `timeframe`, or None on any failure (fail-open).
-    Used by the confirmation-staged entry (#129) to scale the break/reclaim
-    geometry; only fetched when a strategy sets entry_style='staged'."""
-    resolution = TF_RESOLUTION.get(timeframe)
-    if not resolution:
-        return None
-    try:
-        bars = await adapter.get_bars(epic, resolution, max_bars=250)
-    except Exception as exc:
-        log.info("staged-ATR bars failed (%s/%s): %s", epic, resolution, exc)
-        return None
-    highs = [float(b["h"]) for b in bars if b.get("h") is not None]
-    lows = [float(b["l"]) for b in bars if b.get("l") is not None]
-    closes = [float(b["c"]) for b in bars if b.get("c") is not None]
-    if len(highs) == len(closes) == len(lows) and len(closes) >= 15:
-        a = _atr(highs, lows, closes, int(period))
-        if a and a > 0:
-            return a
-    return None
 
 
 async def _adx_read(adapter, epic: str, timeframe: str, period: int = 14):
@@ -493,73 +472,60 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         # Default 0.5 (50%): catches parse-artifact TPs (e.g. tp=1530 vs gold ~4180,
         # ~60% away) while never tripping a real target. Tune via the entry policy.
         max_tp_pct = Decimal(str(planner_cfg.get("max_tp_distance_pct", "0.5")))
-        # --- Confirmation-staged entry (#129): when the resolved strategy sets
-        # entry_style='staged', plan tranche legs (toe-in now / runner at the deep
-        # edge / reclaim STOP armed on a break) instead of the single-shot fanout.
-        # Falls back to single-shot if ATR is unavailable or the stop is too tight
-        # to stage a break around. Everything else (sizing, caps, risk) is unchanged.
+        # --- Staged entry: THE LADDER (#250) ---------------------------------
+        # `entry_style: staged` plans the signal as a table of rungs instead of
+        # the single-shot fanout. Each row says when to place an order, what
+        # kind, at which level and for which target; the rows that fire on the
+        # signal go out now and the rest are persisted for the monitor.
+        #
+        # This replaced a partition/reclaim model with thirteen tuning numbers,
+        # none of which anyone had ever changed. The ladder is the config.
         is_staged = str(planner_cfg.get("entry_style") or "") == "staged"
-        staged_geo = None
+        ladder_rows = None
         if is_staged:
-            staged_cfg = STG.staged_config(planner_cfg.get("staged"))
-            _near, _deep = STG.zone_edges(parsed.direction, parsed.entry_from, parsed.entry_to)
-            _satr = await _atr_on(adapter, smap.broker_epic, "1h")
-            _sl_dist = abs(float(_deep) - float(parsed.sl))
-            if _satr is None or STG.stop_too_tight(_sl_dist, _satr, staged_cfg):
+            ladder_rows = planner_cfg.get("ladder") or LAD.DEFAULT_LADDER
+            # The chase guard decides whether the SIGNAL is taken at all, and it
+            # must decide that the same way for both entry styles or the A/B is
+            # comparing different populations (#155). build_plan is pure and
+            # cheap, so ask it: no legs means beyond_tolerance="skip" declined the
+            # whole signal, and a laddered account declines it too.
+            _control = build_plan(
+                parsed, current_price=current,
+                candle_high=candle_high, candle_low=candle_low,
+                min_stop_distance=smap.min_stop_distance,
+                max_tp_distance_pct=max_tp_pct if max_tp_pct > 0 else None,
+                honor_market_hint=bool(planner_cfg.get("honor_market_hint", True)),
+                chase_tolerance_r=Decimal(str(planner_cfg.get("chase_tolerance_r", "0.25"))),
+                chase_tolerance_atr=Decimal(str(planner_cfg.get("chase_tolerance_atr", "0"))),
+                beyond_tolerance=str(planner_cfg.get("beyond_tolerance", "limit")))
+            _rungs = [] if not _control.legs else LAD.plan_ladder(
+                parsed, ladder_rows,
+                max_tp_distance_pct=max_tp_pct if max_tp_pct > 0 else None,
+                min_stop_distance=smap.min_stop_distance)
+            if not _rungs:
+                # Every row was dropped — the signal has no TP any row targets, or
+                # the geometry puts each rung on the wrong side of its own stop.
+                # Fall back to the ordinary fanout rather than place nothing.
                 is_staged = False
-                # The Trade row doesn't exist yet, so this event can't carry a
-                # trade_id — Trade.entry_style is the durable marker (#156); this
-                # event explains WHY the fallback happened.
+                ladder_rows = None
                 session.add(Event(kind="staged_fallback",
                                   payload={"signal_id": sig.id, "account_id": acct.id,
-                                           "reason": "no_atr" if _satr is None else "stop_too_tight",
-                                           "atr": _satr, "stop_dist": _sl_dist}))
-                log.info("signal %s acct %s: staged -> single-shot fallback (atr=%s stop=%s)",
-                         sig.id, acct.id, _satr, _sl_dist)
+                                           "reason": "no_rung_the_signal_supports",
+                                           "tps": len(parsed.tps or [])}))
+                log.info("signal %s acct %s: ladder -> single-shot fallback (no usable rung)",
+                         sig.id, acct.id)
             else:
-                # The MARKET/"enter now" hint applies to the toe-in too (#151):
-                # without it a staged account rests a LIMIT at the zone edge and
-                # misses a fill the control accounts take, biasing the comparison.
-                _market_hint = (bool(planner_cfg.get("honor_market_hint", True))
-                                and (parsed.order_type_hint or "").upper() == "MARKET")
-                plan = FanoutPlan(
-                    symbol=parsed.symbol, direction=parsed.direction, order_type="LIMIT",
-                    legs=STG.build_staged_legs(
-                        direction=parsed.direction, tps=parsed.tps, near_edge=_near,
-                        deep_edge=_deep, sl=parsed.sl, atr=_satr, current_price=current,
-                        cfg=staged_cfg, min_stop_distance=smap.min_stop_distance,
-                        market_hint=_market_hint,
-                        chase_tolerance_r=Decimal(str(planner_cfg.get("chase_tolerance_r", "0.25"))),
-                        chase_tolerance_atr=Decimal(str(planner_cfg.get("chase_tolerance_atr", "0"))),
-                        # Entry-guard parity with build_plan — the staged arm must
-                        # take the same signals and drop the same legs (#152/#153/#155).
-                        beyond_tolerance=str(planner_cfg.get("beyond_tolerance", "limit")),
-                        max_tp_distance_pct=max_tp_pct if max_tp_pct > 0 else None,
-                        candle_high=candle_high, candle_low=candle_low))
-                staged_geo = {"near": _near, "deep": _deep, "atr": _satr, "cfg": staged_cfg}
-                # Audit the entry decision the way the single-shot path does, and
-                # record every leg the guards dropped — otherwise a staged trade
-                # that placed 3 legs instead of 5 leaves no trace of the other two
-                # (#157). Mirrors the entry_chase_guard event below.
-                _toe = [l for l in plan.legs if l.tranche == STG.TOE_IN]
-                _dropped = [{"tp_index": l.tp_index, "tranche": l.tranche,
-                             "entry": str(l.entry), "reason": l.skip_reason}
-                            for l in plan.legs if not l.valid]
-                if _market_hint or _dropped or not plan.legs:
-                    _reached_near = (current <= Decimal(str(_near))
-                                     if parsed.direction == "BUY"
-                                     else current >= Decimal(str(_near)))
-                    session.add(Event(
-                        kind="staged_entry_decision",
-                        payload={"signal_id": sig.id, "account_id": acct.id,
-                                 "current_price": str(current), "near_edge": str(_near),
-                                 "market_hint": _market_hint,
-                                 "mode": (_toe[0].order_type if _toe else None),
-                                 "reached_near": bool(_reached_near),
-                                 # no legs at all = beyond_tolerance="skip" declined
-                                 # the whole signal, exactly as build_plan would
-                                 "skipped_signal": not plan.legs,
-                                 "dropped_legs": _dropped}))
+                plan = FanoutPlan(symbol=parsed.symbol, direction=parsed.direction,
+                                  order_type="LIMIT", legs=_rungs)
+                session.add(Event(kind="staged_entry_decision", payload={
+                    "signal_id": sig.id, "account_id": acct.id,
+                    "current_price": str(current),
+                    "mid": str(LAD.mid_level(parsed.entry_to, parsed.sl)),
+                    "rungs": [{"when": l.tranche, "order": l.order_type,
+                               "entry": str(l.entry), "tp_index": l.tp_index,
+                               "trigger": str(l.trigger) if l.trigger is not None else None}
+                              for l in plan.legs],
+                    "cancel_on": LAD.cancel_rows(ladder_rows)}))
         if not is_staged:
             plan = build_plan(
                 parsed, current_price=current,
@@ -699,8 +665,34 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             min_lot=Decimal(str(smap.min_lot)),
             lot_step=Decimal(str(smap.lot_step)),
         )
-        size_legs(plan.legs, equity=equity, risk=risk, instrument=instrument,
-                  fx_factor=fx_factor)
+        if ladder_rows is not None:
+            # #250: every rung sized UP FRONT, against the risk the ordinary
+            # fanout would have taken on this same signal. Fill every rung and run
+            # to the stop and the loss is the same money the single-shot entry
+            # would have lost — the ladder changes WHEN size arrives, never HOW
+            # MUCH. Sizing a rung when it triggers would instead let a signal that
+            # walks to MID and back stack risk without limit.
+            _target = LAD.single_shot_risk(
+                parsed, current_price=current, equity=equity, risk=risk,
+                instrument=instrument, fx_factor=fx_factor,
+                candle_high=candle_high, candle_low=candle_low,
+                min_stop_distance=smap.min_stop_distance,
+                max_tp_distance_pct=max_tp_pct if max_tp_pct > 0 else None,
+                honor_market_hint=bool(planner_cfg.get("honor_market_hint", True)),
+                chase_tolerance_r=Decimal(str(planner_cfg.get("chase_tolerance_r", "0.25"))),
+                chase_tolerance_atr=Decimal(str(planner_cfg.get("chase_tolerance_atr", "0"))),
+                beyond_tolerance=str(planner_cfg.get("beyond_tolerance", "limit")))
+            _laddered = LAD.size_ladder(plan.legs, budget=_target,
+                                        instrument=instrument, fx_factor=fx_factor)
+            log.info("signal %s acct %s: ladder sized %s rungs to %s (single-shot %s)",
+                     sig.id, acct.id, len(plan.legs), _laddered, _target)
+            session.add(Event(kind="ladder_sized", payload={
+                "signal_id": sig.id, "account_id": acct.id,
+                "single_shot_risk": str(_target), "ladder_risk": str(_laddered),
+                "rungs": len(plan.legs)}))
+        else:
+            size_legs(plan.legs, equity=equity, risk=risk, instrument=instrument,
+                      fx_factor=fx_factor)
 
         # Risk-limit config, loaded here because it also carries the per-signal cap.
         rl_cfg = await get_setting(session, "risk_limits", None)
@@ -966,7 +958,7 @@ async def _execute_on_account(session, sig, parsed, source, acct,
 
         placed = 0
         placed_lots = Decimal("0")     # size that actually reached the broker (#179)
-        tranche_legs = {"toe_in": [], "runner": [], "reclaim": []}
+        tranche_legs = {}          # ladder trigger -> the Leg ids it owns (#250)
         for pleg in valid:
             leg = Leg(trade_id=trade.id, tp_index=pleg.tp_index,
                       order_type=pleg.order_type, entry=pleg.entry, tp=pleg.tp,
@@ -975,11 +967,12 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             await session.flush()
             if getattr(pleg, "tranche", None):
                 tranche_legs.setdefault(pleg.tranche, []).append(leg.id)
-            # Staged runner/reclaim legs are NOT sent to the broker now — the
-            # monitor deploys the runner at the deep edge and arms the reclaim STOP
-            # after a break (#129). Persist as 'staged' with the level/mode on the
-            # Leg row so the monitor can place it later without re-planning.
-            if getattr(pleg, "tranche", None) in ("runner", "reclaim"):
+            # A rung that waits for a trigger is NOT sent to the broker now (#250):
+            # the monitor places it when price reaches its level. Persist as
+            # 'staged' with the level/mode on the Leg row so the monitor can place
+            # it later without re-planning. Only `signal` rows go out immediately.
+            if (getattr(pleg, "tranche", None)
+                    and pleg.tranche != LAD.WHEN_SIGNAL):
                 leg.status = "staged"
                 session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="staged_leg",
                                   payload={"tranche": pleg.tranche, "mode": pleg.order_type,
@@ -1093,26 +1086,39 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         # Persist the staged-entry state (#129) so the monitor can drive the DECIDE
         # engine each tick: the geometry + frozen config + one tranche row per role
         # (toe-in already deployed; runner/reclaim pending, with their own TTL clock).
-        if staged_geo is not None:
+        if ladder_rows is not None:
+            _mid = LAD.mid_level(parsed.entry_to, parsed.sl)
             session.add(StagedEntry(
                 trade_id=trade.id, account_id=acct.id, direction=parsed.direction,
-                near_edge=Decimal(str(staged_geo["near"])), deep_edge=Decimal(str(staged_geo["deep"])),
-                sl=parsed.sl, atr=Decimal(str(staged_geo["atr"])),
-                max_adverse_beyond_deep=Decimal("0"), cfg=staged_geo["cfg"]))
-            for _role in ("toe_in", "runner", "reclaim"):
-                _ids = tranche_legs.get(_role) or []
+                near_edge=parsed.entry_from, deep_edge=parsed.entry_to,
+                sl=parsed.sl, atr=None,
+                max_adverse_beyond_deep=Decimal("0"),
+                cfg={"ladder": ladder_rows,
+                     **STG.staged_config(planner_cfg.get("staged"))}))
+            for _when, _ids in tranche_legs.items():
                 if not _ids:
                     continue
-                _pl = next((p for p in valid if getattr(p, "tranche", None) == _role), None)
+                _pl = next((p for p in valid if getattr(p, "tranche", None) == _when), None)
                 session.add(StagedTranche(
-                    trade_id=trade.id, role=_role,
-                    state="deployed" if _role == "toe_in" else "pending",
+                    trade_id=trade.id, role=_when,
+                    state="deployed" if _when == LAD.WHEN_SIGNAL else "pending",
                     mode=(_pl.order_type if _pl else None),
                     trigger_level=(_pl.trigger if _pl and _pl.trigger is not None else None),
                     leg_ids=_ids))
-            log.info("signal %s acct %s: STAGED entry (toe-in %s / runner %s / reclaim %s legs)",
-                     sig.id, acct.id, len(tranche_legs["toe_in"]),
-                     len(tranche_legs["runner"]), len(tranche_legs["reclaim"]))
+            # A `cancel everything else` row owns no legs, so it needs a row of its
+            # own or the monitor has nothing to notice. Its trigger level is the
+            # price that fires it — TP1 today, resolved here where the TPs are known.
+            for _when in LAD.cancel_rows(ladder_rows):
+                _lvl = (parsed.tps[0] if _when == LAD.WHEN_TP1 and parsed.tps
+                        else _mid if _when == LAD.WHEN_MID else None)
+                if _lvl is None:
+                    continue
+                session.add(StagedTranche(
+                    trade_id=trade.id, role=f"cancel:{_when}", state="pending",
+                    mode="CANCEL", trigger_level=Decimal(str(_lvl)), leg_ids=[]))
+            log.info("signal %s acct %s: LADDER entry (%s rungs across %s triggers)",
+                     sig.id, acct.id, sum(len(v) for v in tranche_legs.values()),
+                     len(tranche_legs))
 
         await session.commit()
         await bus.publish(CH_TRADE_OPENED, {"trade_id": trade.id, "account_id": acct.id,

@@ -559,6 +559,39 @@ def test_an_unparseable_sl_distance_is_refused():
     assert exc.value.status_code == 422
 
 
+# ------------------------------------------------------------ ladder (#250)
+def test_a_valid_ladder_is_stored_normalised():
+    out = S._clean_entry_policy({"ladder": [
+        {"when": "signal", "action": "open", "order": "position",
+         "level": "entry_from", "target": "1"},
+        {"when": "tp1", "action": "cancel_all"}]})
+    assert out["ladder"][0]["order"] == "POSITION"
+    assert out["ladder"][0]["level"] == "ENTRY_FROM"
+    assert out["ladder"][0]["target"] == 1
+    assert out["ladder"][1] == {"when": "tp1", "action": "cancel_all"}
+
+
+@pytest.mark.parametrize("bad", [
+    [{"when": "eventually", "action": "open", "order": "POSITION",
+      "level": "MID", "target": 1}],
+    [{"when": "signal", "action": "open", "order": "POSITION",
+      "level": "MID", "target": 0}],
+    [{"when": "mid", "action": "open", "order": "POSITION",
+      "level": "MID", "target": 1}],                       # never opens anything
+])
+def test_a_bad_ladder_row_is_a_422_not_a_silently_dropped_rung(bad):
+    """A ladder missing a rung is a different strategy from the one that was
+    saved, so the write fails loudly instead of storing something else."""
+    with pytest.raises(HTTPException) as exc:
+        S._clean_entry_policy({"ladder": bad})
+    assert exc.value.status_code == 422
+
+
+def test_ladder_is_a_known_entry_policy_key():
+    from beacon_core.execution.strategy import ENTRY_POLICY_KEYS
+    assert "ladder" in ENTRY_POLICY_KEYS
+
+
 def test_sl_distance_is_a_known_entry_policy_key():
     """Not in ENTRY_POLICY_KEYS = dropped by the cascade merge, and the setting
     silently does nothing. #249 called this failure mode out by name."""

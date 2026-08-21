@@ -6,9 +6,9 @@ different bot and is worse than useless, so every behavioural decision below is
 delegated to the shipped function:
 
     execution/planner.build_plan          entry model, chase guard, TP geometry
-    execution/staging.build_staged_legs   the tranche partition + deploy levels
-    execution/staging.decide_tranche      the DECIDE engine (runner / reclaim)
-    execution/staging.stop_too_tight      the staged -> single-shot fallback
+    execution/ladder.plan_ladder          the rungs the operator's table defines
+    execution/ladder.size_ladder          pre-sizing to the single-shot total
+    execution/ladder.reached              has price arrived at a rung's level
     execution/strategy.evaluate_filter_rules   the filtration pillar
     execution/strategy.cancel_reason      what retires a resting order (#161)
     risk/sizing.size_legs / cap_total_risk     lots and the per-signal cap
@@ -59,6 +59,7 @@ from decimal import Decimal
 from typing import Dict, List, Optional
 
 from beacon_core.execution import staging as STG
+from beacon_core.execution import ladder as LAD
 from beacon_core.execution import strategy as ST
 from beacon_core.execution.planner import FanoutPlan, build_plan, validate_signal
 from beacon_core.parsing.models import ParsedSignal
@@ -73,7 +74,8 @@ from .variants import RATCHET_SAME_BAR, ResolvedConfig, Variant
 
 # Roles whose legs are NOT placed at signal time — the monitor deploys them when
 # the DECIDE engine says so.
-DEFERRED_ROLES = (STG.RUNNER, STG.RECLAIM)
+# Every rung except the one that fires when the signal arrives waits for a
+# level, so it is not placed at plan time (#250).
 
 SINGLE_SHOT = "single_shot"
 STAGED = "staged"
@@ -175,33 +177,40 @@ def plan_trade(*, signal: ParsedSignal, signal_id: int, source_id, account_id: i
     entry_style = SINGLE_SHOT
     staged_cfg = staged_geo = None
     want_staged = str(ep.get("entry_style") or "") == STAGED
+    ladder_rows = None
     if want_staged:
         staged_cfg = STG.staged_config(ep.get("staged"))
-        near, deep = STG.zone_edges(signal.direction, signal.entry_from, signal.entry_to)
-        atr = mc.atr_1h
-        sl_dist = abs(float(deep) - float(signal.sl))
-        # The SAME fallback the executor takes (#156): no 1h ATR, or a stop too
-        # tight to stage a break around, and the account runs single-shot. Without
-        # it a replayed "staged" arm would silently include trades live ran flat.
-        if atr is None or STG.stop_too_tight(sl_dist, atr, staged_cfg):
+        ladder_rows = ep.get("ladder") or LAD.DEFAULT_LADDER
+        # Same guards, and the same whole-signal chase skip, as the control arm —
+        # a replayed staged arm that took signals live skipped would be comparing
+        # different populations (#152/#155).
+        _control = build_plan(
+            signal, current_price=mc.current_price,
+            candle_high=mc.candle_high, candle_low=mc.candle_low,
+            min_stop_distance=variant.min_stop_distance,
+            max_tp_distance_pct=max_tp_pct if max_tp_pct > 0 else None,
+            honor_market_hint=honor_hint, chase_tolerance_r=chase_r,
+            chase_tolerance_atr=chase_atr, beyond_tolerance=beyond)
+        if not _control.legs:
+            return None, "chase_guard_skip"
+        legs = LAD.plan_ladder(
+            signal, ladder_rows,
+            max_tp_distance_pct=max_tp_pct if max_tp_pct > 0 else None,
+            min_stop_distance=variant.min_stop_distance)
+        # The SAME fallback the executor takes: no row the signal can support (no
+        # such TP, or geometry that puts a rung on the wrong side of its own stop)
+        # and the account runs single-shot. Without it a replayed "staged" arm
+        # would silently include trades live ran flat.
+        if not legs:
             want_staged = False
+            ladder_rows = None
         else:
-            market_hint = honor_hint and (signal.order_type_hint or "").upper() == "MARKET"
-            legs = STG.build_staged_legs(
-                direction=signal.direction, tps=signal.tps, near_edge=near,
-                deep_edge=deep, sl=signal.sl, atr=atr, current_price=mc.current_price,
-                cfg=staged_cfg, min_stop_distance=variant.min_stop_distance,
-                market_hint=market_hint, chase_tolerance_r=chase_r,
-                chase_tolerance_atr=chase_atr, beyond_tolerance=beyond,
-                max_tp_distance_pct=max_tp_pct if max_tp_pct > 0 else None,
-                candle_high=mc.candle_high, candle_low=mc.candle_low)
-            if not legs:
-                # beyond_tolerance="skip" declined the whole signal (#155).
-                return None, "chase_guard_skip"
             plan = FanoutPlan(symbol=signal.symbol, direction=signal.direction,
                               order_type="LIMIT", legs=legs)
             entry_style = STAGED
-            staged_geo = {"near": float(near), "deep": float(deep), "atr": float(atr)}
+            staged_geo = {"mid": float(LAD.mid_level(signal.entry_to, signal.sl)),
+                          "tp1": float(signal.tps[0]) if signal.tps else None,
+                          "cancel_on": LAD.cancel_rows(ladder_rows)}
     if entry_style == SINGLE_SHOT:
         plan = build_plan(
             signal, current_price=mc.current_price,
@@ -213,8 +222,24 @@ def plan_trade(*, signal: ParsedSignal, signal_id: int, source_id, account_id: i
         if not plan.legs:
             return None, "chase_guard_skip"
 
-    size_legs(plan.legs, equity=acct.equity, risk=cfg.risk,
-              instrument=variant.instrument, fx_factor=acct.fx_factor)
+    if ladder_rows is not None:
+        # #250: pre-sized to what the ORDINARY fanout would have risked on this
+        # same signal, so a fully-filled ladder loses the same money the
+        # single-shot entry would have. Measured, not assumed — the same call the
+        # executor makes, so a backtested ladder and a live one stake the same.
+        _target = LAD.single_shot_risk(
+            signal, current_price=mc.current_price, equity=acct.equity,
+            risk=cfg.risk, instrument=variant.instrument, fx_factor=acct.fx_factor,
+            candle_high=mc.candle_high, candle_low=mc.candle_low,
+            min_stop_distance=variant.min_stop_distance,
+            max_tp_distance_pct=max_tp_pct if max_tp_pct > 0 else None,
+            honor_market_hint=honor_hint, chase_tolerance_r=chase_r,
+            chase_tolerance_atr=chase_atr, beyond_tolerance=beyond)
+        LAD.size_ladder(plan.legs, budget=_target,
+                        instrument=variant.instrument, fx_factor=acct.fx_factor)
+    else:
+        size_legs(plan.legs, equity=acct.equity, risk=cfg.risk,
+                  instrument=variant.instrument, fx_factor=acct.fx_factor)
 
     # Per-signal risk cap (#78) — the same scale-down the executor applies before
     # anything reaches the risk-limit check.
@@ -233,7 +258,7 @@ def plan_trade(*, signal: ParsedSignal, signal_id: int, source_id, account_id: i
     initial_sl = float(signal.sl)
     sim_legs: List[F.SimLeg] = []
     for l in valid:
-        deferred = l.tranche in DEFERRED_ROLES
+        deferred = bool(l.tranche) and l.tranche != LAD.WHEN_SIGNAL
         sim_legs.append(F.SimLeg(
             tp_index=l.tp_index, order_type=l.order_type, entry=float(l.entry),
             tp=float(l.tp), sl=float(l.sl), initial_sl=initial_sl,
@@ -258,8 +283,8 @@ def plan_trade(*, signal: ParsedSignal, signal_id: int, source_id, account_id: i
 
 
 def _build_tranches(legs: List[F.SimLeg], at: dt.datetime) -> List[Tranche]:
-    """Group the planned legs by tranche role, preserving `staging.ROLES` order so
-    the DECIDE loop is deterministic regardless of TP-ladder depth."""
+    """One tranche per ladder trigger, in `ladder.WHENS` order so the step loop is
+    deterministic regardless of how deep the TP ladder goes (#250)."""
     by_role: Dict[str, Tranche] = {}
     for i, leg in enumerate(legs):
         role = leg.tranche
@@ -268,12 +293,12 @@ def _build_tranches(legs: List[F.SimLeg], at: dt.datetime) -> List[Tranche]:
         t = by_role.get(role)
         if t is None:
             t = Tranche(role=role, state_since=at)
-            # A toe-in is placed by the executor at signal time, so it is already
+            # The `signal` rung is placed at signal time, so it is already
             # deployed when the trade starts existing.
-            t.state = STG.DEPLOYED if role == STG.TOE_IN else STG.PENDING
+            t.state = STG.DEPLOYED if role == LAD.WHEN_SIGNAL else STG.PENDING
             by_role[role] = t
         t.leg_indices.append(i)
-    return [by_role[r] for r in STG.ROLES if r in by_role]
+    return [by_role[r] for r in LAD.WHENS if r in by_role]
 
 
 # ============================ the bar step ====================================
@@ -332,58 +357,77 @@ def _drop_pending(leg: F.SimLeg, ts) -> None:
 
 # --- 1. staged DECIDE ---------------------------------------------------------
 def _staged_step(trade: SimTrade, bar: B.Bar) -> None:
-    """Run the shipped DECIDE engine for every unresolved tranche.
+    """Run the shipped LADDER for every unresolved rung (#250).
 
     The monitor feeds it a live snapshot each tick; here the snapshot is the bar.
-    Both price inputs are the bar's ADVERSE EXTREME, not its close:
+    The entry-side price input is the bar's ADVERSE EXTREME, not its close: a
+    monitor polling every few seconds sees the extreme, and reading the close
+    would under-deploy exactly the rungs a resting level is placed to catch, so
+    the replayed ladder would diverge from the live one it stands in for.
 
-      * `max_adverse_beyond_deep` — a break beyond the deep edge that retraced
-        inside the minute is still a break, and reading the close would
-        systematically under-arm the reclaim.
-      * `price`, which `_mechanical_decision` uses to ask whether price has
-        reached the deep edge. A monitor polling every few seconds sees the
-        extreme; reading the close would under-deploy the runner on exactly the
-        wicks a deep-edge LIMIT is placed to catch, so the replayed staged arm
-        would diverge from the live one it is meant to stand in for."""
-    geo, cfg = trade.staged_geo, trade.staged_cfg
-    if not geo or not cfg:
+    `ladder.reached` / `reached_target` are the same predicates the monitor calls,
+    so a rung triggers here on the same price it triggers on live."""
+    geo = trade.staged_geo
+    if not geo:
         return
     adverse_px = B.adverse_extreme(trade.direction, bar)
-    trade.max_adverse_beyond_deep = max(
-        trade.max_adverse_beyond_deep,
-        STG.beyond_deep(trade.direction, adverse_px, geo["deep"]))
-    ctx = STG.StagingContext(
-        direction=trade.direction, near_edge=geo["near"], deep_edge=geo["deep"],
-        sl=float(trade.initial_sl), price=adverse_px, atr=geo.get("atr"),
-        max_adverse_beyond_deep=trade.max_adverse_beyond_deep)
+
+    # A cancel row first: reaching TP1 pulls every other rung, and a rung that
+    # would otherwise deploy on this same bar must not slip out ahead of it.
+    tp1 = geo.get("tp1")
+    if tp1 is not None and LAD.WHEN_TP1 in (geo.get("cancel_on") or ()):
+        # The FAVOURABLE extreme against reached_TARGET: a TP touched inside the
+        # minute is a touch, and TP1 sits in the winning direction, so the
+        # entry-side `reached` would be true from the very first bar.
+        if LAD.reached_target(trade.direction,
+                              B.favourable_extreme(trade.direction, bar), tp1):
+            for tr in trade.tranches:
+                if tr.role != LAD.WHEN_SIGNAL and tr.state not in STG.TERMINAL_STATES:
+                    tr.reason = "ladder: TP1 reached"
+                    _resolve_tranche(trade, tr, STG.CANCELLED, bar.ts)
+            return
+
     for tr in trade.tranches:
-        if tr.role == STG.TOE_IN or tr.state in STG.TERMINAL_STATES:
+        if tr.role == LAD.WHEN_SIGNAL or tr.state != STG.PENDING:
             continue
-        mins = _minutes(tr.state_since, bar.ts)
-        d = STG.decide_tranche(role=tr.role, state=tr.state, ctx=ctx, cfg=cfg,
-                               minutes_in_state=mins)
-        tr.reason = d.reason
-        if d.action == STG.DEPLOY:
-            _deploy(trade, tr, d, bar)
-        elif d.action == STG.EXPIRE:
+        level = _rung_level(trade, tr)
+        if level is None:
+            continue
+        if LAD.reached(trade.direction, adverse_px, level):
+            tr.reason = f"ladder: reached {level}"
+            _deploy(trade, tr, level, bar)
+        elif trade.entry_ttl_minutes and _minutes(tr.state_since, bar.ts) > float(
+                trade.entry_ttl_minutes):
+            # A rung cannot wait forever — the trade stays alive while any rung is
+            # pending, so it answers to the same entry-TTL clock a resting entry
+            # order does. Mirrors the monitor exactly.
+            tr.reason = "ladder: level never reached"
             _resolve_tranche(trade, tr, STG.EXPIRED, bar.ts)
-        elif d.action == STG.SKIP:
-            _resolve_tranche(trade, tr, STG.SKIPPED, bar.ts)
 
 
-def _deploy(trade: SimTrade, tr: Tranche, decision, bar: B.Bar) -> None:
-    """Place a tranche's orders. A reclaim goes to ARMED (a STOP resting at the
-    broker); a runner goes to DEPLOYED. Each leg's TTL clock starts now (#158)."""
-    level = decision.level if decision.level is not None else trade.staged_geo["deep"]
+def _rung_level(trade: SimTrade, tr: Tranche):
+    """The price a rung waits for — carried on its legs at plan time."""
+    for i in tr.leg_indices:
+        trig = trade.legs[i].trigger
+        if trig is not None:
+            return float(trig)
+    return None
+
+
+def _deploy(trade: SimTrade, tr: Tranche, level: float, bar: B.Bar) -> None:
+    """Place a rung's orders. A STOP rung goes to ARMED (resting at the broker);
+    anything else to DEPLOYED. Each leg's TTL clock starts now (#158)."""
+    mode = None
     for i in tr.leg_indices:
         leg = trade.legs[i]
         if not leg.is_pending:
             continue
-        leg.deploy(bar.ts, decision.mode or "LIMIT", float(level),
-                   trigger=float(level) if decision.mode == STG.MODE_STOP else None)
-    tr.mode = decision.mode
+        mode = leg.order_type or "LIMIT"
+        leg.deploy(bar.ts, mode, float(leg.entry),
+                   trigger=float(level) if mode == LAD.ORDER_STOP else None)
+    tr.mode = mode
     tr.trigger_level = float(level)
-    tr.state = STG.ARMED if decision.mode == STG.MODE_STOP else STG.DEPLOYED
+    tr.state = STG.ARMED if mode == LAD.ORDER_STOP else STG.DEPLOYED
     tr.state_since = bar.ts
 
 
@@ -425,7 +469,7 @@ def _expire_working(trade: SimTrade, bar: B.Bar) -> None:
             continue
         leg_age = _minutes(leg.placed_at, bar.ts)
         if trade.entry_style == STAGED and trade.staged_cfg:
-            deployed = leg.tranche in DEFERRED_ROLES
+            deployed = bool(leg.tranche) and leg.tranche != LAD.WHEN_SIGNAL
             reason = STG.entry_expiry_reason(
                 trade.staged_cfg, leg_age_minutes=leg_age,
                 entry_age_minutes=entry_age,

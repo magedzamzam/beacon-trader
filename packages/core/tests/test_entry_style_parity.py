@@ -1,15 +1,22 @@
-"""Entry-guard parity between the single-shot and confirmation-staged planners.
+"""Entry-guard parity between the single-shot planner and the staged LADDER.
 
 The A-vs-C experiment only means something if both arms take the SAME signals and
-drop the SAME legs — only *when/if* each leg deploys may differ. These pin the
-guards that were staged-blind: max_tp_distance_pct (#152), the current candle
-(#153), beyond_tolerance="skip" (#155), and the per_tp risk match (#154).
+carry the SAME total risk — only *when* size arrives may differ. These pin the
+guards that were staged-blind when the old engine ran: max_tp_distance_pct (#152),
+beyond_tolerance="skip" (#155), and the risk match (#154), now restated against
+`execution/ladder.py`.
+
+The risk one changed shape with #250 and is the strongest of the three. The old
+engine matched the control only under `allocation="even"`, and silently staked
+half or double under `per_tp`; the ladder is sized against the control plan's
+MEASURED total, so it matches under any allocation by construction.
 """
 from decimal import Decimal
 
-from beacon_core.execution import staging as S
+import pytest
+
+from beacon_core.execution import ladder as L
 from beacon_core.execution.planner import build_plan
-from beacon_core.execution.staging import DEFAULT_STAGED as D
 from beacon_core.parsing.models import ParsedSignal
 from beacon_core.risk.sizing import (InstrumentSpec, RiskConfig, plan_total_risk,
                                      size_legs)
@@ -17,28 +24,19 @@ from beacon_core.risk.sizing import (InstrumentSpec, RiskConfig, plan_total_risk
 # A zone SELL mirroring live sig784: zone 4045-4050, SL 4060, price below the zone.
 ZONE = dict(entry_from="4045", entry_to="4050", sl="4060",
             tps=["4035", "4030", "4025"])
+INSTR = InstrumentSpec(value_per_point=Decimal("1"), min_lot=Decimal("0.01"),
+                       lot_step=Decimal("0.01"))
+EQUITY = Decimal("10000")
 
 
 def _sig(hint=None, **kw):
-    a = dict(ZONE); a.update(kw)
+    a = dict(ZONE)
+    a.update(kw)
     return ParsedSignal(
         symbol="XAUUSD", direction="SELL",
         entry_from=Decimal(a["entry_from"]), entry_to=Decimal(a["entry_to"]),
         sl=Decimal(a["sl"]), tps=[Decimal(t) for t in a["tps"]],
         order_type_hint=hint)
-
-
-def _staged(price, **kw):
-    near, deep = S.zone_edges("SELL", Decimal(ZONE["entry_from"]), Decimal(ZONE["entry_to"]))
-    args = dict(direction="SELL", tps=[Decimal(t) for t in ZONE["tps"]],
-                near_edge=near, deep_edge=deep, sl=Decimal(ZONE["sl"]), atr=14,
-                current_price=Decimal(str(price)), cfg=D)
-    args.update(kw)
-    return S.build_staged_legs(**args)
-
-
-def _toe(legs):
-    return next((l for l in legs if l.tranche == S.TOE_IN), None)
 
 
 # ---- #152: max_tp_distance_pct ----------------------------------------------
@@ -54,140 +52,119 @@ def test_single_shot_drops_the_parse_artifact_tp():
     assert all("implausibly far" in (l.skip_reason or "") for l in bad)
 
 
-def test_staged_drops_the_same_tp_with_the_same_reason():
-    legs = _staged(4047, tps=[Decimal(t) for t in ARTIFACT],
-                   max_tp_distance_pct=Decimal("0.5"))
-    bad = [l for l in legs if l.tp == Decimal("1530")]
-    assert bad and all(not l.valid for l in bad)
-    assert all("implausibly far" in (l.skip_reason or "") for l in bad)
+def test_the_ladder_never_creates_a_rung_for_the_artifact_tp():
+    """The single-shot planner marks it invalid; the ladder never builds it. Either
+    way no order is placed against 1530 — what must not happen is a laddered
+    account trading a TP the control account threw away."""
+    rungs = L.plan_ladder(_sig(tps=ARTIFACT), max_tp_distance_pct=Decimal("0.5"))
+    assert rungs, "the other rungs must survive"
+    assert all(r.tp != Decimal("1530") for r in rungs)
 
 
-def test_dropped_tp_indices_match_across_entry_styles():
+def test_the_surviving_tp_indices_match_across_entry_styles():
     plan = build_plan(_sig(tps=ARTIFACT), current_price=Decimal("4047"),
                       max_tp_distance_pct=Decimal("0.5"))
-    legs = _staged(4047, tps=[Decimal(t) for t in ARTIFACT],
-                   max_tp_distance_pct=Decimal("0.5"))
-    assert ({l.tp_index for l in plan.legs if not l.valid}
-            == {l.tp_index for l in legs if not l.valid} == {3})
+    single = {l.tp_index for l in plan.legs if l.valid}
+    laddered = {r.tp_index for r in L.plan_ladder(
+        _sig(tps=ARTIFACT), max_tp_distance_pct=Decimal("0.5"))}
+    assert laddered <= single
+    assert 3 not in laddered and 3 not in single
 
 
-def test_no_max_tp_pct_keeps_every_leg():
-    legs = _staged(4047, tps=[Decimal(t) for t in ARTIFACT], max_tp_distance_pct=None)
-    assert all(l.valid for l in legs)
+def test_no_max_tp_pct_keeps_every_target():
+    """The guard is opt-in on both paths: unset means nothing is thrown away."""
+    rungs = L.plan_ladder(_sig(tps=ARTIFACT))
+    assert any(r.tp == Decimal("1530") for r in rungs)
 
 
-# ---- #153: the current candle -----------------------------------------------
-def test_staged_toe_in_honours_a_candle_touch_price_retraced_from():
-    # SELL near edge 4045; the candle printed 4046 (touched the zone) but price is
-    # back at 4043. Single-shot opens MARKET off the candle high — staged must too.
-    plan = build_plan(_sig(), current_price=Decimal("4043"),
-                      candle_high=Decimal("4046"), candle_low=Decimal("4042"))
-    assert any(l.order_type == "MARKET" for l in plan.legs)
-
-    legs = _staged(4043, candle_high=Decimal("4046"), candle_low=Decimal("4042"))
-    toe = _toe(legs)
-    assert toe.order_type == "MARKET" and toe.entry == Decimal("4043")  # live price
+def test_a_tp_inside_the_brokers_minimum_distance_is_dropped_on_both_paths():
+    near_tp = ["4044.9", "4030", "4025"]          # 0.1 from a 4045 entry
+    plan = build_plan(_sig(tps=near_tp), current_price=Decimal("4047"),
+                      min_stop_distance=Decimal("5"))
+    assert any(not l.valid and "min distance" in (l.skip_reason or "")
+               for l in plan.legs)
+    rungs = L.plan_ladder(_sig(tps=near_tp), min_stop_distance=Decimal("5"))
+    assert all(r.tp != Decimal("4044.9") for r in rungs)
 
 
-def test_candle_short_of_the_edge_still_rests():
-    legs = _staged(4043, candle_high=Decimal("4044"), candle_low=Decimal("4042"))
-    assert _toe(legs).order_type == "LIMIT"
+# ---- #154: the risk match ----------------------------------------------------
+def _totals(sig, risk, price="4047"):
+    single = build_plan(sig, current_price=Decimal(price))
+    size_legs(single.legs, equity=EQUITY, risk=risk, instrument=INSTR)
+    target = plan_total_risk(single.legs)
+    rungs = L.plan_ladder(sig)
+    L.size_ladder(rungs, budget=target, instrument=INSTR)
+    return target, plan_total_risk(rungs), rungs
 
 
-def test_no_candle_data_falls_back_to_the_live_price():
-    assert _toe(_staged(4043)).order_type == "LIMIT"
-    assert _toe(_staged(4047)).order_type == "MARKET"       # price alone crossed
+def test_even_allocation_matches():
+    risk = RiskConfig(basis="capital_percent", value=Decimal("1"), allocation="even")
+    target, total, rungs = _totals(_sig(), risk)
+    assert total <= target
+    assert target - total < Decimal(len(rungs)) * INSTR.lot_step * Decimal("40")
 
 
-def test_candle_touch_does_not_deploy_the_runner_or_reclaim():
-    # Only the toe-in reads the candle; the tranches stay price/zone-driven.
-    legs = _staged(4043, candle_high=Decimal("4046"), candle_low=Decimal("4042"))
-    assert next(l for l in legs if l.tranche == S.RUNNER).order_type == "LIMIT"
-    assert next(l for l in legs if l.tranche == S.RECLAIM).order_type == "STOP"
+def test_per_tp_matches_too_which_the_old_engine_never_did():
+    """The old staged planner emitted ONE leg per tp_index while the single-shot
+    planner fans a zone onto BOTH edges, so under `per_tp` the control account
+    staked about twice the staged one and the arms were not comparable (#154).
+    The ladder is sized against the control's measured total, so the mismatch
+    cannot arise however the allocation is configured."""
+    risk = RiskConfig(basis="per_tp", value=Decimal("1"), allocation="per_tp",
+                      per_tp_percent={1: Decimal("2"), 2: Decimal("1"), 3: Decimal("0.5")})
+    target, total, rungs = _totals(_sig(), risk)
+    assert target > 0 and rungs
+    assert total <= target
+    assert target - total < Decimal(len(rungs)) * INSTR.lot_step * Decimal("40")
 
 
-# ---- #155: beyond_tolerance="skip" ------------------------------------------
-def test_skip_declines_the_whole_signal_on_both_paths():
-    # Price 4025 is 20 below the 4045 sell edge; tolerance = 0.25 x |4045-4060| = 3.75.
-    plan = build_plan(_sig(hint="MARKET"), current_price=Decimal("4025"),
-                      honor_market_hint=True, beyond_tolerance="skip")
-    assert all(d["decision"] == "skip" for d in plan.entry_decisions)
-    assert not plan.legs                              # nothing to trade
+@pytest.mark.parametrize("split", [True, False])
+def test_the_split_flag_cannot_unbalance_the_ladder(split):
+    """`per_tp_split_across_entries` exists to undo the zone doubling. Whichever
+    way it is set, the ladder still matches whatever the control ends up at."""
+    risk = RiskConfig(basis="per_tp", value=Decimal("1"), allocation="per_tp",
+                      per_tp_percent={1: Decimal("2"), 2: Decimal("1"), 3: Decimal("0.5")},
+                      per_tp_split_across_entries=split)
+    target, total, rungs = _totals(_sig(), risk)
+    assert total <= target
+    assert target - total < Decimal(len(rungs)) * INSTR.lot_step * Decimal("40")
 
-    legs = _staged(4025, market_hint=True, beyond_tolerance="skip")
-    assert legs == []                                 # incl. runner + reclaim
+
+# ---- #155: the whole-signal skip --------------------------------------------
+# beyond_tolerance="skip" is a decision about the SIGNAL, so it has to be taken
+# before the ladder is built at all. The executor and the replay sim both ask
+# build_plan first and decline the signal when it returns no legs; these pin the
+# control-side behaviour that decision reads.
+def test_skip_declines_the_whole_signal():
+    plan = build_plan(_sig(hint="MARKET"), current_price=Decimal("4020"),
+                      beyond_tolerance="skip", chase_tolerance_r=Decimal("0.1"))
+    assert not plan.legs, "a chase beyond tolerance must decline the signal"
 
 
 def test_skip_within_tolerance_still_trades():
-    legs = _staged(4043.4, market_hint=True, beyond_tolerance="skip")
-    assert _toe(legs).order_type == "MARKET"
+    plan = build_plan(_sig(hint="MARKET"), current_price=Decimal("4049"),
+                      beyond_tolerance="skip", chase_tolerance_r=Decimal("0.25"))
+    assert plan.legs
 
 
 def test_limit_default_rests_instead_of_skipping():
-    legs = _staged(4025, market_hint=True, beyond_tolerance="limit")
-    assert _toe(legs).order_type == "LIMIT"
+    plan = build_plan(_sig(hint="MARKET"), current_price=Decimal("4020"),
+                      beyond_tolerance="limit", chase_tolerance_r=Decimal("0.1"))
+    assert plan.legs and all(l.order_type == "LIMIT" for l in plan.legs)
 
 
 def test_skip_needs_the_hint():
-    # No MARKET hint -> the chase guard never applies; behaviour is unchanged.
-    legs = _staged(4025, market_hint=False, beyond_tolerance="skip")
-    assert _toe(legs).order_type == "LIMIT"
+    """Without a MARKET hint there is nothing to chase, so nothing to decline."""
+    plan = build_plan(_sig(), current_price=Decimal("4020"),
+                      beyond_tolerance="skip", chase_tolerance_r=Decimal("0.1"))
+    assert plan.legs
 
 
-# ---- #154: intended total risk across entry styles --------------------------
-# Fine lot steps: the two styles place their legs at DIFFERENT entry levels (near
-# edge / deep edge / reclaim trigger), so |entry-SL| differs per leg and rounding
-# lots to a coarse step leaves cents of noise on either side. The invariant under
-# test is the INTENDED risk, not the rounding residue.
-INSTR = InstrumentSpec(value_per_point=Decimal("1"), min_lot=Decimal("0.000001"),
-                       lot_step=Decimal("0.000001"))
-EQUITY = Decimal("100000")
-
-
-def _risk(**kw):
-    return RiskConfig.from_dict(dict(kw))
-
-
-def _totals(risk_cfg):
-    # Price BELOW the sell zone: neither edge is crossed, so the single-shot
-    # planner rests a LIMIT at each edge and the zone genuinely fans out to
-    # 2 legs per tp_index. (Above the zone both edges count as crossed and
-    # build_plan collapses them into ONE market fill — no double count to see.)
-    plan = build_plan(_sig(), current_price=Decimal("4040"))
-    assert len(plan.legs) == 2 * len(ZONE["tps"])       # guard the premise
-    single = size_legs(plan.legs, equity=EQUITY, risk=risk_cfg, instrument=INSTR)
-    staged = size_legs(_staged(4040), equity=EQUITY, risk=risk_cfg, instrument=INSTR)
-    return plan_total_risk(single), plan_total_risk(staged)
-
-
-def _close(x, y, tol=Decimal("0.05")):
-    return abs(x - y) <= tol
-
-
-def test_even_allocation_already_matches():
-    a, c = _totals(_risk(basis="capital_percent", value="1.0", allocation="even"))
-    assert _close(a, c), (a, c)
-
-
-def test_per_tp_double_counts_on_a_zone_signal_by_default():
-    # The documented status quo: single-shot fans BOTH zone edges onto every TP.
-    a, c = _totals(_risk(allocation="per_tp",
-                         per_tp_percent={"1": "4.0", "2": "2.0", "3": "1.5"}))
-    assert _close(a, c * 2), (a, c)
-
-
-def test_per_tp_split_across_entries_restores_the_match():
-    a, c = _totals(_risk(allocation="per_tp",
-                         per_tp_percent={"1": "4.0", "2": "2.0", "3": "1.5"},
-                         per_tp_split_across_entries=True))
-    assert _close(a, c), (a, c)
-
-
-def test_split_flag_defaults_off():
-    assert RiskConfig.from_dict({}).per_tp_split_across_entries is False
-
-
-def test_split_flag_is_a_noop_for_even_allocation():
-    a, c = _totals(_risk(allocation="even", value="1.0",
-                         per_tp_split_across_entries=True))
-    assert _close(a, c), (a, c)
+# ---- what the ladder defers --------------------------------------------------
+def test_only_the_signal_rung_goes_out_at_plan_time():
+    rungs = L.plan_ladder(_sig())
+    now = [r for r in rungs if r.tranche == L.WHEN_SIGNAL]
+    later = [r for r in rungs if r.tranche != L.WHEN_SIGNAL]
+    assert now and later
+    assert all(r.trigger is None for r in now)
+    assert all(r.trigger is not None for r in later)

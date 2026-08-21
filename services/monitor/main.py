@@ -30,6 +30,7 @@ from beacon_core.db.models import (Account, Broker, Event, ExecutionStrategy, Le
 from beacon_core.execution import attribution as ATTR
 from beacon_core.execution import strategy as ST
 from beacon_core.execution import staging as STG
+from beacon_core.execution import ladder as LAD
 from beacon_core.brokers import build_adapter, symbol_map
 from beacon_core.brokers.types import (AuthError, ModifyPositionRequest, OrderSide,
                                        OrderStatus, OrderType, PlaceOrderRequest)
@@ -291,14 +292,27 @@ async def _staged_pending(session, trade_id) -> list:
 
 
 async def _drive_staged(session, trade, adapter, smap, mid, ttl_min) -> None:
-    """Drive the confirmation-staged entry engine (#129) for one trade, one tick:
-    update the max adverse excursion, then for each PENDING tranche run the DECIDE
-    engine and carry out the decision. DEPLOY places the tranche's frozen legs
-    (runner LIMIT at the deep edge, reclaim STOP at the reclaim trigger) and flips
-    them to 'working' with a fresh TTL clock — from there the existing monitor
-    machinery reconciles fills, ratchets stops, and TTL-cancels, so no new
-    fill/close code is introduced. EXPIRE abandons the never-deployed legs. This
-    is the monitor's ONLY order-placing path; it runs only for staged trades."""
+    """Drive the staged-entry LADDER (#250) for one trade, one tick.
+
+    Every pending tranche is one row of the operator's table waiting for its
+    trigger. The decision is now just "has price reached this level?" — the
+    partition/reclaim engine this replaced needed thirteen tuning numbers and an
+    ATR read to answer the same question, and nobody had ever changed one of them.
+
+    Two kinds of pending row:
+      * a RUNG owns legs. When price reaches its level the legs are placed —
+        POSITION as MARKET, otherwise a resting LIMIT/STOP — and from there the
+        ordinary monitor machinery reconciles fills, ratchets stops and TTL-cancels,
+        so no new fill/close code is introduced.
+      * a CANCEL row owns nothing. When price reaches its level (TP1 today) every
+        other rung is abandoned and every working order for this trade is pulled.
+
+    A rung that never triggers expires on the same entry-TTL clock a resting entry
+    order answers to. Without that a signal that never reached MID would hold the
+    trade open forever, because a staged trade stays alive while any tranche is
+    pending.
+
+    This is the monitor's ONLY order-placing path; it runs only for staged trades."""
     se = (await session.execute(select(StagedEntry).where(
         StagedEntry.trade_id == trade.id))).scalar_one_or_none()
     if se is None:
@@ -308,55 +322,83 @@ async def _drive_staged(session, trade, adapter, smap, mid, ttl_min) -> None:
         return
 
     direction = se.direction
-    deep = float(se.deep_edge)
-    cfg = STG.staged_config(se.cfg)
-    # Running max adverse excursion beyond the deep edge (what arms the reclaim).
-    excursion = STG.beyond_deep(direction, float(mid), deep)
-    if excursion > float(se.max_adverse_beyond_deep or 0):
-        se.max_adverse_beyond_deep = Decimal(str(round(excursion, 6)))
-    ctx = STG.StagingContext(
-        direction=direction, near_edge=float(se.near_edge), deep_edge=deep,
-        sl=float(se.sl), price=float(mid),
-        atr=float(se.atr) if se.atr is not None else None,
-        max_adverse_beyond_deep=float(se.max_adverse_beyond_deep or 0))
+    price = float(mid)
     now = utcnow()
 
-    for tr in pending:
-        minutes = (now - tr.state_since).total_seconds() / 60.0
-        decision = STG.decide_tranche(role=tr.role, state=tr.state, ctx=ctx, cfg=cfg,
-                                      minutes_in_state=minutes)
-        if decision.action == STG.WAIT:
+    # --- cancel rows first: reaching TP1 pulls everything else, and a rung that
+    #     would otherwise deploy on this same tick must not slip out ahead of it.
+    for tr in list(pending):
+        if not str(tr.role or "").startswith("cancel:"):
             continue
+        # reached_TARGET, not reached: TP1 sits in the WINNING direction, so
+        # asking `reached` about it is true from the first tick and the ladder
+        # would cancel itself the instant the trade opened.
+        if tr.trigger_level is None or not LAD.reached_target(
+                direction, price, tr.trigger_level):
+            continue
+        cancelled = 0
+        for other in pending:
+            if other.id == tr.id or other.state != "pending":
+                continue
+            legs = (await session.execute(select(Leg).where(
+                Leg.id.in_(other.leg_ids or []), Leg.status == "staged"))).scalars().all()
+            for leg in legs:
+                leg.status, leg.outcome, leg.closed_at = "cancelled", "cancelled", now
+                cancelled += 1
+            other.state, other.state_since = "cancelled", now
+            other.reason = "ladder: TP1 reached"[:96]
+        # ... and pull anything already working at the broker for this trade.
+        working = (await session.execute(select(Leg).where(
+            Leg.trade_id == trade.id, Leg.status == "working"))).scalars().all()
+        for leg in working:
+            if not leg.broker_order_ref:
+                continue
+            try:
+                if await adapter.cancel_order(leg.broker_order_ref):
+                    leg.status, leg.outcome, leg.closed_at = "cancelled", "cancelled", now
+                    cancelled += 1
+            except Exception as exc:
+                log.warning("ladder cancel failed (trade %s leg %s): %s", trade.id, leg.id, exc)
+        tr.state, tr.state_since = "filled", now
+        tr.reason = "ladder: cancelled the rest"[:96]
+        session.add(Event(trade_id=trade.id, kind="ladder_cancelled", payload={
+            "trigger": tr.role, "level": str(tr.trigger_level), "cancelled": cancelled}))
+        log.info("trade %s ladder: %s reached -> cancelled %s", trade.id, tr.role, cancelled)
+        return                       # nothing else deploys on the tick that cancels
+
+    # --- rungs waiting for their level ---------------------------------------
+    for tr in pending:
+        if str(tr.role or "").startswith("cancel:"):
+            continue
+        minutes = (now - tr.state_since).total_seconds() / 60.0
         legs = (await session.execute(select(Leg).where(
             Leg.id.in_(tr.leg_ids or []), Leg.status == "staged"))).scalars().all()
-        if decision.action in (STG.EXPIRE, STG.SKIP):
-            for leg in legs:                       # never placed at the broker -> just mark
-                leg.status = "expired"
-                leg.outcome = "expired"
-                leg.closed_at = now
-            tr.state = "expired" if decision.action == STG.EXPIRE else "skipped"
-            tr.state_since = now
-            tr.reason = (decision.reason or "")[:96]
-            session.add(Event(trade_id=trade.id, kind="staged_" + tr.state,
-                              payload={"tranche": tr.role, "reason": decision.reason}))
-            log.info("trade %s tranche %s -> %s (%s)", trade.id, tr.role, tr.state, decision.reason)
+
+        if tr.trigger_level is None or not LAD.reached(direction, price, tr.trigger_level):
+            # Not yet. A rung cannot wait forever: the trade stays alive while any
+            # tranche is pending, so it answers to the entry-TTL clock.
+            if ttl_min and minutes > float(ttl_min):
+                for leg in legs:                   # never placed -> just mark
+                    leg.status, leg.outcome, leg.closed_at = "expired", "expired", now
+                tr.state, tr.state_since = "expired", now
+                tr.reason = "ladder: level never reached"[:96]
+                session.add(Event(trade_id=trade.id, kind="staged_expired", payload={
+                    "tranche": tr.role, "level": str(tr.trigger_level),
+                    "reason": "level never reached"}))
+                log.info("trade %s ladder rung %s expired (level %s never reached)",
+                         trade.id, tr.role, tr.trigger_level)
             continue
-        if decision.action != STG.DEPLOY:
-            continue
-        # DEPLOY: place the frozen legs as LIMIT (runner) or STOP (reclaim).
+
+        # DEPLOY. POSITION means take it now; LIMIT/STOP rest at the rung's level.
         # The resting window is deliberate, not inherited (#158): deployed_ttl_minutes
-        # when configured, else the resolved entry TTL — i.e. today's behaviour.
-        # Still clamped to the global [MIN, MAX] entry-TTL bounds like any other TTL
-        # (ttl_min is already clamped by _rules_for, so this only bounds the override).
+        # when configured, else the resolved entry TTL.
+        cfg = STG.staged_config(se.cfg)
         good_till = utcnow() + timedelta(
             minutes=effective_entry_ttl_min(
                 {"entry_ttl_minutes": STG.deployed_ttl_minutes(cfg, ttl_min)}))
         side_buy = direction == "BUY"
-        # #140: the runner deploys MARKET once price has reached the deep edge (a
-        # LIMIT resting there would be a limit-at-market and get rejected). STOP is
-        # the reclaim re-entry; everything else is a resting LIMIT.
-        is_market = decision.mode == "MARKET"
-        order_type = (OrderType.STOP if decision.mode == "STOP"
+        is_market = (tr.mode or "") == LAD.ORDER_POSITION
+        order_type = (OrderType.STOP if tr.mode == LAD.ORDER_STOP
                       else OrderType.MARKET if is_market else OrderType.LIMIT)
         placed = 0
         for leg in legs:
@@ -366,7 +408,7 @@ async def _drive_staged(session, trade, adapter, smap, mid, ttl_min) -> None:
                     side=OrderSide.BUY if side_buy else OrderSide.SELL,
                     order_type=order_type,
                     quantity=leg.lot,
-                    # MARKET ignores the level; LIMIT/STOP need it (deep edge / reclaim trigger).
+                    # MARKET ignores the level; LIMIT/STOP need the rung's own.
                     limit_price=None if is_market else leg.entry,
                     stop_loss=leg.sl, take_profit=leg.tp,
                     good_till=None if is_market else good_till))
@@ -377,15 +419,15 @@ async def _drive_staged(session, trade, adapter, smap, mid, ttl_min) -> None:
                                                "reason": res.rejection_reason}))
                 else:
                     if is_market:
-                        # A MARKET runner opens a position immediately — link it by
-                        # broker_position_ref (like the executor's market toe-in) so
+                        # A MARKET rung opens a position immediately — link it by
+                        # broker_position_ref (like the executor's market rung) so
                         # reconciliation matches the position, not a working order
                         # that never exists.
                         leg.broker_position_ref = res.broker_order_ref
                         leg.status = "open" if res.status == OrderStatus.FILLED else "pending"
-                        # Never persist a 0 fill — leave it NULL so the entry/R
-                        # basis falls back to leg.entry and the ratchet still
-                        # works; the next tick backfills it from the position (#159).
+                        # Never persist a 0 fill — leave it NULL so the entry/R basis
+                        # falls back to leg.entry and the ratchet still works; the
+                        # next tick backfills it from the position (#159).
                         leg.fill_price = res.fill_price or None
                         if leg.fill_price is None and res.status == OrderStatus.FILLED:
                             session.add(Event(trade_id=trade.id, leg_id=leg.id,
@@ -395,28 +437,25 @@ async def _drive_staged(session, trade, adapter, smap, mid, ttl_min) -> None:
                     else:
                         leg.broker_order_ref = res.broker_order_ref
                         leg.status = "working"
-                    leg.created_at = utcnow()      # reset the TTL clock: deployed/armed late
+                    leg.created_at = utcnow()      # reset the TTL clock: deployed late
                     tr.broker_order_ref = res.broker_order_ref
                     placed += 1
                     session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="staged_deployed",
-                                      payload={"tranche": tr.role, "mode": decision.mode,
-                                               "reason": decision.reason}))
+                                      payload={"tranche": tr.role, "mode": tr.mode,
+                                               "level": str(tr.trigger_level)}))
             except Exception as exc:               # one leg failing must not sink the tick
                 leg.status = "rejected"
                 session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="reject",
                                   payload={"error": str(exc)[:300]}))
-                log.warning("staged deploy failed (trade %s leg %s): %s", trade.id, leg.id, exc)
-                _broker_error("staged_deploy", f"Staged entry deploy failed: {exc}",
+                log.warning("ladder deploy failed (trade %s leg %s): %s", trade.id, leg.id, exc)
+                _broker_error("staged_deploy", f"Ladder rung deploy failed: {exc}",
                               symbol=trade.symbol, account_id=trade.account_id)
             await asyncio.sleep(1.0 / max(settings.broker_rate_per_sec, 0.1))
-        tr.state = "armed" if decision.mode == "STOP" else "deployed"
+        tr.state = "armed" if tr.mode == LAD.ORDER_STOP else "deployed"
         tr.state_since = utcnow()
-        tr.mode = decision.mode
-        if decision.level is not None:
-            tr.trigger_level = Decimal(str(decision.level))
-        tr.reason = (decision.reason or "")[:96]
-        log.info("trade %s tranche %s -> %s (%s legs, %s)", trade.id, tr.role, tr.state,
-                 placed, decision.reason)
+        tr.reason = f"ladder: reached {tr.trigger_level}"[:96]
+        log.info("trade %s ladder rung %s -> %s (%s legs at %s)",
+                 trade.id, tr.role, tr.state, placed, tr.trigger_level)
 
 
 async def _record_deployed_risk(session, trade) -> None:
@@ -508,10 +547,12 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
                 # `armed` with a live broker_order_ref can't outlive the order (#161).
                 tranches = (await session.execute(select(StagedTranche).where(
                     StagedTranche.trade_id == trade.id))).scalars().all()
-                # toe-in is placed by the executor at signal time and keeps the
-                # ordinary TTL; only the monitor-deployed tranches reset the clock.
+                # The `signal` rung is placed by the executor at signal time and
+                # keeps the ordinary TTL; only the rungs the monitor deploys later
+                # reset the clock. (`toe_in` is the pre-#250 name for the same
+                # thing, and still appears on trades planned by the old engine.)
                 for _tr in tranches:
-                    if _tr.role != STG.TOE_IN:
+                    if _tr.role not in (LAD.WHEN_SIGNAL, "toe_in"):
                         late_leg_ids.update(_tr.leg_ids or [])
 
         def _tranche_of(leg_id):

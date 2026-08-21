@@ -14,6 +14,7 @@ from beacon_core.analysis import provenance as PV
 from beacon_core.db.models import Account, Event, ExecutionStrategy, Source
 from beacon_core.execution import strategy as ST
 from beacon_core.execution import staging as STG
+from beacon_core.execution import ladder as LAD
 from beacon_core.execution.strategy import ENTRY_POLICY_KEYS
 from beacon_core.ta import registry as TA
 from beacon_core.timeutil import utcnow
@@ -91,7 +92,16 @@ def _clean_entry_policy(ep) -> dict | None:
         raise HTTPException(422, "entry_policy must be an object")
     out = {k: ep[k] for k in ENTRY_POLICY_KEYS
            if k in ep and ep[k] is not None
-           and k not in ("entry_style", "staged", "sl_distance")}
+           and k not in ("entry_style", "staged", "sl_distance", "ladder")}
+    if ep.get("ladder") is not None:
+        # RAISES on a bad row rather than dropping it (#250): a ladder quietly
+        # missing a rung is a different strategy from the one that was saved.
+        try:
+            rows = LAD.clean_ladder(ep["ladder"])
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        if rows:
+            out["ladder"] = rows
     _sl_distance = _clean_sl_distance(ep.get("sl_distance"))
     if _sl_distance is not None:
         out["sl_distance"] = _sl_distance

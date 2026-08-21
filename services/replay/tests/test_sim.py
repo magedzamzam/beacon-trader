@@ -18,6 +18,7 @@ from harness import sim
 from harness.context import ContextBuilder
 from harness.variants import build_variant
 from beacon_core.execution import staging as STG
+from beacon_core.execution import ladder as LAD
 from conftest import (NO_RATCHET, T0, path_bars, series, signal,
                       sl_rules_be_at, variant_dict)
 
@@ -191,12 +192,15 @@ def test_horizon_capped_trades_are_marked_to_market_not_won():
 
 
 # --- staged -------------------------------------------------------------------
-def _staged_variant(**staged):
-    cfg = {"enabled": True, "toe_in_tps": 1, "runner_tps": 1, "min_stop_atr": 0.0}
+def _staged_variant(ladder=None, **staged):
+    """A staged variant. #250 replaced the thirteen tuning knobs with a ladder
+    table, so what a staged variant carries now is that table."""
+    cfg = {"enabled": True}
     cfg.update(staged)
-    return build_variant(variant_dict(
-        entry_policy={"entry_style": "staged", "ttl_minutes": 120, "staged": cfg},
-        sl_rules=NO_RATCHET))
+    ep = {"entry_style": "staged", "ttl_minutes": 120, "staged": cfg}
+    if ladder is not None:
+        ep["ladder"] = ladder
+    return build_variant(variant_dict(entry_policy=ep, sl_rules=NO_RATCHET))
 
 
 WARMUP_HOURS = 40
@@ -227,38 +231,72 @@ def _staged_plan(v, sig, trading_mids):
     return trade, why, s, mc, n_warm
 
 
-def test_staged_partitions_the_ladder_into_tranches():
+def test_the_ladder_splits_the_signal_into_triggered_rungs():
+    """The `signal` row goes out now; every row waiting on a level is pending."""
     zone = signal(entry=4000.0, entry_to=3990.0, sl=3980.0,
                   tps=(4010.0, 4020.0, 4030.0))
-    trade, why, _s, mc, _ = _staged_plan(_staged_variant(), zone, [4020] * 5)
-    assert mc.atr_1h is not None, "fixture must produce a usable 1h ATR"
+    trade, why, _s, _mc, _ = _staged_plan(_staged_variant(), zone, [4020] * 5)
     assert why is None
     assert trade.entry_style == sim.STAGED
     roles = {t.role for t in trade.tranches}
-    assert STG.TOE_IN in roles and STG.RECLAIM in roles
-    # only the toe-in is placed at signal time; the rest wait on DECIDE
+    assert LAD.WHEN_SIGNAL in roles and LAD.WHEN_MID in roles
+    # only the signal rung is placed at plan time; the rest wait for their level
     assert any(l.status == F.WORKING for l in trade.legs)
     assert any(l.status == F.PENDING for l in trade.legs)
 
 
-def test_staged_falls_back_to_single_shot_when_the_stop_is_too_tight():
-    """Exactly the executor's #156 fallback. Without it a replayed 'staged' arm
-    would include trades live actually ran flat."""
-    tight = signal(entry=4000.0, entry_to=3999.0, sl=3998.5, tps=(4010.0, 4020.0))
-    trade, why, *_ = _staged_plan(_staged_variant(min_stop_atr=5.0), tight,
-                                  [4020] * 5)
+def test_the_replayed_ladder_risks_what_the_single_shot_would_have():
+    """#250's guarantee, end to end through the replay planner rather than the
+    pure engine: fill every rung, run to the stop, lose the same money."""
+    zone = signal(entry=4000.0, entry_to=3990.0, sl=3980.0,
+                  tps=(4010.0, 4020.0, 4030.0))
+    staged, _, _, _, _ = _staged_plan(_staged_variant(), zone, [4020] * 5)
+    plain, _, _, _, _ = _staged_plan(
+        build_variant(variant_dict(entry_policy={"ttl_minutes": 120},
+                                   sl_rules=NO_RATCHET)), zone, [4020] * 5)
+    assert plain.entry_style == sim.SINGLE_SHOT
+    assert staged.planned_risk <= plain.planned_risk
+    assert plain.planned_risk - staged.planned_risk < Decimal("1")
+
+
+def test_a_ladder_falls_back_to_single_shot_when_no_row_fits_the_signal():
+    """The same shape as the executor's fallback: a table whose rows all target
+    TPs this signal does not have leaves nothing to place, so the account runs
+    the ordinary fanout rather than nothing at all."""
+    one_tp = signal(entry=4000.0, entry_to=3990.0, sl=3980.0, tps=(4010.0,))
+    table = [{"when": "signal", "action": "open", "order": "POSITION",
+              "level": "ENTRY_FROM", "target": 3}]
+    trade, why, *_ = _staged_plan(_staged_variant(ladder=table), one_tp, [4020] * 5)
     assert why is None and trade.entry_style == sim.SINGLE_SHOT
 
 
-def test_a_runner_deploys_when_price_reaches_the_deep_edge():
+def test_a_mid_rung_deploys_when_price_reaches_mid():
+    """MID here is halfway from the far edge (3990) to the stop (3980) = 3985.
+    The path dips to 3982, so the rung must deploy."""
     zone = signal(entry=4000.0, entry_to=3990.0, sl=3980.0,
                   tps=(4010.0, 4020.0, 4030.0))
     v = _staged_variant()
     trade, why, s, _mc, n_warm = _staged_plan(
-        v, zone, [4020, (4006, 4006, 3989, 3992), 3992, 3992])
+        v, zone, [4000, (4000, 4000, 3982, 3986), 3986, 3986])
     assert why is None and trade.entry_style == sim.STAGED
     for i in range(n_warm + 1, len(s)):
         sim.step(trade, s[i], variant=v)
-    runner = next((t for t in trade.tranches if t.role == STG.RUNNER), None)
-    if runner is not None:                       # partition may fold it into toe-in
-        assert runner.state in (STG.DEPLOYED, STG.FILLED)
+    mid = next(t for t in trade.tranches if t.role == LAD.WHEN_MID)
+    assert mid.state in (STG.DEPLOYED, STG.ARMED, STG.FILLED), mid.reason
+
+
+def test_reaching_tp1_cancels_every_other_rung():
+    """The `cancel everything else` row. TP1 is 4010 and the path runs to 4015,
+    so the rungs still waiting on MID must be cancelled, not left pending."""
+    zone = signal(entry=4000.0, entry_to=3990.0, sl=3980.0,
+                  tps=(4010.0, 4020.0, 4030.0))
+    v = _staged_variant()
+    trade, why, s, _mc, n_warm = _staged_plan(
+        v, zone, [4000, (4000, 4015, 4000, 4012), 4012, 4012])
+    assert why is None and trade.entry_style == sim.STAGED
+    for i in range(n_warm + 1, len(s)):
+        sim.step(trade, s[i], variant=v)
+    waiting = [t for t in trade.tranches if t.role != LAD.WHEN_SIGNAL]
+    assert waiting, "the default ladder should leave rungs waiting on MID"
+    assert all(t.state in STG.TERMINAL_STATES for t in waiting), \
+        [(t.role, t.state) for t in waiting]

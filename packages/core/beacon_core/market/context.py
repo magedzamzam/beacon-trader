@@ -41,7 +41,8 @@ from . import bars as B
 # the live one does — an EMA over 250 bars is not an EMA over 5000.
 TA_LOOKBACK_BARS = 250
 
-# The timeframe the staged engine's ATR comes from live (`_atr_on(..., "1h")`).
+# The 1h timeframe the staged engine used to read ATR from. The ladder (#250)
+# has no ATR term at all; this is kept only for the historical context rows.
 STAGED_ATR_TIMEFRAME = "1h"
 ATR_PERIOD = 14
 

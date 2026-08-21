@@ -70,6 +70,40 @@ export function Toggle({ checked, onChange, label }) {
 }
 
 
+/**
+ * ConfigRow — one setting, collapsed until you turn it on.
+ *
+ * The Strategies pillars used to render every field they support, all the time,
+ * so a page that configures six things looked identical to one that configures
+ * none and you could not tell which values were actually yours. Off here means
+ * NOT SET, which is what makes the #104 cascade real: a pillar key this strategy
+ * leaves off inherits from the next-less-specific row instead of being written
+ * over with a copy of the default.
+ *
+ * `onChange(next)` is called with the new on/off state; the caller decides what
+ * turning it off clears.
+ */
+export function ConfigRow({ label, hint, active, onChange, summary, children }) {
+  return (
+    <div className={`rounded-lg border transition-colors ${active ? "border-beacon/40 bg-beacon/[0.03]" : "border-edge bg-panel2/30"}`}>
+      <div className="flex items-start gap-3 px-3 py-2.5">
+        <div className="pt-0.5"><Toggle checked={active} onChange={onChange} /></div>
+        <div className="min-w-0 flex-1">
+          <div className="text-sm">{label}</div>
+          {hint && <div className="text-[11px] text-muted mt-0.5">{hint}</div>}
+        </div>
+        {!active && summary && (
+          <div className="text-[11px] text-muted shrink-0 pt-0.5">{summary}</div>
+        )}
+      </div>
+      {active && (
+        <div className="px-3 pb-3 pt-1 border-t border-edge/50">{children}</div>
+      )}
+    </div>
+  );
+}
+
+
 export function Button({ variant = "primary", children, ...p }) {
   const v = {
     primary: "bg-beacon/15 text-beacon hover:bg-beacon/25",

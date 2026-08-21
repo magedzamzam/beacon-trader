@@ -23,9 +23,11 @@ from ..ta import registry as TA
 # `entry_policy` merges key-by-key over THIS TUPLE, so a key missing from it is
 # dropped on the way through and the setting silently appears to do nothing.
 # sl_distance (#249) replaces the channel's stop with one this far from the entry.
+# ladder (#250) is the staged-entry table: one row per order, replacing the
+# thirteen tuning knobs staged entry used to carry.
 ENTRY_POLICY_KEYS = ("ttl_minutes", "honor_market_hint", "chase_tolerance_r",
                      "chase_tolerance_atr", "beyond_tolerance", "max_tp_distance_pct",
-                     "entry_style", "staged", "sl_distance")
+                     "entry_style", "staged", "sl_distance", "ladder")
 
 
 def resolve_chain(strategies, account_id, source_id) -> list:

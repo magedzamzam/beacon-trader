@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { GitBranch, Trash2, LogIn, Filter, LogOut } from "lucide-react";
 import { Card, Table, Th, Td, Badge, Empty } from "../components/ui";
-import { Field, Input, Select, Toggle, Button, ErrorNote } from "../components/form";
+import { Field, Input, Select, Toggle, Button, ErrorNote, ConfigRow } from "../components/form";
 import SlRulesEditor from "../components/SlRulesEditor";
 import StagedEntryEditor from "../components/StagedEntryEditor";
+import LadderEditor, { DEFAULT_LADDER } from "../components/LadderEditor";
 import EntryFilterRules from "../components/EntryFilterRules";
 import HelpHint from "../components/HelpHint";
 import { api } from "../lib/api";
@@ -55,16 +56,25 @@ const SL_PRESETS = {
   "Tighten: +$30 move → BE": [{ trigger: { type: "price_move", points: 30 }, action: mv("entry") }, { trigger: tpH(2), action: mv("previous_tp") }],
   "Early BE @ 0.6R (hold)": [{ trigger: { type: "be_lock_at_r", r: 0.6 }, action: mv("entry") }],   // #109
 };
-// Mirrors beacon_core.ta.registry.AVAILABLE_TIMEFRAMES (the TFs the trend read supports).
-const TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"];
+// What each entry setting falls back to when you switch it ON, and the value the
+// executor uses while it is OFF. OFF means NOT SET: the key is absent from
+// entry_policy, so the #104 cascade fills it from the next-less-specific row.
+// The old page wrote all six keys on every save, which silently made every
+// strategy a full override and left the cascade with nothing to inherit.
+const ENTRY_DEFAULTS = {
+  ttl_minutes: 60, chase_tolerance_r: 0.25, chase_tolerance_atr: 0,
+  max_tp_distance_pct: 0.5, beyond_tolerance: "limit", honor_market_hint: true,
+  sl_distance: 3,
+};
 const BLANK = () => ({
   id: null, account_id: "", source_id: "", label: "", enabled: true,
-  entry: { ttl_minutes: "", honor_market_hint: true, chase_tolerance_r: "", chase_tolerance_atr: "", beyond_tolerance: "limit", max_tp_distance_pct: "",
-           sl_distance: "", entry_style: "", staged: { ...STAGED_DEFAULTS } },
+  entry: { ...ENTRY_DEFAULTS, entry_style: "", ladder: DEFAULT_LADDER.map((r) => ({ ...r })),
+           staged: { ...STAGED_DEFAULTS } },
+  entryOn: {},        // which entry settings this strategy actually sets
   rules: [],          // unified entry-filter rules (Trend Alignment / ADX Regime / Session)
   exit: { sl_rules: [], cancel_pending_on_stop: true },
+  exitOn: {},         // same, for the exit pillar
 });
-const INPUT = "w-full bg-panel2 border border-edge rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-beacon";
 
 // #251: every distance field on this page is in raw INSTRUMENT PRICE UNITS, and
 // none of them used to say so — "30 pts" reads as 3 pips and means a $30 move on
@@ -112,33 +122,58 @@ export default function Strategies() {
   const editRow = (row) => {
     setSaved(false); setTab("entry");
     const ep = row.entry_policy || {}, ef = row.entry_filters || {}, xp = row.exit_policy || {};
+    // A key PRESENT in the stored policy is a key this strategy sets; anything
+    // absent is inherited and stays switched off with its default behind it.
+    const set = (k) => ep[k] !== undefined && ep[k] !== null && ep[k] !== "";
+    const entryOn = {};
+    for (const k of ["ttl_minutes", "chase_tolerance_r", "chase_tolerance_atr",
+                     "max_tp_distance_pct", "beyond_tolerance", "honor_market_hint",
+                     "sl_distance"]) {
+      if (set(k)) entryOn[k] = true;
+    }
+    if (ep.entry_style === "staged") entryOn.staged = true;
     setForm({
       id: row.id, account_id: row.account_id ?? "", source_id: row.source_id ?? "",
       label: row.label || "", enabled: row.enabled,
-      entry: { ...BLANK().entry, ...Object.fromEntries(Object.entries(ep).map(([k, v]) => [k, v ?? ""])),
+      entry: { ...ENTRY_DEFAULTS,
+               ...Object.fromEntries(Object.entries(ep)
+                 .filter(([, v]) => v !== null && v !== "")
+                 .map(([k, v]) => [k, v])),
+               entry_style: ep.entry_style || "",
+               ladder: Array.isArray(ep.ladder) && ep.ladder.length
+                 ? ep.ladder.map((r) => ({ ...r })) : DEFAULT_LADDER.map((r) => ({ ...r })),
                staged: { ...STAGED_DEFAULTS, ...(ep.staged || {}) } },
+      entryOn,
       // Unified rule list: the legacy trend_alignment block becomes the first rule.
       rules: [...(ef.trend_alignment ? [trendBlockToRule(ef.trend_alignment)] : []),
               ...(Array.isArray(ef.rules) ? ef.rules : [])],
       exit: { sl_rules: Array.isArray(xp.sl_rules) ? xp.sl_rules : [],
               cancel_pending_on_stop: xp.cancel_pending_on_stop !== false },
+      exitOn: { sl_rules: !!(xp.sl_rules && xp.sl_rules.length),
+                cancel_pending_on_stop: xp.cancel_pending_on_stop === false },
     });
   };
   const newAt = () => { setForm(BLANK()); setTab("entry"); setSaved(false); };
 
   const save = async () => {
     setErr(null); setSaved(false);
-    const sl_rules = form.exit.sl_rules.length ? form.exit.sl_rules : null;   // [] = inherit default
-    const entry_policy = {
-      ttl_minutes: num(form.entry.ttl_minutes), honor_market_hint: form.entry.honor_market_hint,
-      chase_tolerance_r: num(form.entry.chase_tolerance_r), chase_tolerance_atr: num(form.entry.chase_tolerance_atr),
-      beyond_tolerance: form.entry.beyond_tolerance, max_tp_distance_pct: num(form.entry.max_tp_distance_pct),
-      // #249: empty is OFF and must stay absent — the API refuses <= 0 rather
-      // than storing a stop of zero distance.
-      sl_distance: num(form.entry.sl_distance),
-    };
-    if (form.entry.entry_style) entry_policy.entry_style = form.entry.entry_style;
-    if (form.entry.entry_style === "staged") {                  // send the staged block, numbers coerced
+    const xon = form.exitOn || {};
+    // [] / off = inherit the channel or global default rather than pin an empty set.
+    const sl_rules = xon.sl_rules && form.exit.sl_rules.length ? form.exit.sl_rules : null;
+    // ONLY the settings that are switched on. A key left off is absent from the
+    // payload, so it inherits down the #104 cascade instead of being pinned to a
+    // copy of the default.
+    const on = form.entryOn || {};
+    const entry_policy = {};
+    for (const k of ["ttl_minutes", "chase_tolerance_r", "chase_tolerance_atr",
+                     "max_tp_distance_pct", "sl_distance"]) {
+      if (on[k]) entry_policy[k] = num(form.entry[k]);
+    }
+    if (on.beyond_tolerance) entry_policy.beyond_tolerance = form.entry.beyond_tolerance;
+    if (on.honor_market_hint) entry_policy.honor_market_hint = !!form.entry.honor_market_hint;
+    if (on.staged) {                       // #250: staged entry is on/off + a ladder
+      entry_policy.entry_style = "staged";
+      entry_policy.ladder = form.entry.ladder;
       const staged = {};
       for (const [k, val] of Object.entries(form.entry.staged || {})) {
         const nv = num(val);
@@ -163,7 +198,10 @@ export default function Strategies() {
       entry_policy,
       entry_filters: { trend_alignment: trendRule ? trendRuleToBlock(trendRule) : { enabled: false },
                        rules: otherRules },
-      exit_policy: { sl_rules, cancel_pending_on_stop: form.exit.cancel_pending_on_stop },
+      // Only sent when switched on: leaving it off inherits (the engine default
+      // is true), rather than writing a copy of the default onto every strategy.
+      exit_policy: { sl_rules, ...(xon.cancel_pending_on_stop
+        ? { cancel_pending_on_stop: !!form.exit.cancel_pending_on_stop } : {}) },
     };
     try { const r = await api.saveStrategy(body); setSaved(true); await load(); editRow(r); }
     catch (e) { setErr(e.message); }
@@ -215,77 +253,163 @@ export default function Strategies() {
         <ErrorNote>{err}</ErrorNote>
 
         {tab === "entry" && (
-          <div className="p-4 space-y-3">
-            <p className="text-[11px] text-muted"><HelpHint term="entry_policy_help" /> How the entry order is placed — TTL for working orders and the chase-guard (#67). Empty ⇒ the global default. Source-agnostic, so future non-Telegram entry types plug in here.</p>
-            <Field label="Entry style" hint="single-shot (default) or confirmation-staged tranches (#129)">
-              <Select value={form.entry.entry_style} onChange={(e) => setSub("entry", "entry_style", e.target.value)}>
-                <option value="">Single-shot (default)</option>
-                <option value="staged">Confirmation-staged (DemoC)</option>
-              </Select>
-            </Field>
-            <Field label={`Modify SL — distance (${unitLabel(unit)})`}
-                   hint="empty = the channel's own stop, unchanged">
-              <Input type="number" step="0.1" min="0" value={form.entry.sl_distance}
-                     onChange={(e) => setSub("entry", "sl_distance", e.target.value)} />
-            </Field>
-            {/* #249: measured from the signal's FAR entry edge (entry_to), which
-                is the edge a stop has to protect — two thirds of signals are a
-                zone, and a stop measured from the near edge would sit inside it
-                and be dropped as "sl on wrong side of entry". Applied before
-                sizing, so a tighter stop trades a LARGER lot at the same cash
-                risk. Applies to staged and single-shot alike. */}
-            {priceMoveNote(form.entry.sl_distance, unit) ? (
-              <p className="text-[11px] text-warn">
-                Stop set {Number(form.entry.sl_distance).toFixed(2)} from the signal's entry
-                ({priceMoveNote(form.entry.sl_distance, unit)}) — replaces the channel's stop,
-                and the lot is sized from it, so a tighter stop trades a bigger position at the
-                same cash risk.
-              </p>
-            ) : (
-              <p className="text-[11px] text-muted">
-                Empty = use the stop the channel sent. Set a number to trade your own stop
-                distance instead, measured from the signal's entry.
-              </p>
-            )}
-            {form.entry.entry_style === "staged" && (
-              <StagedEntryEditor value={form.entry.staged}
-                onChange={(k, val) => setSub("entry", "staged", { ...form.entry.staged, [k]: val })} />
-            )}
-            <div className={`grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 ${form.entry.entry_style === "staged" ? "opacity-60" : ""}`}>
-              <Field label="Entry TTL (min)" hint="working-order expiry"><Input type="number" value={form.entry.ttl_minutes} onChange={(e) => setSub("entry", "ttl_minutes", e.target.value)} /></Field>
-              <Field label="Chase tolerance (× |entry−SL|)" hint="how far past the level a MARKET hint may still fill"><Input type="number" step="0.05" value={form.entry.chase_tolerance_r} onChange={(e) => setSub("entry", "chase_tolerance_r", e.target.value)} /></Field>
-              <Field label="Chase tolerance (× ATR)" hint="0 = disabled; larger of the two wins"><Input type="number" step="0.1" value={form.entry.chase_tolerance_atr} onChange={(e) => setSub("entry", "chase_tolerance_atr", e.target.value)} /></Field>
-              <Field label="Beyond tolerance" hint="what to do when entry is too far to fill at market">
-                <Select value={form.entry.beyond_tolerance} onChange={(e) => setSub("entry", "beyond_tolerance", e.target.value)}>
-                  <option value="limit">rest as LIMIT</option><option value="market">fill at MARKET</option><option value="skip">skip</option>
-                </Select></Field>
-              <Field label="Max TP distance (× entry)" hint="drop parse-artifact TPs this far away"><Input type="number" step="0.05" value={form.entry.max_tp_distance_pct} onChange={(e) => setSub("entry", "max_tp_distance_pct", e.target.value)} /></Field>
-              <Field label="Honor MARKET hint"><Toggle checked={form.entry.honor_market_hint} onChange={(v) => setSub("entry", "honor_market_hint", v)} label={form.entry.honor_market_hint ? "on" : "off"} /></Field>
-            </div>
+          <div className="p-4 space-y-2">
+            <p className="text-[11px] text-muted"><HelpHint term="entry_policy_help" /> How the entry order is placed.
+              Every setting is <b>off</b> until you switch it on, and off means <b>not set</b> — the value is
+              inherited from the next-less-specific strategy, down to the (Any, Any) row. Turning one on here
+              overrides it for this scope only.</p>
+
+            <ConfigRow label="Staged entry — the ladder"
+                       hint="deploy the signal in rungs instead of all at once (#250)"
+                       summary="off · single shot"
+                       active={!!form.entryOn.staged}
+                       onChange={(v) => setSub("entryOn", "staged", v)}>
+              <div className="space-y-3 pt-2">
+                <LadderEditor rows={form.entry.ladder}
+                              onChange={(rows) => setSub("entry", "ladder", rows)} />
+                <StagedEntryEditor value={form.entry.staged}
+                  onChange={(k, val) => setSub("entry", "staged", { ...form.entry.staged, [k]: val })} />
+              </div>
+            </ConfigRow>
+
+            {/* #249: measured from the signal's FAR entry edge (entry_to) — two
+                thirds of signals are a zone, and a stop measured from the near
+                edge sits inside it and gets dropped as "sl on wrong side of
+                entry". Applied before sizing, so a tighter stop trades a LARGER
+                lot at the same cash risk. Staged and single-shot alike. */}
+            <ConfigRow label="Modify SL — trade our own stop distance"
+                       hint={"replaces the channel's stop · " + unitLabel(unit)}
+                       summary="off · the channel's stop"
+                       active={!!form.entryOn.sl_distance}
+                       onChange={(v) => setSub("entryOn", "sl_distance", v)}>
+              <div className="pt-2 space-y-1.5">
+                <div className="max-w-[16rem]">
+                  <Input type="number" step="0.1" min="0" value={form.entry.sl_distance}
+                         onChange={(e) => setSub("entry", "sl_distance", e.target.value)} />
+                </div>
+                <p className="text-[11px] text-warn">
+                  {priceMoveNote(form.entry.sl_distance, unit)
+                    ? <>Stop set {Number(form.entry.sl_distance).toFixed(2)} from the signal's entry
+                        ({priceMoveNote(form.entry.sl_distance, unit)}) — the lot is sized from it, so a
+                        tighter stop trades a <b>bigger position</b> at the same cash risk.</>
+                    : "Enter a distance greater than zero."}
+                </p>
+              </div>
+            </ConfigRow>
+
+            <ConfigRow label="Entry TTL" hint="how long a working order may rest, in minutes"
+                       summary="off · inherited"
+                       active={!!form.entryOn.ttl_minutes}
+                       onChange={(v) => setSub("entryOn", "ttl_minutes", v)}>
+              <div className="max-w-[16rem] pt-2">
+                <Input type="number" value={form.entry.ttl_minutes}
+                       onChange={(e) => setSub("entry", "ttl_minutes", e.target.value)} />
+              </div>
+            </ConfigRow>
+
+            <ConfigRow label="Chase tolerance (× |entry−SL|)"
+                       hint="how far past the level a MARKET hint may still fill (#67)"
+                       summary="off · inherited"
+                       active={!!form.entryOn.chase_tolerance_r}
+                       onChange={(v) => setSub("entryOn", "chase_tolerance_r", v)}>
+              <div className="max-w-[16rem] pt-2">
+                <Input type="number" step="0.05" value={form.entry.chase_tolerance_r}
+                       onChange={(e) => setSub("entry", "chase_tolerance_r", e.target.value)} />
+              </div>
+            </ConfigRow>
+
+            <ConfigRow label="Chase tolerance (× ATR)" hint="the larger of the two tolerances wins"
+                       summary="off · inherited"
+                       active={!!form.entryOn.chase_tolerance_atr}
+                       onChange={(v) => setSub("entryOn", "chase_tolerance_atr", v)}>
+              <div className="max-w-[16rem] pt-2">
+                <Input type="number" step="0.1" value={form.entry.chase_tolerance_atr}
+                       onChange={(e) => setSub("entry", "chase_tolerance_atr", e.target.value)} />
+              </div>
+            </ConfigRow>
+
+            <ConfigRow label="Beyond tolerance" hint="what to do when the entry is too far to fill at market"
+                       summary="off · inherited"
+                       active={!!form.entryOn.beyond_tolerance}
+                       onChange={(v) => setSub("entryOn", "beyond_tolerance", v)}>
+              <div className="max-w-[16rem] pt-2">
+                <Select value={form.entry.beyond_tolerance}
+                        onChange={(e) => setSub("entry", "beyond_tolerance", e.target.value)}>
+                  <option value="limit">rest as LIMIT</option>
+                  <option value="market">fill at MARKET</option>
+                  <option value="skip">skip the trade</option>
+                </Select>
+              </div>
+            </ConfigRow>
+
+            <ConfigRow label="Max TP distance (× entry)" hint="drop parse-artifact TPs this far from entry"
+                       summary="off · inherited"
+                       active={!!form.entryOn.max_tp_distance_pct}
+                       onChange={(v) => setSub("entryOn", "max_tp_distance_pct", v)}>
+              <div className="max-w-[16rem] pt-2">
+                <Input type="number" step="0.05" value={form.entry.max_tp_distance_pct}
+                       onChange={(e) => setSub("entry", "max_tp_distance_pct", e.target.value)} />
+              </div>
+            </ConfigRow>
+
+            <ConfigRow label="Honor MARKET hint" hint={"a signal that says BUY NOW may fill at market"}
+                       summary="off · inherited"
+                       active={!!form.entryOn.honor_market_hint}
+                       onChange={(v) => setSub("entryOn", "honor_market_hint", v)}>
+              <div className="pt-2">
+                <Toggle checked={!!form.entry.honor_market_hint}
+                        onChange={(v) => setSub("entry", "honor_market_hint", v)}
+                        label={form.entry.honor_market_hint ? "honor it" : "always rest a LIMIT"} />
+              </div>
+            </ConfigRow>
           </div>
         )}
 
         {tab === "filter" && (
           <div className="p-4 space-y-3">
-            <p className="text-[11px] text-muted"><HelpHint term="filtration_help" /> One list for every entry filter — add a rule and pick its type (Trend Alignment · ADX Regime · Session · any registry Indicator). Each can <b>skip</b> or <b>scale</b> (de-size ×factor) a trade. Every rule is <b>shadow</b> or <b>live</b>: shadow is computed and logged as <code>filter_shadow</code> and changes nothing, live actually acts — new Indicator rules start in shadow on purpose. Fail-open: a rule whose inputs aren't available is a no-op. Most-specific strategy scope wins.</p>
+            <p className="text-[11px] text-muted"><HelpHint term="filtration_help" /> Nothing filters until you add a rule.
+              Each rule can <b>skip</b> or <b>scale</b> (de-size ×factor) a trade, and is either <b>shadow</b> — computed
+              and logged as <code>filter_shadow</code>, changing nothing — or <b>live</b>. New Indicator rules start in
+              shadow on purpose. Fail-open: a rule whose inputs aren't available is a no-op. Most-specific scope wins.</p>
             <EntryFilterRules rules={form.rules} onChange={(rules) => setF("rules", rules)} />
           </div>
         )}
 
         {tab === "exit" && (
-          <div className="p-4 space-y-3">
-            <p className="text-[11px] text-muted"><HelpHint term="exit_policy_help" /> The stop-loss ratchet + cancel-pending behaviour. Snapshotted at entry, so this trade's arm is frozen. No rules ⇒ the channel / global default.</p>
-            <label className="flex items-center gap-2 text-sm">Cancel pending orders on stop
-              <Toggle checked={form.exit.cancel_pending_on_stop} onChange={(v) => setSub("exit", "cancel_pending_on_stop", v)} /></label>
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-xs text-muted">Presets:</span>
-              {Object.keys(SL_PRESETS).map((n) => (
-                <button key={n} onClick={() => setSub("exit", "sl_rules", SL_PRESETS[n].map((r) => ({ ...r })))}
-                  className="text-[11px] px-2 py-0.5 rounded-full border border-edge text-muted hover:border-beacon hover:text-beacon">{n}</button>
-              ))}
-            </div>
-            <SlRulesEditor rules={form.exit.sl_rules} unit={unit}
-                           onChange={(v) => setSub("exit", "sl_rules", v)} />
+          <div className="p-4 space-y-2">
+            <p className="text-[11px] text-muted"><HelpHint term="exit_policy_help" /> The stop-loss ratchet and what
+              happens to pending orders. Snapshotted at entry, so a running trade's arm stays frozen. Off means
+              inherited — the channel or global default.</p>
+
+            <ConfigRow label="Stop-loss ratchet rules"
+                       hint="move the stop as targets are hit — the engine only ever tightens"
+                       summary="off · inherited"
+                       active={!!form.exitOn.sl_rules}
+                       onChange={(v) => setSub("exitOn", "sl_rules", v)}>
+              <div className="space-y-2 pt-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-xs text-muted">Presets:</span>
+                  {Object.keys(SL_PRESETS).map((n) => (
+                    <button key={n} onClick={() => setSub("exit", "sl_rules", SL_PRESETS[n].map((r) => ({ ...r })))}
+                      className="text-[11px] px-2 py-0.5 rounded-full border border-edge text-muted hover:border-beacon hover:text-beacon">{n}</button>
+                  ))}
+                </div>
+                <SlRulesEditor rules={form.exit.sl_rules} unit={unit}
+                               onChange={(v) => setSub("exit", "sl_rules", v)} />
+              </div>
+            </ConfigRow>
+
+            <ConfigRow label="Cancel pending orders on stop"
+                       hint="when the stop takes one leg, pull the rest of the fanout"
+                       summary="off · inherited (on)"
+                       active={!!form.exitOn.cancel_pending_on_stop}
+                       onChange={(v) => setSub("exitOn", "cancel_pending_on_stop", v)}>
+              <div className="pt-2">
+                <Toggle checked={!!form.exit.cancel_pending_on_stop}
+                        onChange={(v) => setSub("exit", "cancel_pending_on_stop", v)}
+                        label={form.exit.cancel_pending_on_stop ? "cancel them" : "leave them working"} />
+              </div>
+            </ConfigRow>
           </div>
         )}
       </Card>
