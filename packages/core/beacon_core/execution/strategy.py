@@ -20,9 +20,12 @@ from ..ta import registry as TA
 # The entry-policy keys the planner/executor understand (chase guard #67 + TTL).
 # entry_style + staged drive the confirmation-staged entry model (#129); staged is
 # a nested block validated by execution.staging.clean_staged_config.
+# `entry_policy` merges key-by-key over THIS TUPLE, so a key missing from it is
+# dropped on the way through and the setting silently appears to do nothing.
+# sl_distance (#249) replaces the channel's stop with one this far from the entry.
 ENTRY_POLICY_KEYS = ("ttl_minutes", "honor_market_hint", "chase_tolerance_r",
                      "chase_tolerance_atr", "beyond_tolerance", "max_tp_distance_pct",
-                     "entry_style", "staged")
+                     "entry_style", "staged", "sl_distance")
 
 
 def resolve_chain(strategies, account_id, source_id) -> list:

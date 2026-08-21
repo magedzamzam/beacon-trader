@@ -74,6 +74,11 @@ def _triggered(trigger: dict, ctx: PositionCtx, tps_hit: Set[int]) -> bool:
     if t == "tp_hit":
         return int(trigger.get("index", 0)) in tps_hit
     if t == "price_move":
+        # RAW INSTRUMENT PRICE UNITS, not pips (#251). On XAUUSD `points: 30` is a
+        # $30 move — about 2.5x a typical channel stop, not 3 pips. The UI now
+        # labels the field with the instrument and echoes the money value; the
+        # comparison here is unchanged, and existing saved rules keep behaving
+        # exactly as they did. Use `be_lock_at_r` for a stop-relative trigger.
         pts = Decimal(str(trigger.get("points", 0)))
         if ctx.side == "BUY":
             return (ctx.current_price - ctx.entry) >= pts

@@ -53,15 +53,42 @@ def _valid_sl_rules(rules) -> bool:
     return True
 
 
+def _clean_sl_distance(raw):
+    """The #249 per-channel stop distance: a positive number, or absent.
+
+    An operator clearing the field sends `""`. That is not None, so it would slip
+    past the generic filter below and be stored — the same shape that put
+    `min_adx: ""` on the live entry path (#164). Empty means OFF and is dropped
+    here, so the DB never holds one whichever client wrote it. A negative or
+    zero distance is a typo, not a stop, and is refused at write time rather than
+    silently ignored at execution time."""
+    if raw is None or raw == "":
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(422, f"entry_policy.sl_distance must be a number "
+                                 f"(got {raw!r})")
+    if val <= 0:
+        raise HTTPException(422, "entry_policy.sl_distance must be greater than "
+                                 "zero — clear the field to use the channel's stop")
+    return val
+
+
 def _clean_entry_policy(ep) -> dict | None:
     """Keep only known entry-policy keys (#67 chase guard + TTL), validating the
-    #129 staged-entry keys: entry_style (enum) and staged (nested block)."""
+    #129 staged-entry keys: entry_style (enum) and staged (nested block), and the
+    #249 stop override (sl_distance)."""
     if ep is None:
         return None
     if not isinstance(ep, dict):
         raise HTTPException(422, "entry_policy must be an object")
     out = {k: ep[k] for k in ENTRY_POLICY_KEYS
-           if k in ep and ep[k] is not None and k not in ("entry_style", "staged")}
+           if k in ep and ep[k] is not None
+           and k not in ("entry_style", "staged", "sl_distance")}
+    _sl_distance = _clean_sl_distance(ep.get("sl_distance"))
+    if _sl_distance is not None:
+        out["sl_distance"] = _sl_distance
     if ep.get("entry_style") is not None:
         try:
             out["entry_style"] = STG.clean_entry_style(ep["entry_style"])

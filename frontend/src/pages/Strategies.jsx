@@ -52,7 +52,9 @@ const SL_PRESETS = {
   "BE at TP1 → trail": [{ trigger: tpH(1), action: mv("entry") }, { trigger: tpH(2), action: mv("previous_tp") }, { trigger: tpH(3), action: mv("previous_tp") }],
   "BE at TP2 → trail": [{ trigger: tpH(2), action: mv("entry") }, { trigger: tpH(3), action: mv("previous_tp") }, { trigger: tpH(4), action: mv("previous_tp") }],
   "BE at TP3 → trail": [{ trigger: tpH(3), action: mv("entry") }, { trigger: tpH(4), action: mv("previous_tp") }, { trigger: tpH(5), action: mv("previous_tp") }],
-  "Tighten: +30pts → BE": [{ trigger: { type: "price_move", points: 30 }, action: mv("entry") }, { trigger: tpH(2), action: mv("previous_tp") }],
+  // #251: named for what it does. `points` is raw INSTRUMENT PRICE, so 30 on
+  // gold is a $30 move — about 2.5x a typical channel stop, not 3 pips.
+  "Tighten: +$30 move → BE": [{ trigger: { type: "price_move", points: 30 }, action: mv("entry") }, { trigger: tpH(2), action: mv("previous_tp") }],
   "Early BE @ 0.6R (hold)": [{ trigger: { type: "be_lock_at_r", r: 0.6 }, action: mv("entry") }],   // #109
 };
 // Mirrors beacon_core.ta.registry.AVAILABLE_TIMEFRAMES (the TFs the trend read supports).
@@ -60,16 +62,30 @@ const TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"];
 const BLANK = () => ({
   id: null, account_id: "", source_id: "", label: "", enabled: true,
   entry: { ttl_minutes: "", honor_market_hint: true, chase_tolerance_r: "", chase_tolerance_atr: "", beyond_tolerance: "limit", max_tp_distance_pct: "",
-           entry_style: "", staged: { ...STAGED_DEFAULTS } },
+           sl_distance: "", entry_style: "", staged: { ...STAGED_DEFAULTS } },
   rules: [],          // unified entry-filter rules (Trend Alignment / ADX Regime / Session)
   exit: { sl_rules: [], cancel_pending_on_stop: true },
 });
 const INPUT = "w-full bg-panel2 border border-edge rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-beacon";
+
+// #251: every distance field on this page is in raw INSTRUMENT PRICE UNITS, and
+// none of them used to say so — "30 pts" reads as 3 pips and means a $30 move on
+// gold. `value_per_point` is money per 1.0 price move per 1.0 lot; it happens to
+// be 1.0 for XAUUSD, but that is a property of the instrument, not a rule, so the
+// echo is computed rather than assumed.
+const DEFAULT_UNIT = { symbol: "price", valuePerPoint: 1 };
+const unitLabel = (u) => `${u.symbol} price, 1 = $${Number(u.valuePerPoint).toFixed(2)}`;
+const priceMoveNote = (v, u) => {
+  const n = Number(v);
+  if (v === "" || v == null || !isFinite(n) || n <= 0) return null;
+  return `${u.symbol} moves ${n.toFixed(2)} → about $${(n * Number(u.valuePerPoint)).toFixed(2)} per 1.00 lot`;
+};
 const TABS = [["entry", "Entry Strategy", LogIn], ["filter", "Entry Filtration", Filter], ["exit", "Exit Strategy", LogOut]];
 
 export default function Strategies() {
   const [sources, setSources] = useState([]);
   const [accounts, setAccounts] = useState([]);
+  const [unit, setUnit] = useState(DEFAULT_UNIT);       // #251 price-unit label
   const [all, setAll] = useState([]);
   const [form, setForm] = useState(BLANK());
   const [tab, setTab] = useState("entry");
@@ -80,6 +96,12 @@ export default function Strategies() {
   useEffect(() => {
     api.sources().then(setSources).catch((e) => setErr(e.message));
     api.accounts().then(setAccounts).catch((e) => setErr(e.message));
+    // One instrument today (XAUUSD). If that ever stops being true the label
+    // falls back to the neutral "price" rather than naming the wrong symbol.
+    api.symbols().then((rows) => {
+      const names = [...new Set((rows || []).map((r) => r.internal_symbol))];
+      if (names.length === 1) setUnit({ symbol: names[0], valuePerPoint: rows[0].value_per_point ?? 1 });
+    }).catch(() => {});
     load();
   }, []);
 
@@ -113,6 +135,9 @@ export default function Strategies() {
       ttl_minutes: num(form.entry.ttl_minutes), honor_market_hint: form.entry.honor_market_hint,
       chase_tolerance_r: num(form.entry.chase_tolerance_r), chase_tolerance_atr: num(form.entry.chase_tolerance_atr),
       beyond_tolerance: form.entry.beyond_tolerance, max_tp_distance_pct: num(form.entry.max_tp_distance_pct),
+      // #249: empty is OFF and must stay absent — the API refuses <= 0 rather
+      // than storing a stop of zero distance.
+      sl_distance: num(form.entry.sl_distance),
     };
     if (form.entry.entry_style) entry_policy.entry_style = form.entry.entry_style;
     if (form.entry.entry_style === "staged") {                  // send the staged block, numbers coerced
@@ -200,6 +225,30 @@ export default function Strategies() {
                 <option value="staged">Confirmation-staged (DemoC)</option>
               </Select>
             </Field>
+            <Field label={`Modify SL — distance (${unitLabel(unit)})`}
+                   hint="empty = the channel's own stop, unchanged">
+              <Input type="number" step="0.1" min="0" value={form.entry.sl_distance}
+                     onChange={(e) => setSub("entry", "sl_distance", e.target.value)} />
+            </Field>
+            {/* #249: measured from the signal's FAR entry edge (entry_to), which
+                is the edge a stop has to protect — two thirds of signals are a
+                zone, and a stop measured from the near edge would sit inside it
+                and be dropped as "sl on wrong side of entry". Applied before
+                sizing, so a tighter stop trades a LARGER lot at the same cash
+                risk. Applies to staged and single-shot alike. */}
+            {priceMoveNote(form.entry.sl_distance, unit) ? (
+              <p className="text-[11px] text-warn">
+                Stop set {Number(form.entry.sl_distance).toFixed(2)} from the signal's entry
+                ({priceMoveNote(form.entry.sl_distance, unit)}) — replaces the channel's stop,
+                and the lot is sized from it, so a tighter stop trades a bigger position at the
+                same cash risk.
+              </p>
+            ) : (
+              <p className="text-[11px] text-muted">
+                Empty = use the stop the channel sent. Set a number to trade your own stop
+                distance instead, measured from the signal's entry.
+              </p>
+            )}
             {form.entry.entry_style === "staged" && (
               <StagedEntryEditor value={form.entry.staged}
                 onChange={(k, val) => setSub("entry", "staged", { ...form.entry.staged, [k]: val })} />
@@ -237,7 +286,8 @@ export default function Strategies() {
                   className="text-[11px] px-2 py-0.5 rounded-full border border-edge text-muted hover:border-beacon hover:text-beacon">{n}</button>
               ))}
             </div>
-            <SlRulesEditor rules={form.exit.sl_rules} onChange={(v) => setSub("exit", "sl_rules", v)} />
+            <SlRulesEditor rules={form.exit.sl_rules} unit={unit}
+                           onChange={(v) => setSub("exit", "sl_rules", v)} />
           </div>
         )}
       </Card>

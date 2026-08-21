@@ -513,6 +513,45 @@ def test_entry_policy_passthrough_cases():
         S._clean_entry_policy([1, 2, 3])
 
 
+# ------------------------------------------------------ sl_distance (#249)
+def test_sl_distance_is_stored_when_it_is_a_positive_number():
+    assert S._clean_entry_policy({"sl_distance": 3})["sl_distance"] == 3.0
+    assert S._clean_entry_policy({"sl_distance": "2.5"})["sl_distance"] == 2.5
+
+
+def test_a_cleared_sl_distance_is_dropped_not_stored_as_empty():
+    """The UI sends "" for an untouched optional numeric. That is not None, so it
+    slips past an `is not None` filter and reaches the DB — the exact shape that
+    put `min_adx: ""` on the live entry path (#164). Empty means OFF."""
+    assert S._clean_entry_policy({"sl_distance": ""}) is None
+    assert S._clean_entry_policy({"sl_distance": None}) is None
+    out = S._clean_entry_policy({"ttl_minutes": 45, "sl_distance": ""})
+    assert out == {"ttl_minutes": 45} and "sl_distance" not in out
+
+
+@pytest.mark.parametrize("bad", [0, -3, "-0.5"])
+def test_a_nonpositive_sl_distance_is_refused_at_write_time(bad):
+    """A stop of zero distance is a typo, not a configuration. Refusing here beats
+    silently ignoring it at execution time, where the operator would see the
+    channel's stop and no explanation."""
+    with pytest.raises(HTTPException) as exc:
+        S._clean_entry_policy({"sl_distance": bad})
+    assert exc.value.status_code == 422
+
+
+def test_an_unparseable_sl_distance_is_refused():
+    with pytest.raises(HTTPException) as exc:
+        S._clean_entry_policy({"sl_distance": "three dollars"})
+    assert exc.value.status_code == 422
+
+
+def test_sl_distance_is_a_known_entry_policy_key():
+    """Not in ENTRY_POLICY_KEYS = dropped by the cascade merge, and the setting
+    silently does nothing. #249 called this failure mode out by name."""
+    from beacon_core.execution.strategy import ENTRY_POLICY_KEYS
+    assert "sl_distance" in ENTRY_POLICY_KEYS
+
+
 # ------------------------------------------------- _valid_sl_rules / exit
 _GOOD_SL = [{"trigger": {"type": "tp_hit", "index": 1},
              "action": {"type": "move_sl_to", "target": "entry"}}]

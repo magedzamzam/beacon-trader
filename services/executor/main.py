@@ -28,6 +28,7 @@ from beacon_core.db.models import (Account, Event, Leg, Signal, Source, Trade,
 from beacon_core.execution import strategy as ST
 from beacon_core.execution import staging as STG
 from beacon_core.execution import placement as PLACE     # broker-refusal recovery (#221)
+from beacon_core.execution import sl_override as SLO     # per-channel stop (#249)
 from beacon_core.brokers import build_adapter, symbol_map
 from beacon_core.brokers import fx
 from beacon_core.tasks import spawn_bg
@@ -459,6 +460,36 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         planner_cfg = ST.entry_policy(
             _chain, global_planner=DEFAULT_PLANNER,
             source_ttl=(source.strategy or {}).get("entry_ttl_minutes") if source else None)
+
+        # --- per-channel stop override (#249) ---------------------------------
+        # Replace the channel's stop with one `sl_distance` from the signal's far
+        # entry edge. HERE, before the plan is built, because the plan is what
+        # sizing reads: lot = risk_cash / |entry - sl|, so a tighter stop trades a
+        # LARGER lot at the same cash risk. Applied any later and the lot would be
+        # sized against the channel's stop while the order carried ours.
+        #
+        # `parsed` is built ONCE per signal and fanned across every account, so
+        # this REBINDS A COPY (sl_override.apply never mutates). An arm that did
+        # not configure an override must keep the channel's stop, or the A/B is
+        # comparing something nobody chose.
+        _sl_distance = SLO.resolve_distance(planner_cfg)
+        if _sl_distance is not None:
+            _sl_before = parsed.sl
+            parsed, _sl_note = SLO.apply(parsed, _sl_distance,
+                                         min_stop_distance=smap.min_stop_distance)
+            log.info("signal %s acct %s: sl_distance=%s %s (%s -> %s)", sig.id,
+                     acct.id, _sl_distance, _sl_note, _sl_before, parsed.sl)
+            # Recorded whatever the outcome: an override that fell back to the
+            # channel's stop on half the book would otherwise be invisible, and
+            # the measurement it exists to produce would be uninterpretable.
+            session.add(Event(kind="sl_override", payload={
+                "signal_id": sig.id, "account_id": acct.id,
+                "source_id": sig.source_id, "note": _sl_note,
+                "distance": str(_sl_distance),
+                "sl_before": str(_sl_before), "sl_after": str(parsed.sl),
+                "anchor": str(parsed.entry_to),
+                "min_stop_distance": (str(smap.min_stop_distance)
+                                      if smap.min_stop_distance is not None else None)}))
         # Default 0.5 (50%): catches parse-artifact TPs (e.g. tp=1530 vs gold ~4180,
         # ~60% away) while never tripping a real target. Tune via the entry policy.
         max_tp_pct = Decimal(str(planner_cfg.get("max_tp_distance_pct", "0.5")))
