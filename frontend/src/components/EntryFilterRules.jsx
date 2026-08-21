@@ -18,6 +18,18 @@ const TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"];
 
 // The rule-type registry. `blank` is the default `when` block for a new rule of
 // that type; `fields` renders the type-specific inputs. Add a type here to extend.
+// NOT OFFERED: mc_probability and turtle_signal (#163). Their evaluators exist in
+// execution.strategy and are tested, but NOTHING supplies the `montecarlo` /
+// `turtle` context they read — not the executor (main.py builds the filter ctx
+// from sessions, price, ts, adx and ta, and nothing else) and not replay. The
+// helper that would fetch them, strategy.shadow_rule_inputs(), has no caller at
+// all. So a rule of either type reads UNKNOWN forever: it can never gate a trade,
+// and — despite the "SHADOW: inert until graduated" this menu used to promise —
+// it never records a shadow measurement either, because there is no value to
+// record. Offering a rule that cannot fire and cannot measure is a trap, and
+// nobody had created one (0 across every live strategy row).
+// Re-add both entries here and to _FILTER_WHEN once the executor puts those
+// blocks in the filter ctx; the grammar side is already done.
 export const RULE_TYPES = {
   trend_alignment: {
     label: "Trend Alignment",
@@ -39,16 +51,6 @@ export const RULE_TYPES = {
     label: "Time window",
     hint: "act inside a wall-clock window — the hour grain a Session cannot express (#214). Half-open [from, to); to ≤ from crosses midnight.",
     blank: { type: "time_window", tz: "UTC", from: "07:00", to: "09:00", days: [] },
-  },
-  mc_probability: {
-    label: "Monte Carlo (geometry)",
-    hint: "act on what the SL/TP layout is worth with NO channel skill — a HIGH P(win) means a far stop and a near target, not an edge. SHADOW: inert until graduated.",
-    blank: { type: "mc_probability", max_expected_r: 0, min_p_win: "", max_p_win: "", min_rr: "" },
-  },
-  turtle_signal: {
-    label: "Turtle (Donchian)",
-    hint: "act on whether the 55-bar breakout system agrees with the channel's direction. SHADOW: inert until graduated.",
-    blank: { type: "turtle_signal", agrees: false, position: "", variant: "signal" },
   },
   indicator: {
     label: "Indicator (any)",

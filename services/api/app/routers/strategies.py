@@ -32,8 +32,14 @@ _SL_TRIGGERS = {"tp_hit", "price_move", "be_lock_at_r"}   # be_lock_at_r: #109
 # into the legacy entry_filters.trend_alignment block before saving, and the
 # evaluator has no case for it, so accepting one into `rules` would store a
 # permanently silent no-op.
-_FILTER_WHEN = {"always", "session_in", "time_window", "adx_regime",
-                "mc_probability", "turtle_signal", "indicator"}
+# mc_probability / turtle_signal are deliberately absent: their evaluators exist
+# and are tested, but nothing supplies the `montecarlo` / `turtle` ctx they read
+# (not the executor, not replay), so a saved rule of either type reads UNKNOWN
+# forever — it can neither gate a trade nor record a shadow measurement. They
+# were added here in #163 to stop a 422 on a UI that offered them; the UI no
+# longer offers them. Nothing live used either (0 rows). Re-add both when the
+# executor puts those blocks in the filter ctx.
+_FILTER_WHEN = {"always", "session_in", "time_window", "adx_regime", "indicator"}
 _FILTER_ACTIONS = {"skip", "scale"}
 
 

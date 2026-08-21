@@ -166,11 +166,25 @@ def test_entry_filters_does_not_mutate_the_caller_payload():
     assert when["min_adx"] == ""                     # request body untouched
 
 
-def test_entry_filters_accepts_the_new_shadow_rule_types():
-    """#163: these must persist, not 422."""
-    for t in ("mc_probability", "turtle_signal"):
-        out = S._clean_entry_filters({"rules": [_rule({"type": t})]})
-        assert out["rules"][0]["when"]["type"] == t
+@pytest.mark.parametrize("t", ["mc_probability", "turtle_signal"])
+def test_a_rule_that_can_never_be_evaluated_is_refused(t):
+    """Inverts #163, which added these to _FILTER_WHEN so a UI that offered them
+    would stop 422-ing. The UI no longer offers them, because neither can be
+    evaluated: nothing supplies the `montecarlo` / `turtle` ctx their evaluators
+    read — not the executor (which builds the filter ctx from sessions, price,
+    ts, adx and ta) and not replay — and strategy.shadow_rule_inputs(), the
+    helper that would fetch them, has no caller at all.
+
+    So the rule reads UNKNOWN forever: it can never gate a trade, and it never
+    records a shadow measurement either, because there is no value to record.
+    Storing one is storing a permanently silent no-op, which is the same failure
+    #164 fixed for trend_alignment. Nothing live used either type (0 rows).
+
+    When the executor puts those blocks in the ctx, re-add them to _FILTER_WHEN
+    and to EntryFilterRules.jsx RULE_TYPES, and flip this test back."""
+    with pytest.raises(HTTPException) as exc:
+        S._clean_entry_filters({"rules": [_rule({"type": t})]})
+    assert exc.value.status_code == 422
 
 
 # ------------------------------------------------------- capture follows config
