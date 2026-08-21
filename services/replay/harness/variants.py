@@ -43,6 +43,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
+from . import signal_overrides as SO
+
 from beacon_core.execution import strategy as ST
 from beacon_core.execution.planner import DEFAULT_PLANNER
 from beacon_core.execution.guard import DEFAULT_RISK_LIMITS
@@ -126,6 +128,11 @@ class Variant:
     # reproducibility claim cannot survive. `scaffold` reads the real setting, so
     # the validation baseline gets it without anyone needing to know it exists.
     trading_hours: Optional[Dict[str, Any]] = None
+    # Rewrites the SIGNAL's stop before planning (research-only — no live
+    # setting can move a channel's stop). See `signal_overrides`. Absent by
+    # default, and every result reports what it did, because a lever that
+    # silently applied to nothing would report the baseline as the treatment.
+    signal_overrides: Optional[Dict[str, Any]] = None
     horizon_bars: int = 1440
     # Which price a ratchet trigger reads inside a bar. "extreme" is the closest
     # match to a monitor polling many times a minute (and to the MFE latching in
@@ -266,6 +273,7 @@ def build_variant(d: dict) -> Variant:
         min_stop_distance=None if msd in (None, "") else _dec(msd),
         costs=d.get("costs") or {},
         trading_hours=d.get("trading_hours") or None,
+        signal_overrides=SO.parse(d.get("signal_overrides")),
         horizon_bars=int(d.get("horizon_bars") or 1440),
         ratchet_price=str(d.get("ratchet_price") or "extreme"),
         ratchet_timing=_ratchet_timing(d.get("ratchet_timing")),

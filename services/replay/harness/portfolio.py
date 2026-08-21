@@ -40,6 +40,7 @@ from beacon_core.execution import strategy as ST
 from beacon_core.parsing.models import ParsedSignal
 
 from . import bars as B
+from . import signal_overrides as SO
 from . import sim
 from .context import ContextBuilder, MarketContext, filter_ctx
 from .variants import Variant
@@ -215,8 +216,17 @@ class PortfolioSim:
             if session_factor != 1.0:
                 res.counts["session_desized"] += 1
 
+            # The stop override runs HERE, on the signal, before the real
+            # planner sees it — so sizing, the caps and the ratchet all react
+            # to the new stop exactly as they would live if a channel had sent
+            # it. A tighter stop therefore produces a BIGGER lot at the same
+            # risk, which is the mechanism under test.
+            parsed, _note = SO.apply(s.parsed, s.source_id, v.signal_overrides,
+                                     min_stop_distance=v.min_stop_distance)
+            if _note:
+                res.counts["sl_override_" + _note] += 1
             trade, why = sim.plan_trade(
-                signal=s.parsed, signal_id=s.id, source_id=s.source_id,
+                signal=parsed, signal_id=s.id, source_id=s.source_id,
                 account_id=account_id, signal_at=s.at, cfg=cfg, variant=v, mc=mc)
             if trade is None:
                 self._reject(res, s, account_id, why or "not_planned")
