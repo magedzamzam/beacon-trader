@@ -44,10 +44,30 @@ from typing import List, Optional
 from .planner import PlannedLeg, build_plan
 
 # --- the IF column ------------------------------------------------------------
+# Every LEVEL the grammar knows can also be a TRIGGER, which is what makes the
+# two-level ladders expressible: they are all built around "the LIMIT resting at
+# the far edge filled, now place a STOP behind it", and price reaching ENTRY-TO
+# IS that LIMIT filling.
 WHEN_SIGNAL = "signal"        # the moment the signal arrives
+WHEN_ENTRY_FROM = "entry_from"  # price reaches the NEAR entry edge
+WHEN_ENTRY_TO = "entry_to"    # price reaches the FAR entry edge (the LIMIT filled)
 WHEN_MID = "mid"              # price reaches MID (midpoint of far entry -> SL)
 WHEN_TP1 = "tp1"              # price reaches TP1
-WHENS = (WHEN_SIGNAL, WHEN_MID, WHEN_TP1)
+WHENS = (WHEN_SIGNAL, WHEN_ENTRY_FROM, WHEN_ENTRY_TO, WHEN_MID, WHEN_TP1)
+
+# The price a trigger waits for, given the signal. `signal` has none — it fires
+# on arrival — and `tp1` is a TARGET-side level, so it is read with
+# `reached_target` rather than `reached`.
+def trigger_level(when: str, sig):
+    if when == WHEN_ENTRY_FROM:
+        return Decimal(str(sig.entry_from))
+    if when == WHEN_ENTRY_TO:
+        return Decimal(str(sig.entry_to))
+    if when == WHEN_MID:
+        return mid_level(sig.entry_to, sig.sl)
+    if when == WHEN_TP1:
+        return Decimal(str(sig.tps[0])) if sig.tps else None
+    return None
 
 # --- the THEN column ----------------------------------------------------------
 DO_OPEN = "open"
@@ -74,12 +94,43 @@ def _row(when, action, order=None, level=None, target=None) -> dict:
     return r
 
 
-# The table an operator starts from: #250's 3-TP ladder, which degrades to its
-# 2-TP one on a 2-TP signal because the TP3 row is then not created.
+# The table an operator starts from.
+#
+# WRITTEN TO DEPTH ON PURPOSE. Rows targeting a TP the signal does not have are
+# not created, so ONE table degrades correctly: on a 2-TP signal this is exactly
+# #250's 2-TP ladder, on a 3-TP signal exactly its 3-TP one, and on a 5-TP signal
+# it keeps alternating instead of abandoning TP4 and TP5. The first version
+# stopped at TP3 and silently left the deepest targets of a 4- or 5-TP signal
+# untraded — and this book runs ladders 2-5 deep.
+#
+# The alternation is #250's: a position at MID, then a STOP back at the entry,
+# repeating outward. One deliberate difference from the issue's 4+ variant, which
+# also pulls TP3 forward to signal time — that makes the 3-TP and 4-TP ladders
+# structurally different shapes rather than one shape truncated, which no single
+# table can express. Add a `signal / open / POSITION / ENTRY-FROM / TP3` row if
+# you want the issue's version; the table is editable precisely so that is your
+# call and not this file's.
 DEFAULT_LADDER = [
     _row(WHEN_SIGNAL, DO_OPEN, ORDER_POSITION, LVL_ENTRY_FROM, 1),
     _row(WHEN_MID, DO_OPEN, ORDER_POSITION, LVL_MID, 2),
     _row(WHEN_MID, DO_OPEN, ORDER_STOP, LVL_ENTRY_FROM, 3),
+    _row(WHEN_MID, DO_OPEN, ORDER_POSITION, LVL_MID, 4),
+    _row(WHEN_MID, DO_OPEN, ORDER_STOP, LVL_ENTRY_FROM, 5),
+    _row(WHEN_MID, DO_OPEN, ORDER_POSITION, LVL_MID, 6),
+    _row(WHEN_MID, DO_OPEN, ORDER_STOP, LVL_ENTRY_FROM, 7),
+    _row(WHEN_MID, DO_OPEN, ORDER_POSITION, LVL_MID, 8),
+    _row(WHEN_TP1, DO_CANCEL),
+]
+
+# #250's two-level ladder, which needs the far edge and therefore the ENTRY-TO
+# trigger. Kept next to the default so the shape is written down somewhere:
+# a LIMIT rests at the far edge, and its fill is what arms the STOP behind it.
+TWO_LEVEL_LADDER = [
+    _row(WHEN_SIGNAL, DO_OPEN, ORDER_POSITION, LVL_ENTRY_FROM, 1),
+    _row(WHEN_SIGNAL, DO_OPEN, ORDER_LIMIT, LVL_ENTRY_TO, 1),
+    _row(WHEN_ENTRY_TO, DO_OPEN, ORDER_STOP, LVL_ENTRY_FROM, 2),
+    _row(WHEN_MID, DO_OPEN, ORDER_STOP, LVL_ENTRY_TO, 2),
+    _row(WHEN_MID, DO_OPEN, ORDER_STOP, LVL_ENTRY_TO, 3),
     _row(WHEN_TP1, DO_CANCEL),
 ]
 
@@ -194,6 +245,7 @@ def plan_ladder(sig, rows: Optional[List[dict]] = None, *,
     rows = rows or DEFAULT_LADDER
     tps = list(sig.tps or [])
     legs: List[PlannedLeg] = []
+    seen = set()                     # (entry, tp_index) already claimed by a rung
     for r in rows:
         if r.get("action") != DO_OPEN:
             continue
@@ -219,11 +271,31 @@ def plan_ladder(sig, rows: Optional[List[dict]] = None, *,
         else:
             if not (Decimal(str(tp)) < entry < Decimal(str(sig.sl))):
                 continue
+        # The level a rung WAITS FOR is not the level it RESTS AT. A row like
+        # `entry_to / open / STOP / ENTRY-FROM / TP2` waits for price to reach the
+        # far edge and then places a STOP back at the near one, and the two are
+        # different prices. Conflating them made `mid / STOP / ENTRY-FROM` wait on
+        # ENTRY-FROM — which a BUY is already at or below — so the rung deployed
+        # at once instead of at MID.
+        wait_for = trigger_level(r["when"], sig)
+        if r["when"] != WHEN_SIGNAL and wait_for is None:
+            continue                     # a trigger this signal cannot produce
+        # COLLAPSE DUPLICATES. On a single-level signal ENTRY-TO *is* ENTRY-FROM,
+        # so a table written for a zone — a position at the near edge and a LIMIT
+        # at the far one — resolves both rows to the same price for the same
+        # target. That is not a second opinion, it is the same order twice: it
+        # splits the budget an extra way and rests two orders on one level. The
+        # first row to claim a (level, target) keeps it, so one table stays
+        # correct on both signal shapes instead of needing one table per shape.
+        key = (entry, idx)
+        if key in seen:
+            continue
+        seen.add(key)
         legs.append(PlannedLeg(
             side=sig.direction, entry=entry, tp=Decimal(str(tp)),
             sl=Decimal(str(sig.sl)), tp_index=idx, order_type=r["order"],
             tranche=r["when"],
-            trigger=None if r["when"] == WHEN_SIGNAL else entry))
+            trigger=None if r["when"] == WHEN_SIGNAL else wait_for))
     return legs
 
 

@@ -330,11 +330,13 @@ async def _drive_staged(session, trade, adapter, smap, mid, ttl_min) -> None:
     for tr in list(pending):
         if not str(tr.role or "").startswith("cancel:"):
             continue
-        # reached_TARGET, not reached: TP1 sits in the WINNING direction, so
-        # asking `reached` about it is true from the first tick and the ladder
-        # would cancel itself the instant the trade opened.
-        if tr.trigger_level is None or not LAD.reached_target(
-                direction, price, tr.trigger_level):
+        # reached_TARGET for a TP, `reached` for an entry-side level. TP1 sits in
+        # the WINNING direction, so asking `reached` about it is true from the
+        # first tick and the ladder would cancel itself the instant the trade
+        # opened; an ENTRY-TO cancel row is the other way round.
+        _on_target = tr.role.endswith(LAD.WHEN_TP1)
+        _hit = LAD.reached_target if _on_target else LAD.reached
+        if tr.trigger_level is None or not _hit(direction, price, tr.trigger_level):
             continue
         cancelled = 0
         for other in pending:

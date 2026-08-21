@@ -1109,8 +1109,7 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             # own or the monitor has nothing to notice. Its trigger level is the
             # price that fires it — TP1 today, resolved here where the TPs are known.
             for _when in LAD.cancel_rows(ladder_rows):
-                _lvl = (parsed.tps[0] if _when == LAD.WHEN_TP1 and parsed.tps
-                        else _mid if _when == LAD.WHEN_MID else None)
+                _lvl = LAD.trigger_level(_when, parsed)
                 if _lvl is None:
                     continue
                 session.add(StagedTranche(

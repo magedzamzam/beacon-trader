@@ -153,12 +153,17 @@ def test_cancel_rows_are_instructions_not_legs():
 
 
 def test_the_trigger_level_is_carried_on_every_deferred_rung():
+    """A deferred rung carries the level it WAITS FOR — which is its trigger's
+    level, not its own entry. Those coincide for `mid / POSITION / MID` and part
+    company for `mid / STOP / ENTRY-FROM`, which waits at MID and rests at the
+    entry."""
     rungs = L.plan_ladder(_sig())
+    mid = L.mid_level(Decimal("4176"), Decimal("4168"))
     for r in rungs:
         if r.tranche == L.WHEN_SIGNAL:
             assert r.trigger is None                # goes out now
         else:
-            assert r.trigger == r.entry             # waits for its level
+            assert r.trigger == mid                 # every other default row is MID-triggered
 
 
 # --- validation --------------------------------------------------------------
@@ -203,3 +208,107 @@ def test_a_table_that_never_opens_anything_is_refused():
 
 def test_the_default_table_is_valid_by_its_own_rules():
     assert L.clean_ladder(L.DEFAULT_LADDER) == L.DEFAULT_LADDER
+
+# --- covering the spectrum #250 specifies ------------------------------------
+
+@pytest.mark.parametrize("n_tp", [2, 3, 4, 5, 6, 7, 8])
+def test_every_take_profit_gets_a_rung(n_tp):
+    """The default table stopped at TP3, so a 4- or 5-TP signal silently left its
+    deepest targets untraded — and this book runs ladders 2-5 deep. Written to
+    depth, the drop rule handles the shrinking end and nothing is abandoned at
+    the deep end."""
+    tps = ["4190", "4200", "4210", "4220", "4230", "4240", "4250", "4260"][:n_tp]
+    rungs = L.plan_ladder(_sig(tps=tps))
+    assert sorted({r.tp_index for r in rungs}) == list(range(1, n_tp + 1))
+
+
+def test_a_table_deeper_than_the_signal_still_only_trades_what_exists():
+    rungs = L.plan_ladder(_sig(tps=("4190", "4200")))
+    assert sorted({r.tp_index for r in rungs}) == [1, 2]
+
+
+# --- the level a rung waits for is not the level it rests at -----------------
+
+def test_a_rung_waits_for_its_trigger_not_its_own_entry():
+    """`mid / open / STOP / ENTRY-FROM / TP3` must wait for MID and then place a
+    STOP back at the entry. Reading the trigger off the rung's own entry made it
+    wait on ENTRY-FROM — which a BUY is already at or below — so it deployed at
+    once instead of at MID."""
+    sig = _sig(entry_from="4180", entry_to="4176", sl="4168",
+               tps=("4190", "4200", "4210"))
+    rows = [L._row(L.WHEN_SIGNAL, L.DO_OPEN, L.ORDER_POSITION, L.LVL_ENTRY_FROM, 1),
+            L._row(L.WHEN_MID, L.DO_OPEN, L.ORDER_STOP, L.LVL_ENTRY_FROM, 3)]
+    rung = next(r for r in L.plan_ladder(sig, rows) if r.tp_index == 3)
+    assert rung.entry == Decimal("4180")          # rests at the entry ...
+    assert rung.trigger == Decimal("4172")        # ... but waits for MID
+    assert rung.trigger != rung.entry
+
+
+@pytest.mark.parametrize("when,want", [
+    (L.WHEN_ENTRY_FROM, "4180"), (L.WHEN_ENTRY_TO, "4176"),
+    (L.WHEN_MID, "4172"), (L.WHEN_TP1, "4190"),
+])
+def test_every_level_can_also_be_a_trigger(when, want):
+    """What makes the two-level ladders expressible at all: they are built around
+    the far-edge LIMIT filling, and price reaching ENTRY-TO *is* that fill."""
+    sig = _sig(entry_from="4180", entry_to="4176", sl="4168",
+               tps=("4190", "4200", "4210"))
+    assert L.trigger_level(when, sig) == Decimal(want)
+
+
+def test_the_signal_trigger_has_no_level():
+    assert L.trigger_level(L.WHEN_SIGNAL, _sig()) is None
+
+
+# --- one table, both entry shapes --------------------------------------------
+
+def test_the_two_level_ladder_reproduces_250s_zone_spec():
+    """POSITION at the near edge and a LIMIT at the far one; the LIMIT filling
+    arms a STOP back at the near edge; MID arms one at the far edge."""
+    sig = _sig(entry_from="4180", entry_to="4176", sl="4168",
+               tps=("4190", "4200", "4210"))
+    rungs = L.plan_ladder(sig, L.TWO_LEVEL_LADDER)
+    shape = {(str(r.trigger), r.order_type, str(r.entry), r.tp_index) for r in rungs}
+    assert ("None", "POSITION", "4180", 1) in shape        # now, at the near edge
+    assert ("None", "LIMIT", "4176", 1) in shape           # now, resting at the far edge
+    assert ("4176", "STOP", "4180", 2) in shape            # the LIMIT filled -> STOP behind it
+    assert ("4172", "STOP", "4176", 2) in shape            # MID -> STOP at the far edge
+
+
+def test_a_zone_table_collapses_safely_on_a_single_level_signal():
+    """ENTRY-TO *is* ENTRY-FROM there, so the near and far rows resolve to one
+    price. That is the same order twice, not a second opinion: it would split the
+    budget an extra way and rest two orders on one level."""
+    one_level = _sig(entry_from="4180", entry_to="4180", sl="4168",
+                     tps=("4190", "4200", "4210"))
+    rungs = L.plan_ladder(one_level, L.TWO_LEVEL_LADDER)
+    seen = [(r.entry, r.tp_index) for r in rungs]
+    assert len(seen) == len(set(seen)), seen
+    assert all(r.entry == Decimal("4180") for r in rungs)
+
+
+def test_the_two_level_table_is_valid_by_its_own_rules():
+    assert L.clean_ladder(L.TWO_LEVEL_LADDER) == L.TWO_LEVEL_LADDER
+
+
+def test_deduping_never_drops_a_genuinely_distinct_rung():
+    """Same target at DIFFERENT levels is the ladder working as intended, and must
+    survive: TP2 taken at MID and TP2 taken at the entry are different trades."""
+    sig = _sig(entry_from="4180", entry_to="4176", sl="4168", tps=("4190", "4200"))
+    rows = [L._row(L.WHEN_SIGNAL, L.DO_OPEN, L.ORDER_POSITION, L.LVL_ENTRY_FROM, 1),
+            L._row(L.WHEN_MID, L.DO_OPEN, L.ORDER_POSITION, L.LVL_MID, 2),
+            L._row(L.WHEN_ENTRY_TO, L.DO_OPEN, L.ORDER_STOP, L.LVL_ENTRY_FROM, 2)]
+    rungs = L.plan_ladder(sig, rows)
+    assert len(rungs) == 3
+    assert {r.entry for r in rungs if r.tp_index == 2} == {Decimal("4172"), Decimal("4180")}
+
+
+def test_the_deep_default_still_risks_what_the_single_shot_would_have():
+    """More rungs must not mean more money — the budget is split further, not
+    topped up."""
+    risk = RiskConfig(basis="capital_percent", value=Decimal("1"), allocation="even")
+    sig = _sig(tps=("4190", "4200", "4210", "4220", "4230"))
+    target, total, rungs = _both_totals(sig, risk)
+    assert len(rungs) == 5
+    assert total <= target
+    assert target - total < Decimal(len(rungs)) * INSTR.lot_step * Decimal("40")

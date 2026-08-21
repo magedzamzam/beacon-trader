@@ -21,6 +21,8 @@ import { Select, NumberInput, Button } from "./form";
  */
 const WHENS = [
   ["signal", "signal arrives"],
+  ["entry_from", "price reaches ENTRY-FROM"],
+  ["entry_to", "price reaches ENTRY-TO (the LIMIT fills)"],
   ["mid", "price reaches MID"],
   ["tp1", "price reaches TP1"],
 ];
@@ -36,10 +38,32 @@ const LEVELS = [
   ["MID", "MID"],
 ];
 
+// Mirrors beacon_core.execution.ladder.DEFAULT_LADDER. Written to depth on
+// purpose: rows targeting a TP the signal lacks are not created, so one table
+// degrades to #250's 2-TP and 3-TP ladders and keeps alternating past TP3
+// instead of leaving the deepest targets of a 4- or 5-TP signal untraded.
 export const DEFAULT_LADDER = [
   { when: "signal", action: "open", order: "POSITION", level: "ENTRY_FROM", target: 1 },
   { when: "mid", action: "open", order: "POSITION", level: "MID", target: 2 },
   { when: "mid", action: "open", order: "STOP", level: "ENTRY_FROM", target: 3 },
+  { when: "mid", action: "open", order: "POSITION", level: "MID", target: 4 },
+  { when: "mid", action: "open", order: "STOP", level: "ENTRY_FROM", target: 5 },
+  { when: "mid", action: "open", order: "POSITION", level: "MID", target: 6 },
+  { when: "mid", action: "open", order: "STOP", level: "ENTRY_FROM", target: 7 },
+  { when: "mid", action: "open", order: "POSITION", level: "MID", target: 8 },
+  { when: "tp1", action: "cancel_all" },
+];
+
+// #250's ZONE ladder — the shape that needs the far edge. A LIMIT rests at
+// ENTRY-TO and its fill is what arms the STOP behind it. On a single-level
+// signal ENTRY-TO is ENTRY-FROM, so those rows collapse onto the near edge and
+// the duplicates are dropped rather than double-ordered.
+export const TWO_LEVEL_LADDER = [
+  { when: "signal", action: "open", order: "POSITION", level: "ENTRY_FROM", target: 1 },
+  { when: "signal", action: "open", order: "LIMIT", level: "ENTRY_TO", target: 1 },
+  { when: "entry_to", action: "open", order: "STOP", level: "ENTRY_FROM", target: 2 },
+  { when: "mid", action: "open", order: "STOP", level: "ENTRY_TO", target: 2 },
+  { when: "mid", action: "open", order: "STOP", level: "ENTRY_TO", target: 3 },
   { when: "tp1", action: "cancel_all" },
 ];
 
@@ -123,7 +147,10 @@ export default function LadderEditor({ rows, onChange }) {
       <div className="flex items-center gap-2">
         <Button variant="ghost" onClick={add}><Plus className="w-4 h-4 inline -mt-0.5" /> Add row</Button>
         <Button variant="ghost" onClick={() => onChange(DEFAULT_LADDER.map((r) => ({ ...r })))}>
-          <RotateCcw className="w-3.5 h-3.5 inline -mt-0.5" /> Reset to default ladder
+          <RotateCcw className="w-3.5 h-3.5 inline -mt-0.5" /> Default ladder
+        </Button>
+        <Button variant="ghost" onClick={() => onChange(TWO_LEVEL_LADDER.map((r) => ({ ...r })))}>
+          <RotateCcw className="w-3.5 h-3.5 inline -mt-0.5" /> Zone ladder
         </Button>
       </div>
 
@@ -133,8 +160,14 @@ export default function LadderEditor({ rows, onChange }) {
 
       <div className="text-[11px] text-muted">
         <b>MID</b> is halfway from the far entry edge to the stop. On a single-level signal
-        ENTRY-TO <i>is</i> ENTRY-FROM, so one table covers both shapes. A row targeting a TP the
-        signal does not have is simply not created — never an error, never a nearer TP instead.
+        ENTRY-TO <i>is</i> ENTRY-FROM, so one table covers both shapes — rows that then land on
+        the same level for the same target collapse to one order instead of doubling up. A row
+        targeting a TP the signal does not have is simply not created — never an error, never a
+        nearer TP instead, so the table can be written deeper than any signal you expect.
+        <br />
+        A row waits for its <b>IF</b> level and places its order at its <b>LEVEL</b>; those are
+        often different prices — <span className="num">price reaches MID → STOP at ENTRY-FROM</span>
+        waits at MID and rests the order back at the entry.
         <br />
         <b className="text-fg">Total risk is unchanged.</b> Every rung is sized before the first
         order goes out, against the risk the ordinary single-shot entry would have taken on the
