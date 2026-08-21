@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { GitBranch, Trash2, LogIn, Filter, LogOut, Layers } from "lucide-react";
 import { Card, Table, Th, Td, Badge, Empty } from "../components/ui";
-import { Field, Input, Select, Toggle, Button, ErrorNote, ConfigRow } from "../components/form";
+import { Field, Input, Select, Toggle, Button, ErrorNote, ConfigRow, Modal } from "../components/form";
 import SlRulesEditor from "../components/SlRulesEditor";
 import StagedEntryEditor from "../components/StagedEntryEditor";
 import LadderEditor from "../components/LadderEditor";
@@ -62,7 +62,7 @@ const SL_PRESETS = {
 // The old page wrote all six keys on every save, which silently made every
 // strategy a full override and left the cascade with nothing to inherit.
 const ENTRY_DEFAULTS = {
-  ttl_minutes: 60, chase_tolerance_r: 0.25, chase_tolerance_atr: 0,
+  ttl_minutes: 60, chase_value: 0.25, chase_unit: "r",
   max_tp_distance_pct: 0.5, beyond_tolerance: "limit", honor_market_hint: true,
   sl_distance: 3,
 };
@@ -96,6 +96,9 @@ export default function Strategies() {
   const [all, setAll] = useState([]);
   const [form, setForm] = useState(BLANK());
   const [tab, setTab] = useState("entry");
+  const [ladderOpen, setLadderOpen] = useState(false);   // #250 grid, behind a button
+  const [fAcct, setFAcct] = useState("");                // filters on the strategy list
+  const [fSrc, setFSrc] = useState("");
   const [err, setErr] = useState(null);
   const [saved, setSaved] = useState(false);
 
@@ -125,11 +128,14 @@ export default function Strategies() {
     // absent is inherited and stays switched off with its default behind it.
     const set = (k) => ep[k] !== undefined && ep[k] !== null && ep[k] !== "";
     const entryOn = {};
-    for (const k of ["ttl_minutes", "chase_tolerance_r", "chase_tolerance_atr",
-                     "max_tp_distance_pct", "beyond_tolerance", "honor_market_hint",
+    for (const k of ["ttl_minutes", "max_tp_distance_pct", "honor_market_hint",
                      "sl_distance"]) {
       if (set(k)) entryOn[k] = true;
     }
+    // The chase row owns three stored keys. ATR wins the unit only when it is the
+    // term actually carrying a value — every live row stores atr: 0.
+    const atrChase = Number(ep.chase_tolerance_atr) > 0;
+    if (set("chase_tolerance_r") || atrChase || set("beyond_tolerance")) entryOn.chase = true;
     if (ep.entry_style === "staged") entryOn.staged = true;
     setForm({
       id: row.id, account_id: row.account_id ?? "", source_id: row.source_id ?? "",
@@ -138,6 +144,9 @@ export default function Strategies() {
                ...Object.fromEntries(Object.entries(ep)
                  .filter(([, v]) => v !== null && v !== "")
                  .map(([k, v]) => [k, v])),
+               chase_unit: atrChase ? "atr" : "r",
+               chase_value: atrChase ? ep.chase_tolerance_atr
+                 : (ep.chase_tolerance_r ?? ENTRY_DEFAULTS.chase_value),
                entry_style: ep.entry_style || "",
                staged: { ...STAGED_DEFAULTS, ...(ep.staged || {}) } },
       entryOn,
@@ -162,11 +171,19 @@ export default function Strategies() {
     // copy of the default.
     const on = form.entryOn || {};
     const entry_policy = {};
-    for (const k of ["ttl_minutes", "chase_tolerance_r", "chase_tolerance_atr",
-                     "max_tp_distance_pct", "sl_distance"]) {
+    for (const k of ["ttl_minutes", "max_tp_distance_pct", "sl_distance"]) {
       if (on[k]) entry_policy[k] = num(form.entry[k]);
     }
-    if (on.beyond_tolerance) entry_policy.beyond_tolerance = form.entry.beyond_tolerance;
+    if (on.chase) {
+      // BOTH terms are written, the unused one as 0. The engine takes the larger
+      // of the two, so leaving the other absent would let it inherit a value down
+      // the cascade and quietly beat the unit that was chosen here.
+      const v = num(form.entry.chase_value) ?? 0;
+      const atr = form.entry.chase_unit === "atr";
+      entry_policy.chase_tolerance_r = atr ? 0 : v;
+      entry_policy.chase_tolerance_atr = atr ? v : 0;
+      entry_policy.beyond_tolerance = form.entry.beyond_tolerance;
+    }
     if (on.honor_market_hint) entry_policy.honor_market_hint = !!form.entry.honor_market_hint;
     if (on.staged) {                       // #250: staged entry is on or off. The
       entry_policy.entry_style = "staged";  // ladder itself is the GLOBAL grid.
@@ -205,9 +222,25 @@ export default function Strategies() {
   const del = async (id) => { try { await api.deleteStrategy(id); if (form.id === id) newAt(); await load(); } catch (e) { setErr(e.message); } };
 
   const scopeLabel = `${acctName(form.account_id)} · ${srcName(form.source_id)}`;
+  // A NULL scope means "any", and an "any" row really does govern the account or
+  // source being filtered for, so it stays visible.
+  const matches = (rowVal, want) =>
+    !want || rowVal == null || String(rowVal) === String(want);
+  const shown = all.filter((r) => matches(r.account_id, fAcct) && matches(r.source_id, fSrc));
   return (
     <div className="space-y-5">
-      <LadderGrid />
+      {/* The ladder grid is global and rarely edited, so it lives behind a button
+          rather than taking the top of a page that is mostly per-channel work. */}
+      <div className="flex justify-end">
+        <Button variant="ghost" onClick={() => setLadderOpen(true)}>
+          <Layers className="w-4 h-4 inline -mt-0.5 mr-1" /> Staged Entry Configuration
+        </Button>
+      </div>
+      {ladderOpen && (
+        <Modal title="Staged Entry Configuration" size="5xl" onClose={() => setLadderOpen(false)}>
+          <LadderGrid />
+        </Modal>
+      )}
       <ResolvePreview accounts={accounts} sources={sources} />
       {/* Editor */}
       <Card>
@@ -307,38 +340,43 @@ export default function Strategies() {
               </div>
             </ConfigRow>
 
-            <ConfigRow label="Chase tolerance (× |entry−SL|)"
-                       hint="how far past the level a MARKET hint may still fill (#67)"
+            {/* One row, not three (#67). The engine takes the LARGER of the two
+                tolerances, so offering both as independent fields invited a pair
+                that silently ignored one of them — every live row has the ATR
+                term at 0 anyway. Pick the unit; the other term is written as 0 so
+                the chosen one is the one that governs. `beyond_tolerance` is
+                literally "what to do when past this", so it belongs here. */}
+            <ConfigRow label="Chase tolerance"
+                       hint="how far past the level a MARKET hint may still fill, and what to do beyond it (#67)"
                        summary="off · inherited"
-                       active={!!form.entryOn.chase_tolerance_r}
-                       onChange={(v) => setSub("entryOn", "chase_tolerance_r", v)}>
-              <div className="max-w-[16rem] pt-2">
-                <Input type="number" step="0.05" value={form.entry.chase_tolerance_r}
-                       onChange={(e) => setSub("entry", "chase_tolerance_r", e.target.value)} />
-              </div>
-            </ConfigRow>
-
-            <ConfigRow label="Chase tolerance (× ATR)" hint="the larger of the two tolerances wins"
-                       summary="off · inherited"
-                       active={!!form.entryOn.chase_tolerance_atr}
-                       onChange={(v) => setSub("entryOn", "chase_tolerance_atr", v)}>
-              <div className="max-w-[16rem] pt-2">
-                <Input type="number" step="0.1" value={form.entry.chase_tolerance_atr}
-                       onChange={(e) => setSub("entry", "chase_tolerance_atr", e.target.value)} />
-              </div>
-            </ConfigRow>
-
-            <ConfigRow label="Beyond tolerance" hint="what to do when the entry is too far to fill at market"
-                       summary="off · inherited"
-                       active={!!form.entryOn.beyond_tolerance}
-                       onChange={(v) => setSub("entryOn", "beyond_tolerance", v)}>
-              <div className="max-w-[16rem] pt-2">
-                <Select value={form.entry.beyond_tolerance}
-                        onChange={(e) => setSub("entry", "beyond_tolerance", e.target.value)}>
-                  <option value="limit">rest as LIMIT</option>
-                  <option value="market">fill at MARKET</option>
-                  <option value="skip">skip the trade</option>
-                </Select>
+                       active={!!form.entryOn.chase}
+                       onChange={(v) => setSub("entryOn", "chase", v)}>
+              <div className="pt-2 space-y-2">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <Field label="Within">
+                    <div className="flex gap-2">
+                      <Input type="number" step="0.05" value={form.entry.chase_value}
+                             onChange={(e) => setSub("entry", "chase_value", e.target.value)} />
+                      <Select value={form.entry.chase_unit}
+                              onChange={(e) => setSub("entry", "chase_unit", e.target.value)}>
+                        <option value="r">× |entry−SL|</option>
+                        <option value="atr">× ATR</option>
+                      </Select>
+                    </div>
+                  </Field>
+                  <Field label="Beyond that">
+                    <Select value={form.entry.beyond_tolerance}
+                            onChange={(e) => setSub("entry", "beyond_tolerance", e.target.value)}>
+                      <option value="limit">rest as LIMIT at the level</option>
+                      <option value="market">fill at MARKET anyway</option>
+                      <option value="skip">skip the trade</option>
+                    </Select>
+                  </Field>
+                </div>
+                <p className="text-[11px] text-muted">
+                  Only applies to a signal that says “enter now”. A level price has not reached is
+                  a LIMIT by construction.
+                </p>
               </div>
             </ConfigRow>
 
@@ -416,12 +454,41 @@ export default function Strategies() {
 
       {/* Existing strategies */}
       <Card>
-        <div className="px-4 py-3 border-b border-edge text-sm font-medium">Configured strategies <span className="text-muted font-normal">· most-specific scope wins</span></div>
-        {!all.length ? <Empty>No strategies yet — every trade uses the global/source default. Create one above.</Empty> : (
+        <div className="px-4 py-3 border-b border-edge flex items-center gap-2 flex-wrap">
+          <span className="text-sm font-medium">Configured strategies</span>
+          <span className="text-muted font-normal text-xs">· most-specific scope wins</span>
+          <span className="text-muted text-xs ml-auto">{shown.length} of {all.length}</span>
+        </div>
+        {/* A row scoped to "Any" matches every account or source, so it is shown
+            under any filter rather than hidden by one — hiding the (Any, Any)
+            base row while filtering by account would misrepresent what governs
+            that account. */}
+        <div className="px-4 py-2.5 border-b border-edge flex items-end gap-3 flex-wrap">
+          <Field label="Account">
+            <Select value={fAcct} onChange={(e) => setFAcct(e.target.value)}>
+              <option value="">All accounts</option>
+              {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </Select>
+          </Field>
+          <Field label="Source">
+            <Select value={fSrc} onChange={(e) => setFSrc(e.target.value)}>
+              <option value="">All sources</option>
+              {sources.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+            </Select>
+          </Field>
+          {(fAcct || fSrc) && (
+            <Button variant="ghost" onClick={() => { setFAcct(""); setFSrc(""); }}>Clear filter</Button>
+          )}
+        </div>
+        {!shown.length ? (
+          <Empty>{all.length
+            ? "No strategy matches this filter — clear it to see all of them."
+            : "No strategies yet — every trade uses the global/source default. Create one above."}</Empty>
+        ) : (
           <Table minW={820}>
             <thead><tr className="border-b border-edge"><Th>Account</Th><Th>Source</Th><Th>Label</Th><Th>Pillars</Th><Th>State</Th><Th right>v</Th><Th right></Th></tr></thead>
             <tbody>
-              {all.map((s) => (
+              {shown.map((s) => (
                 <tr key={s.id} className="border-b border-edge/60">
                   <Td>{acctName(s.account_id)}</Td>
                   <Td>{srcName(s.source_id)}</Td>
@@ -485,25 +552,19 @@ function LadderGrid() {
   };
 
   return (
-    <Card>
-      <div className="px-4 py-3 border-b border-edge flex items-center gap-2 flex-wrap">
-        <Layers className="w-4 h-4 text-beacon" />
-        <span className="text-sm font-medium">Staged entry — ladder grid</span>
-        <span className="text-muted text-xs">· global · one ladder per signal shape</span>
-        <div className="ml-auto flex items-center gap-2">
-          {!configured && <span className="text-[11px] text-muted">showing defaults</span>}
-          {saved && <span className="text-xs text-long">Saved</span>}
-          <Button onClick={save} disabled={!grid}>Save grid</Button>
-        </div>
+    <div className="space-y-3">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-[11px] text-muted flex-1">
+          Which ladder a signal runs follows from <b>the signal</b>, not the channel: whether it
+          carries one entry level or a zone, and how many take-profits it has. On the Strategies
+          editor a channel only switches staged entry <b>on or off</b>.
+        </span>
+        {!configured && <span className="text-[11px] text-muted">showing defaults</span>}
+        {saved && <span className="text-xs text-long">Saved</span>}
+        <Button onClick={save} disabled={!grid}>Save grid</Button>
       </div>
 
-      <div className="px-4 py-2 text-[11px] text-muted border-b border-edge">
-        Which ladder a signal runs follows from <b>the signal</b>, not the channel: whether it
-        carries one entry level or a zone, and how many take-profits it has. Pick a cell below to
-        edit it. On the Strategies editor a channel only switches staged entry <b>on or off</b>.
-      </div>
-
-      <div className="px-4 py-3 flex items-end gap-3 flex-wrap border-b border-edge">
+      <div className="flex items-end gap-3 flex-wrap border-b border-edge pb-3">
         <Field label="Entry shape">
           <Select value={zone} onChange={(e) => setZone(Number(e.target.value))}>
             <option value={1}>1-Zone — a single entry level</option>
@@ -523,11 +584,9 @@ function LadderGrid() {
       </div>
 
       <ErrorNote>{err}</ErrorNote>
-      <div className="p-4">
-        {!grid ? <Empty>Loading the grid…</Empty>
-          : <LadderEditor rows={cell} onChange={setCell} />}
-      </div>
-    </Card>
+      {!grid ? <Empty>Loading the grid…</Empty>
+        : <LadderEditor rows={cell} onChange={setCell} />}
+    </div>
   );
 }
 
