@@ -88,6 +88,11 @@ EVENT_GROUPS = [
         # the last one ran dark for two days before a human noticed a flat
         # account — then fixed it in a way that orphaned the accumulation.
         {"id": "arm_dark", "label": "A/B arm not trading"},
+        # #255: a categorical shadow estimator whose label takes ONE value across
+        # a whole window carries no information — and the regime label has been in
+        # that state in three separate weeks, each found by an analyst mid-report
+        # rather than by anything watching.
+        {"id": "estimator_degenerate", "label": "Estimator label degenerate"},
     ]},
 ]
 
@@ -105,6 +110,9 @@ EVENT_SEVERITY = {
     "broker_error": "critical", "arm_dark": "critical",
     # the end-of-day roll-up: more than chatter, less than a stop-out
     "daily_summary": "summary",
+    # measurement integrity, not money: it should reach the operator before the
+    # next weekly, not wake them at 03:00 (#255).
+    "estimator_degenerate": "summary",
     # routine flow
     "new_signal": "info", "signal_validated": "info", "signal_rejected": "info",
     "order_placed": "info", "order_filled": "info", "order_cancelled": "info",

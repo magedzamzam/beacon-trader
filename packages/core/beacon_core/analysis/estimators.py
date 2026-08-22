@@ -154,15 +154,91 @@ def vwap_z(price: Optional[float], vwap: Optional[float],
             "z": round(z, 4) if z is not None else None}
 
 
+REGIME_UNKNOWN = "unknown"       # ADX unavailable — say so, do not guess
+
+
 def classify_regime(adx: Optional[float], atr_pct: Optional[float],
                     rvol: Optional[float], hurst: Optional[float]) -> str:
-    """trending | ranging | high_vol from ADX + ATR% + realized vol + Hurst.
-    Volatility dominates (a vol spike is the 07-08-style regime), then trend."""
+    """trending | ranging | high_vol | unknown. Volatility dominates (a vol
+    spike is the 07-08-style regime), then ADX decides the trend axis.
+
+    HURST NO LONGER VOTES (#255), and the numbers are why. It used to be an OR
+    with the ADX test, and an OR is only as discriminating as its widest term.
+    Over the 671 signals captured in the 60 days to 2026-08-22 the repaired
+    estimator (#168, log returns) puts H in [0.5063, 1.0591] with a 5th
+    percentile of 0.5579 — **644 of 671 clear the 0.55 constant**, so the term
+    was `True` on 96% of rows and forced `trending` regardless of anything else.
+    That is what produced 117/117 `trending` in the frozen week and made the
+    manual's mandatory regime slice impossible to run for the third week
+    running.
+
+    ADX, meanwhile, was never the broken half. #111's key mismatch is genuinely
+    repaired — `_tf_num` prefix-matches `adx_14` — and the ADX read is present
+    on 556 of those 671 rows with a median of 27.12 and a range of
+    [10.01, 63.24]. On its own it splits the same window 338/218 and the frozen
+    week 92/25. A working discriminator was being swallowed by a saturated one.
+
+    So when ADX is available it decides, and when it is not the answer is
+    `unknown` rather than a guess. Hurst as a FALLBACK would have relabelled all
+    115 ADX-less rows `trending` — the same degeneracy, in a smaller subset.
+    Hurst is still computed and still persisted; it is a feature to screen on,
+    not a term that can outvote the one that works.
+
+    Deliberately NOT made percentile-relative to a rolling window (the issue's
+    other suggestion): that needs history inside a pure estimator, and 25 is a
+    standard threshold that demonstrably separates this book today. The general
+    protection against a threshold that saturates later is `degenerate_label`
+    below, which watches the OUTPUT rather than trusting any constant.
+
+    Cross-epoch note, like the Hurst repair before it: labels written before
+    this change used the OR and are not comparable to labels written after.
+    """
     if rvol is not None and rvol >= HIGH_VOL_RVOL_PCT:
         return "high_vol"
-    if (adx is not None and adx >= ADX_TRENDING) or (hurst is not None and hurst > HURST_TRENDING):
-        return "trending"
-    return "ranging"
+    if adx is not None:
+        return "trending" if adx >= ADX_TRENDING else "ranging"
+    return REGIME_UNKNOWN
+
+
+# --- estimator health: a label that cannot vary is not a feature (#255) -------
+# The regime label has now been degenerate in three separate weeks (264/0 before
+# the Hurst repair, 117/0 after it) and each time it was an analyst who noticed,
+# mid-report, that a required slice could not be produced. A shadow estimator
+# whose output takes ONE value across a whole window carries zero information —
+# the system should say so itself, the same way `epochs.dark_arm` says an arm has
+# stopped trading.
+DEGENERATE_MIN_N = 50           # below this, one label is a quiet week not a defect
+
+
+def degenerate_label(counts: dict, *, min_n: int = DEGENERATE_MIN_N) -> dict:
+    """Is a categorical estimator still capable of discriminating, over one window?
+
+    `counts`: {label: n} for the window. Fires on ZERO ENTROPY — exactly one
+    label observed — at n >= min_n, which is the state that makes a conditioned
+    analysis impossible rather than merely lopsided. A skewed-but-varying label
+    (123/9) is reported through `top_share` and left to the reader: there is no
+    defensible constant for "too skewed", and an alarm whose boundary is
+    arguable gets argued with instead of acted on.
+
+    Pure and estimator-agnostic: it takes counts, so any label the capture
+    persists can be watched without this module knowing what it means."""
+    clean = {str(k): int(v) for k, v in (counts or {}).items() if int(v or 0) > 0}
+    n = sum(clean.values())
+    top = max(clean, key=lambda k: clean[k]) if clean else None
+    share = (clean[top] / n) if top and n else None
+    degenerate = bool(n >= min_n and len(clean) == 1)
+    if n < min_n:
+        reason = (f"{n} observations in the window, below the {min_n} needed "
+                  "before one label means anything")
+    elif degenerate:
+        reason = (f"every one of {n} observations is '{top}' — the label takes a "
+                  "single value, so nothing can be conditioned on it")
+    else:
+        reason = (f"{len(clean)} labels over {n} observations "
+                  f"(most common '{top}' at {round(share, 4)})")
+    return {"n": n, "n_labels": len(clean), "labels": clean,
+            "top_label": top, "top_share": None if share is None else round(share, 4),
+            "min_n": min_n, "degenerate": degenerate, "reason": reason}
 
 
 # --- feature access helpers ---------------------------------------------------

@@ -66,17 +66,25 @@ def test_hurst_survives_a_flat_or_non_positive_series():
 
 # ---- regime: the constant label had TWO causes, not one ---------------------
 def test_saturated_hurst_no_longer_forces_trending():
-    """`_regime_label` ORs `hurst > 0.55` with the ADX test, so a saturated H
+    """`classify_regime` ORed `hurst > 0.55` with the ADX test, so a saturated H
     labelled EVERY signal 'trending' on its own. #111's null ADX read was blamed
     for the 264/264 constant; repairing that read alone would not have moved it
-    while this sat upstream. Replaying the captured windows with the fix splits
-    221/43 instead of 264/0."""
-    assert E.classify_regime(None, None, None, 0.99) == "trending"   # old behaviour
-    assert E.classify_regime(None, None, None, 0.52) == "ranging"    # in-range H
-    # a real path must not land on the forcing side by construction any more
-    labels = {E.classify_regime(None, None, None, E.hurst_rs(_walk(seed=s)))
-              for s in (3, 7, 11, 23, 41)}
-    assert labels != {"trending"}
+    while this sat upstream.
+
+    #168 fixed the ESTIMATOR (R/S on log returns) and the label still went
+    degenerate — 117/117 in the week to 2026-08-22 — because the repaired H
+    lands in [0.5063, 1.0591] with a 5th percentile of 0.5579, which is still
+    above 0.55 on 644 of 671 rows. A term that is true 96% of the time is not a
+    term. #255 took Hurst out of the vote entirely: no value of H, saturated or
+    not, can decide the label now."""
+    for h in (0.99, 0.52, 1.06, 0.5579):
+        assert E.classify_regime(None, None, None, h) == "unknown"   # ADX decides, or nobody does
+        assert E.classify_regime(10, 0.2, 0.1, h) == "ranging"       # low ADX, any H
+        assert E.classify_regime(30, 0.2, 0.1, h) == "trending"      # high ADX, any H
+    # a real path must not land on one side by construction any more
+    labels = {E.classify_regime(adx, None, None, E.hurst_rs(_walk(seed=s)))
+              for s, adx in ((3, 10.0), (7, 30.0), (11, 24.9), (23, 25.0), (41, 40.0))}
+    assert labels == {"trending", "ranging"}
 
 
 def test_regime_still_trends_on_a_real_adx():

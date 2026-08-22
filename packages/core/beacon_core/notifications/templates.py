@@ -48,6 +48,8 @@ FIELDS: list[tuple[str, str, str]] = [
     ("losses",         "Losing trades",    "4"),
     ("open_positions", "Open positions",   "2"),
     ("drawdown",       "Worst drawdown",   "-1,204.50"),
+    # Estimator health (#255): which shadow estimator went flat.
+    ("estimator",      "Estimator",        "regime"),
 ]
 
 # Per-event field CONTRACT — the tokens each event's emitter actually populates
@@ -84,6 +86,9 @@ EVENT_FIELDS: dict[str, list[str]] = {
     # the threshold it crossed. Deliberately no new FIELDS token — an alarm that
     # needs a bespoke vocabulary to be readable is an alarm nobody will route.
     "arm_dark":         ["account", "detail"],
+    # #255: which estimator, and the reason sentence — which already carries the
+    # counts and the window. Same restraint as `arm_dark`: no bespoke vocabulary.
+    "estimator_degenerate": ["estimator", "detail"],
 }
 
 

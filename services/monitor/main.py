@@ -16,7 +16,7 @@ import asyncio
 from datetime import timedelta
 from decimal import Decimal
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 
 from beacon_core.ai import service as ai_service
 from beacon_core.bus import Bus
@@ -25,8 +25,8 @@ from beacon_core.logging import get_logger
 from beacon_core.health import run_health_server
 from beacon_core.db.base import Session, init_models
 from beacon_core.db.models import (Account, Broker, Event, ExecutionStrategy, Leg,
-                                   PositionActivity, Signal, Source, Trade,
-                                   StagedEntry, StagedTranche)
+                                   PositionActivity, Signal, SignalAnalytics,
+                                   Source, Trade, StagedEntry, StagedTranche)
 from beacon_core.execution import attribution as ATTR
 from beacon_core.execution import strategy as ST
 from beacon_core.execution import staging as STG
@@ -40,6 +40,7 @@ from beacon_core.strategy.rules import (PositionCtx, entry_basis, evaluate,
 from beacon_core.settings_store import get_setting, set_setting
 from beacon_core.analysis import broker_truth as BT
 from beacon_core.analysis import epochs as EP
+from beacon_core.analysis import estimators as EST   # estimator health (#255)
 from beacon_core.analysis import structure as S
 from beacon_core.analysis import structure_map as struct_map
 from beacon_core.tasks import spawn_bg
@@ -1303,6 +1304,66 @@ async def _check_dark_arms() -> None:
         log.warning("dark-arm check failed: %s", exc)
 
 
+_ESTIMATOR_HEALTH_KEY = "estimator_health_state"    # {estimator: last-alert ISO}
+_ESTIMATOR_HEALTH_CFG_KEY = "estimator_health"      # operator overrides, all optional
+
+
+async def _check_degenerate_labels() -> None:
+    """Alarm when a categorical shadow estimator has stopped discriminating (#255).
+
+    The `regime` label has now been degenerate in three separate weeks — 264/0
+    before the Hurst repair, 123/9, then 117/0 — and every time it was an analyst
+    who found out, mid-report, that the manual's mandatory regime slice could not
+    be produced at all. A label that takes one value carries no information; the
+    system should say that itself rather than leaving it to be rediscovered.
+
+    Watches the OUTPUT, not the estimator, on purpose: it therefore also catches
+    the next threshold that saturates, including the ADX one this issue leaves in
+    place. READ-ONLY over the ledger and completely off the trading path — an
+    `events` row and a notification, no position touched. Debounced per estimator
+    so a genuinely dead label alerts once per cooldown, not once per tick.
+    """
+    try:
+        async with Session()() as s:
+            cfg = await get_setting(s, _ESTIMATOR_HEALTH_CFG_KEY, {}) or {}
+            if cfg.get("enabled") is False:
+                return
+            window_d = float(cfg.get("window_days", 7) or 7)
+            cooldown_h = float(cfg.get("cooldown_hours", 24) or 24)
+            min_n = int(cfg.get("min_n", EST.DEGENERATE_MIN_N) or EST.DEGENERATE_MIN_N)
+
+            now = utcnow()
+            since = now - timedelta(days=window_d)
+            rows = (await s.execute(
+                select(SignalAnalytics.regime, func.count())
+                .where(SignalAnalytics.captured_at >= since)
+                .group_by(SignalAnalytics.regime))).all()
+            counts = {(label or "unlabelled"): n for label, n in rows}
+            verdict = EST.degenerate_label(counts, min_n=min_n)
+            state = dict(await get_setting(s, _ESTIMATOR_HEALTH_KEY, {}) or {})
+            if not verdict["degenerate"]:
+                if state.pop("regime", None) is not None:   # recovered — re-arm
+                    await set_setting(s, _ESTIMATOR_HEALTH_KEY, state)
+                    await s.commit()
+                return
+            last = parse_iso_utc(state.get("regime"))
+            if last is not None and (now - last).total_seconds() < cooldown_h * 3600:
+                return
+            detail = (f"{verdict['reason']}, over the last {window_d:g}d. Any "
+                      f"analysis conditioned on regime is unavailable until this "
+                      f"is repaired — check the estimator before reading a slice "
+                      f"that silently has one level.")
+            s.add(Event(kind="estimator_degenerate", payload={
+                "estimator": "regime", "window_days": window_d, **verdict}))
+            _notify("estimator_degenerate", {"estimator": "regime", "detail": detail})
+            log.warning("estimator_degenerate: regime — %s", verdict["reason"])
+            state["regime"] = now.isoformat()
+            await set_setting(s, _ESTIMATOR_HEALTH_KEY, state)
+            await s.commit()
+    except Exception as exc:                    # never disturb the monitor loop
+        log.warning("estimator-health check failed: %s", exc)
+
+
 _DIGEST_KEY = "daily_summary_last"      # the DATE last reported, not when
 _DIGEST_CFG_KEY = "daily_summary"       # {enabled, at_utc}
 
@@ -1404,6 +1465,7 @@ async def main() -> None:
             await tick()
             await _maybe_recompute_structure()
             await _check_dark_arms()
+            await _check_degenerate_labels()
             await _maybe_send_daily_digest()
         except Exception as exc:
             log.exception("tick failed: %s", exc)

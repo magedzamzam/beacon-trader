@@ -36,7 +36,11 @@ def test_classify_regime_priority():
     # volatility spike dominates even when ADX says trending
     assert E.classify_regime(40, 0.2, 1.5, 0.7) == "high_vol"
     assert E.classify_regime(30, 0.2, 0.1, 0.4) == "trending"    # ADX >= 25
-    assert E.classify_regime(10, 0.2, 0.1, 0.7) == "trending"    # Hurst > 0.55
+    # #255: Hurst no longer outvotes ADX. It cleared 0.55 on 644 of 671 captured
+    # signals, so as an OR term it forced `trending` on 96% of the book and the
+    # label went degenerate for a third week. A low ADX now reads `ranging` no
+    # matter how persistent H looks.
+    assert E.classify_regime(10, 0.2, 0.1, 0.7) == "ranging"
     assert E.classify_regime(10, 0.2, 0.1, 0.4) == "ranging"
 
 
@@ -66,8 +70,11 @@ def test_ctx_estimators_read_features():
 
 def test_ctx_estimators_degrade_gracefully_on_missing_data():
     ctx = _Ctx([], {})                               # no window, no features
-    # regime still returns a label (ranging) from all-None inputs; series ones skip
-    assert E.regime(ctx)["label"] == "ranging"
+    # #255: with no ADX to read the honest answer is `unknown`, not `ranging`.
+    # 115 of the last 671 captured signals have no ADX in the regime block, and
+    # calling those "ranging" is a guess that a conditioned analysis then treats
+    # as data.
+    assert E.regime(ctx)["label"] == "unknown"
     assert E.hurst(ctx) is None
     assert E.kalman(ctx) is None
     assert E.vwap_deviation(ctx) is None
