@@ -155,3 +155,38 @@ def test_a_tighter_stop_buys_a_larger_lot_at_the_same_cash_risk():
     for leg, stop in ((base.legs[0], Decimal("12")), (tightened.legs[0], Decimal("3"))):
         assert leg.risk_cash <= Decimal("50")
         assert Decimal("50") - leg.risk_cash < INSTR.lot_step * stop
+
+
+# --- the live path only ever tightens (#252) ----------------------------------
+
+def test_cap_mode_is_what_protects_a_channel_that_already_stops_tighter():
+    """#252 arms distances derived from |entry_from - sl|, but the override
+    measures from `entry_to` — much closer to the stop on a zone signal. On src 5
+    the median is $5.00 from the far edge against $10.00 from the near one, so the
+    proposed $7.50 is WIDER than the channel's own stop on 93.5% of its signals.
+
+    Under CAP that is a no-op. Under FIXED it would widen them, cutting R per
+    winner — the opposite of the reason the setting exists."""
+    zone = ParsedSignal(symbol="XAUUSD", direction="BUY",
+                        entry_from=Decimal("4185"), entry_to=Decimal("4180"),
+                        sl=Decimal("4175"),          # $5 from entry_to, $10 from entry_from
+                        tps=[Decimal("4200")])
+    widened, note = SLO.apply(zone, Decimal("7.5"), mode=SLO.MODE_FIXED)
+    assert note == SLO.APPLIED
+    assert widened.sl == Decimal("4172.5")           # FIXED pushes the stop further out
+    assert abs(widened.entry_to - widened.sl) > abs(zone.entry_to - zone.sl)
+
+    kept, note = SLO.apply(zone, Decimal("7.5"), mode=SLO.MODE_CAP)
+    assert note == SLO.ALREADY_TIGHTER
+    assert kept.sl == Decimal("4175")                # untouched
+
+
+def test_the_executor_asks_for_cap():
+    """Pinned at the call site, not just in this module's default: the executor
+    used to call apply() with no mode at all, which is FIXED."""
+    import inspect
+    from pathlib import Path
+    src = Path(__file__).resolve().parents[3] / "services" / "executor" / "main.py"
+    text = src.read_text(encoding="utf-8")
+    assert "SLO.apply(parsed, _sl_distance, mode=SLO.MODE_CAP" in text, \
+        "the live override must be armed in CAP mode"

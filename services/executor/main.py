@@ -454,7 +454,18 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         _sl_distance = SLO.resolve_distance(planner_cfg)
         if _sl_distance is not None:
             _sl_before = parsed.sl
-            parsed, _sl_note = SLO.apply(parsed, _sl_distance,
+            # CAP, never FIXED (#252). The live override may only ever TIGHTEN: a
+            # signal already carrying a stop tighter than our number is left alone
+            # and logged `already_tighter`.
+            #
+            # This is not a preference, it is the difference between the feature
+            # and its opposite. The distance is measured from `entry_to`, the far
+            # edge, and on a zone signal that is much closer to the stop than
+            # `entry_from` is — median |entry_to - sl| is $5.00 on src 5 against
+            # $10.00 from the near edge. Under FIXED, arming src 5 at $7.50 would
+            # have WIDENED 93.5% of its stops (and src 7, 77.3%), lowering R per
+            # winner — the exact opposite of what arming it is for.
+            parsed, _sl_note = SLO.apply(parsed, _sl_distance, mode=SLO.MODE_CAP,
                                          min_stop_distance=smap.min_stop_distance)
             log.info("signal %s acct %s: sl_distance=%s %s (%s -> %s)", sig.id,
                      acct.id, _sl_distance, _sl_note, _sl_before, parsed.sl)
@@ -464,7 +475,7 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             session.add(Event(kind="sl_override", payload={
                 "signal_id": sig.id, "account_id": acct.id,
                 "source_id": sig.source_id, "note": _sl_note,
-                "distance": str(_sl_distance),
+                "mode": SLO.MODE_CAP, "distance": str(_sl_distance),
                 "sl_before": str(_sl_before), "sl_after": str(parsed.sl),
                 "anchor": str(parsed.entry_to),
                 "min_stop_distance": (str(smap.min_stop_distance)
