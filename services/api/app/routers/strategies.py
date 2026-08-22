@@ -347,6 +347,14 @@ async def _skips_since(db: AsyncSession, account_id: int | None, since) -> int:
 
 
 def _shape(s: ExecutionStrategy) -> dict:
+    # #253: the digest the pillars ACTUALLY hash to. `epoch_digest` is what is
+    # stored; the two can only disagree when a write bypassed this router (every
+    # config act since 2026-08-17 was applied as direct SQL), and a stored digest
+    # that no longer describes the running rules is worse than none — it files the
+    # new configuration's removals under the old one's identity. So the derived
+    # `epoch` name is built from the pillars, and `epoch_stale` says the row needs
+    # a save. Never repaired here: a GET must not redate an experiment.
+    _live_digest = EP.epoch_digest(s.entry_filters, s.entry_policy)
     # `filter_modes` is derived, not stored (#167): how many enabled rules can
     # actually skip/scale a trade vs how many are only being measured. Every
     # simultaneous LIVE gate is another multiple comparison, so that count belongs
@@ -364,7 +372,8 @@ def _shape(s: ExecutionStrategy) -> dict:
             "epoch_started_at": (s.epoch_started_at.isoformat()
                                  if s.epoch_started_at else None),
             "epoch": EP.epoch_name(s.entry_filters, s.entry_policy,
-                                   digest=s.epoch_digest),
+                                   digest=_live_digest),
+            "epoch_stale": bool(s.epoch_digest and s.epoch_digest != _live_digest),
             # #201: "backtest said -0.4R, holdout said -0.1R" as ONE line, not
             # three archaeology sessions. Keyed by rule name so the page can put
             # it on the rule it belongs to.

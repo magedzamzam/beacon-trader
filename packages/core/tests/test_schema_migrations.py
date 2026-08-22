@@ -334,3 +334,29 @@ def test_no_uncovered_column_drift():
             f"Add an 'ALTER TABLE {table} ADD COLUMN IF NOT EXISTS ...' — do not "
             f"edit BASELINE_COLUMNS (CLAUDE.md §6, #112/#138)."
         )
+
+
+def test_the_epoch_digest_backfill_exists_and_runs_on_startup():
+    """#253: the digest is a hash of the canonicalised pillars, so no SQL string
+    can compute it — the #200 backfill could only seed `epoch_started_at`, and
+    `epoch_digest` stayed NULL on all 18 live rows because every config act since
+    2026-08-17 was applied as direct SQL rather than through the API that stamps
+    it. The Python backfill has to be CALLED from `init_models`, or it is one
+    more thing that only runs when someone remembers."""
+    import inspect
+    assert hasattr(B, "backfill_epoch_digests")
+    src = inspect.getsource(B.init_models)
+    assert "backfill_epoch_digests()" in src
+
+
+def test_the_epoch_digest_backfill_is_self_limiting_and_leaves_the_clock_alone():
+    """Same discipline as STARTUP_BACKFILLS, which this one cannot be part of
+    because it is not a SQL string. It must match only unstamped rows, and it
+    must NOT touch `epoch_started_at`: `epochs.epoch_transition` calls an
+    unstamped row the ADOPT case, and restamping the clock would claim every
+    live epoch began at deploy time — discarding the accumulations the column
+    was added to protect."""
+    import inspect
+    src = inspect.getsource(B.backfill_epoch_digests)
+    assert "epoch_digest.is_(None)" in src, "must only stamp rows that have none"
+    assert "r.epoch_started_at" not in src and ".epoch_started_at =" not in src

@@ -9,6 +9,7 @@ system rather than by a human two days later.
 from pathlib import Path
 
 from beacon_core.analysis import epochs as EP
+from beacon_core.analysis import report as RP
 from beacon_core.notifications import config as NC
 from beacon_core.notifications import templates as NT
 
@@ -228,3 +229,75 @@ def test_the_dark_arm_check_counts_signals_not_events():
     body = monitor.split("async def _decisions_since(", 1)[1].split("\nasync def ", 1)[0]
     assert 'p.get("reason") != "filtration_skip"' in body   # de-sizes are not skips
     assert '["skipped"].add(sig)' in body and "len(v[\"skipped\"])" in body
+
+
+# --- the stamp the event carries (#253) ---------------------------------------
+def test_the_event_stamp_carries_both_the_join_and_the_group_key():
+    """`epoch_digest` joins to `execution_strategies`; `epoch` is what
+    `filter_removed_set` groups on. An event carrying only one of them still
+    forces a reconstruction somewhere."""
+    st = EP.event_stamp(ADX, None)
+    assert st["epoch_digest"] == EP.epoch_digest(ADX, None)
+    assert st["epoch"] == EP.epoch_name(ADX, None)
+    assert st["epoch"].endswith(st["epoch_digest"][:8])
+
+
+def test_the_stamp_separates_the_configuration_that_actually_ran():
+    """The whole point: `min_adx: 30` on 2026-08-06 is a different experiment, so
+    the skips it produced must not be able to land in the same bucket."""
+    assert EP.event_stamp(ADX, None)["epoch"] != EP.event_stamp(_with(min_adx=30), None)["epoch"]
+
+
+def test_the_stamp_is_computed_from_the_rules_not_read_off_the_row():
+    """`event_stamp` deliberately takes no stored digest. Every config act since
+    2026-08-17 was applied as direct SQL, which leaves the row's `epoch_digest`
+    describing the PREVIOUS rules — and stamping that onto the new rules' skips
+    is exactly the mis-assignment #253 is about, with a stored fact to back it."""
+    import inspect
+    assert "digest" not in inspect.signature(EP.event_stamp).parameters
+
+
+def test_the_executor_stamps_every_filtration_event():
+    """A stamp that exists only in `epochs.py` is a stamp nobody carries. The
+    filtration_skip event is the one `filter_removed_set` reads, so it is named
+    separately from the de-size events."""
+    ex = (REPO_ROOT / "services/executor/main.py").read_text(encoding="utf-8")
+    assert "_epoch = EP.event_stamp(" in ex
+    assert "ST.entry_filters_row(_chain)" in ex, (
+        "the epoch must come from the row that SUPPLIED the filters")
+    skip = ex.split('"reason": "filtration_skip"', 1)[0].rsplit(
+        'kind="entry_filtered"', 1)[1]
+    assert "**_epoch" in skip, "filtration_skip must carry the epoch it ran under"
+
+
+def test_a_rule_edit_mid_accumulation_produces_two_epochs_not_one():
+    """The near-miss, end to end. Nineteen skips under one `adx_regime` rule and
+    nineteen more after `min_adx: 30` is added: stamped at emit time they are two
+    epochs, each below the N>=30 floor and therefore ACCUMULATE. Pooled — which
+    is what a hand-derived epoch literal does — they clear the floor and the arm
+    gets a verdict it never earned on any configuration it ever ran."""
+    before, after = EP.event_stamp(ADX, None), EP.event_stamp(_with(min_adx=30), None)
+    skips, control = [], []
+    for i in range(38):
+        stamp = before if i < 19 else after
+        skips.append({"signal_id": i, "epoch": stamp["epoch"]})
+        # removed set loses; the kept set (ids 100+) wins.
+        control.append({"signal_id": i, "realized_pl": -100.0, "planned_risk": 100.0,
+                        "day": f"2026-08-{(i % 5) + 1:02d}", "source_id": i % 3})
+    for i in range(100, 140):
+        control.append({"signal_id": i, "realized_pl": 50.0, "planned_risk": 100.0,
+                        "day": f"2026-08-{(i % 5) + 1:02d}", "source_id": i % 3})
+
+    out = RP.filter_removed_set(skips, control, base_rate=0.5)
+    assert out["n_epochs"] == 2, out["epochs"].keys()
+    assert set(out["epochs"]) == {before["epoch"], after["epoch"]}
+    for e in out["epochs"].values():
+        assert e["n_skipped"] == 19
+        assert e["verdict"] == RP.FILTER_ACCUMULATE   # 19 < MIN_REMOVED_N
+
+    # Pooled under a single hand-written label the same 38 skips clear the floor.
+    pooled = RP.filter_removed_set(
+        [{"signal_id": s["signal_id"], "epoch": "adx_regime@1h"} for s in skips],
+        control, base_rate=0.5)
+    assert pooled["n_epochs"] == 1
+    assert pooled["epochs"]["adx_regime@1h"]["verdict"] != RP.FILTER_ACCUMULATE

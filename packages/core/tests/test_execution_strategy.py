@@ -261,3 +261,22 @@ if __name__ == "__main__":
         if n.startswith("test_") and callable(f):
             f(); print("ok ", n)
     print("ALL PASS")
+
+
+def test_the_filters_row_is_the_one_that_supplied_them_not_the_most_specific():
+    """#253: a skip event is stamped with the epoch of the row whose rules ran.
+    Acct 8's exit-geometry arm sets only an exit ladder, so its filtration comes
+    from the (Any, Any) base — stamping chain[0]'s epoch would file the base
+    row's removals under an arm that filters nothing."""
+    base = strat(None, None, entry_filters={"rules": [{"name": "adx", "action": "skip"}]})
+    exits = strat(8, None, exit_policy={"sl_rules": OVR})
+    chain = ST.resolve_chain([base, exits], 8, 12)
+    assert chain[0] is exits                              # most specific
+    assert ST.entry_filters_row(chain) is base            # but the filters are the base's
+    assert ST.resolve_entry_filters(chain) == base.entry_filters
+
+
+def test_the_filters_row_is_none_when_nothing_in_the_chain_filters():
+    chain = ST.resolve_chain([strat(None, None), strat(5, None, entry_filters={})], 5, 12)
+    assert ST.entry_filters_row(chain) is None
+    assert ST.resolve_entry_filters(chain) == {}

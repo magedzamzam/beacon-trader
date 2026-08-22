@@ -26,6 +26,7 @@ from beacon_core.db.models import (Account, Event, Leg, Signal, Source, Trade,
                                    ExecutionStrategy, AccountSourceRisk,
                                    StagedEntry, StagedTranche)
 from beacon_core.execution import strategy as ST
+from beacon_core.analysis import epochs as EP        # filter-rule epoch stamp (#253)
 from beacon_core.execution import staging as STG
 from beacon_core.execution import placement as PLACE     # broker-refusal recovery (#221)
 from beacon_core.execution import sl_override as SLO     # per-channel stop (#249)
@@ -376,6 +377,26 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         _chain = ST.resolve_chain(_strategies, acct.id, sig.source_id)
         strategy = _chain[0] if _chain else None          # attribution
         _entry_filters = ST.resolve_entry_filters(_chain)
+        # #253: the epoch this account's filtration is deciding under, stamped onto
+        # every filtration event below. Computed from the pillars of the row that
+        # SUPPLIED the filters (not chain[0], which may contribute only an exit
+        # ladder) and from the rules AS THEY RAN — never read back off the stored
+        # `epoch_digest`, because a row written by SQL rather than the API carries a
+        # stale one, and stamping that would file the new configuration's removals
+        # under the old one's identity. Without a stamp the weekly reconstructs
+        # epoch membership from `updated_at`, which pooled three `adx_regime`
+        # configurations into one epoch and returned a REMOVES_LOSERS that no
+        # single filter ever earned.
+        # FAIL OPEN, like the evaluator below (#164): this is a LABEL on a
+        # measurement event and nothing on the trading path reads it, so it must
+        # never be the reason a signal is lost.
+        _frow = ST.entry_filters_row(_chain)
+        try:
+            _epoch = EP.event_stamp(_entry_filters,
+                                    getattr(_frow, "entry_policy", None))
+        except Exception as exc:                        # pragma: no cover - defensive
+            log.warning("signal %s acct %s: epoch stamp failed: %s", sig.id, acct.id, exc)
+            _epoch = {}
 
         # --- trend-alignment entry filter (#48/#79; filtration pillar) ---
         # Counter-trend entries (direction fighting the higher-TF trend) held ~95%
@@ -400,6 +421,7 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                          sig.id, acct.id, tf_cfg.get("timeframe"), tf_cfg.get("ema_period"))
                 session.add(Event(kind="entry_filtered",
                                   payload={"signal_id": sig.id, "account_id": acct.id,
+                                           **_epoch,
                                            "reason": "counter_trend", "aligned": False,
                                            "timeframe": tf_cfg.get("timeframe"),
                                            "ema_period": tf_cfg.get("ema_period")}))
@@ -620,7 +642,7 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             # we're trying to evaluate against.
             if _shadow:
                 session.add(Event(kind="filter_shadow", payload={
-                    "signal_id": sig.id, "account_id": acct.id,
+                    "signal_id": sig.id, "account_id": acct.id, **_epoch,
                     "rules": _shadow,
                     # #213: the values, not just the verdict — a shadow rule that
                     # records only "matched" can never enter a feature screen.
@@ -633,7 +655,7 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                     # this event reads it that way. `evaluated` is the new audit
                     # trail — what each leaf asked and what it actually read
                     # (#213), without which a removal cannot be reconstructed.
-                    "reason": "filtration_skip", "rules": _reasons,
+                    **_epoch, "reason": "filtration_skip", "rules": _reasons,
                     "evaluated": _evaluated}))
                 await session.commit()
                 return
@@ -662,6 +684,7 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                      sig.id, acct.id, trend_size_factor)
             session.add(Event(kind="entry_filtered",
                               payload={"signal_id": sig.id, "account_id": acct.id,
+                                       **_epoch,
                                        "reason": "counter_trend_desize", "aligned": False,
                                        "factor": str(trend_size_factor)}))
         if session_size_factor < 1:                     # session concentration de-size (#81)
@@ -669,12 +692,14 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                      sig.id, acct.id, session_size_factor)
             session.add(Event(kind="entry_filtered",
                               payload={"signal_id": sig.id, "account_id": acct.id,
+                                       **_epoch,
                                        "reason": "session_desize",
                                        "factor": str(session_size_factor)}))
         if filter_factor != 1:                           # filtration scale (#84)
             log.info("signal %s acct %s: filtration scale x%s", sig.id, acct.id, filter_factor)
             session.add(Event(kind="entry_filtered",
                               payload={"signal_id": sig.id, "account_id": acct.id,
+                                       **_epoch,
                                        "reason": "filtration_scale", "factor": str(filter_factor)}))
         instrument = InstrumentSpec(
             value_per_point=Decimal(str(smap.value_per_point)),

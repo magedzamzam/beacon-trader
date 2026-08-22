@@ -384,15 +384,40 @@ def test_shape_carries_the_epoch_so_it_is_not_reconstructed_from_updated_at():
     epoch a row is in has to be readable off the row. Deriving it from
     `updated_at` in a weekly script is how a missed bump mis-assigns a week of
     skips to a filter that was not running."""
-    row = _Row(entry_filters=ADX, epoch_digest="abc123",
+    digest = EP.epoch_digest(ADX, None)
+    row = _Row(entry_filters=ADX, epoch_digest=digest,
                epoch_started_at=dt.datetime(2026, 7, 30, 8, 57,
                                             tzinfo=dt.timezone.utc))
     out = S._shape(row)
-    assert out["epoch_digest"] == "abc123"
+    assert out["epoch_digest"] == digest
     assert out["epoch_started_at"].startswith("2026-07-30T08:57")
-    # The human key is derived from the rules AND carries the stored digest, so
-    # it cannot drift from the row the way a hand-typed literal can.
-    assert out["epoch"] == "adx_regime@1h+trendingTrue#abc123"
+    # The human key is derived from the rules, so it cannot drift from the row
+    # the way a hand-typed literal can.
+    assert out["epoch"] == f"adx_regime@1h+trendingTrue#{digest[:8]}"
+    assert out["epoch_stale"] is False
+
+
+def test_a_stored_digest_that_no_longer_describes_the_rules_reads_as_stale():
+    """#253: every config act since 2026-08-17 was applied as direct SQL, which
+    updates the pillars and leaves `epoch_digest` describing the rules that were
+    replaced. The name is built from the RULES — naming the epoch after a stored
+    digest would file the new configuration's removals under the old one's
+    identity, which is the mis-assignment the digest exists to prevent. The row
+    is not repaired here: a GET must not redate an experiment."""
+    row = _Row(entry_filters=ADX, epoch_digest="deadbeefdeadbeef",
+               epoch_started_at=dt.datetime(2026, 8, 17, 11, 49,
+                                            tzinfo=dt.timezone.utc))
+    out = S._shape(row)
+    assert out["epoch_stale"] is True
+    assert out["epoch_digest"] == "deadbeefdeadbeef"          # reported, not repaired
+    assert out["epoch"].endswith(EP.epoch_digest(ADX, None)[:8])
+
+
+def test_an_unstamped_row_is_not_stale_it_is_simply_unstamped():
+    """The startup backfill (#253) fills these in; until it runs, NULL means
+    "never written through the API", not "disagrees with its rules"."""
+    out = S._shape(_Row(entry_filters=ADX))
+    assert out["epoch_digest"] is None and out["epoch_stale"] is False
 
 
 def test_the_route_moves_the_clock_only_on_a_semantic_change():

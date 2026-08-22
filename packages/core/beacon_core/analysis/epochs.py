@@ -137,6 +137,31 @@ def epoch_name(entry_filters, entry_policy=None, digest: str | None = None) -> s
     return f"{body}#{digest[:8]}"
 
 
+def event_stamp(entry_filters, entry_policy=None) -> dict:
+    """The epoch keys a filtration EVENT must carry, decided at emit time (#253).
+
+    #200 put the epoch on the strategy ROW, which is enough only if nobody ever
+    edits history: the weekly still had to reconstruct which skips belonged to
+    which configuration by comparing event timestamps against `updated_at`. When
+    the digest was missing entirely, that reconstruction pooled 194 skips spanning
+    THREE `adx_regime` configurations into one epoch and returned
+    `REMOVES_LOSERS`; split correctly every one of the three is `NO_EVIDENCE`.
+
+    An event that carries the epoch it was generated under cannot be reassigned
+    to a filter that was not running, whatever the strategy row later becomes —
+    so this is computed from the rules AS THEY RAN and never read back off the
+    row. A stored digest that disagrees with its own pillars is stale (a write
+    that bypassed the API), and trusting it here would stamp the skips of the new
+    configuration with the identity of the old one, which is the bug itself.
+
+    Returns both keys deliberately: `epoch_digest` is the join to
+    `execution_strategies`, `epoch` is what `report.filter_removed_set` groups
+    on."""
+    digest = epoch_digest(entry_filters, entry_policy)
+    return {"epoch_digest": digest,
+            "epoch": epoch_name(entry_filters, entry_policy, digest=digest)}
+
+
 # --- the arm that went dark ---------------------------------------------------
 # 2026-08-05/06: Arm B took 1 trade then 0 while the control took 35 and 28. An
 # arm skipping ~100% is not a conservative arm, it is an experiment that has

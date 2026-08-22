@@ -157,16 +157,29 @@ def entry_policy(chain, *, global_planner=None, source_ttl=None) -> dict:
 
 
 # ---- Filtration pillar -------------------------------------------------------
+def entry_filters_row(chain):
+    """WHICH strategy row's `entry_filters` block won the cascade, or None (#253).
+
+    `resolve_entry_filters` returns the block; a skip event needs its ORIGIN. The
+    epoch a removal belongs to is the epoch of the row that actually filtered it,
+    which is not necessarily `chain[0]` — the most-specific row may set only an
+    exit ladder and contribute no filter at all, and stamping its epoch onto
+    another row's removals is the same mis-assignment #253 is about."""
+    for s in _as_chain(chain):
+        if getattr(s, "entry_filters", None):
+            return s
+    return None
+
+
 def resolve_entry_filters(chain, *, global_filters=None) -> dict:
     """Effective entry_filters for this scope (#104): the most-specific non-empty
     block wins wholesale (predictable — a channel's filter set is not half-merged),
     cascading down to the (Any, Any) base. `global_filters` is only a code-level
     floor; the legacy global `entry_filters` SETTING is no longer consulted by the
     executor — Strategies is the single source of truth."""
-    for s in _as_chain(chain):
-        ef = getattr(s, "entry_filters", None)
-        if ef:
-            return dict(ef)
+    s = entry_filters_row(chain)
+    if s is not None:
+        return dict(s.entry_filters)
     return dict(global_filters or {})
 
 

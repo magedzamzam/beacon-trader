@@ -143,6 +143,48 @@ STARTUP_BACKFILLS: tuple[str, ...] = (
 )
 
 
+async def backfill_epoch_digests() -> int:
+    """Stamp `epoch_digest` on strategy rows the API never wrote (#253).
+
+    #200 shipped the column and the SQL backfill that seeds `epoch_started_at`
+    from `updated_at`, but the digest is a sha1 of the canonicalised pillars —
+    no SQL statement can compute it, so it stayed NULL on all 18 live rows. The
+    three-strategy act of 2026-08-17 and the BE-lock act of 08-19 were both
+    applied as direct SQL, and the API's stamp only fires on a write THROUGH the
+    API, so nothing was ever going to fill them in. With no digest to read, the
+    weekly had to re-derive the epoch from `updated_at`; that derivation pooled
+    194 skips spanning three `adx_regime` configurations and returned
+    REMOVES_LOSERS, when every one of the three is NO_EVIDENCE on its own.
+
+    `epoch_started_at` is deliberately LEFT ALONE — `epochs.epoch_transition`
+    calls this the "never stamped" case and ADOPTS the running configuration as
+    the open epoch. Restamping the clock here would claim every live epoch began
+    at deploy time and discard the accumulations the column exists to protect.
+
+    Self-limiting on `epoch_digest IS NULL`, so a second startup matches nothing
+    rather than overwriting a digest the API has since moved. A row whose stored
+    digest DISAGREES with its own pillars is left as it is too: that is a write
+    that bypassed the API, and the strategies API flags it (`epoch_stale`) rather
+    than having a startup path silently redate someone's experiment.
+    """
+    from sqlalchemy import select
+
+    from ..analysis import epochs as EP
+    from .models import ExecutionStrategy
+
+    n = 0
+    async with Session()() as session:
+        rows = (await session.execute(
+            select(ExecutionStrategy).where(
+                ExecutionStrategy.epoch_digest.is_(None)))).scalars().all()
+        for r in rows:
+            r.epoch_digest = EP.epoch_digest(r.entry_filters, r.entry_policy)
+            n += 1
+        if n:
+            await session.commit()
+    return n
+
+
 def engine():
     global _engine
     if _engine is None:
@@ -183,6 +225,14 @@ async def init_models() -> None:
                 await conn.exec_driver_sql(stmt)
             except Exception:                       # column absent / nothing to do
                 pass
+
+    # #253: the one backfill that cannot be a SQL string — the digest is a hash of
+    # the canonicalised pillars, so it needs Python and the ORM's JSON decoding.
+    # AFTER the block above, which creates the column and seeds the clock.
+    try:
+        await backfill_epoch_digests()
+    except Exception:                               # table/column absent — nothing to do
+        pass
 
     # Idempotency backstop (#15): at most one trade per (signal, account). The
     # executor already guards this in code (existence check + already-executed
