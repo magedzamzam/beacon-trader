@@ -45,6 +45,11 @@ ADDITIVE_MIGRATIONS: tuple[str, ...] = (
     "ADD COLUMN IF NOT EXISTS strategy_id INTEGER",        # ExecutionStrategy attribution (#84)
     "ALTER TABLE trades "
     "ADD COLUMN IF NOT EXISTS deployed_risk numeric(18,6)",  # risk the FILLS put on (#188)
+    # The stop the leg was PLANNED with, post-`sl_override` and pre-ratchet (#264).
+    # `deployed_risk` measured against `signals.sl` instead, which stopped being
+    # the planned stop the moment #249 shipped.
+    "ALTER TABLE legs "
+    "ADD COLUMN IF NOT EXISTS initial_sl numeric(18,6)",
     "ALTER TABLE trades "
     "ADD COLUMN IF NOT EXISTS cluster_id VARCHAR(48)",     # correlation-cluster tag (#106)
     "ALTER TABLE trades "
@@ -99,6 +104,26 @@ ADDITIVE_MIGRATIONS: tuple[str, ...] = (
 # matches nothing on a second run, so re-running a backfill is a no-op rather
 # than an overwrite. `test_backfills_are_self_limiting` pins that.
 STARTUP_BACKFILLS: tuple[str, ...] = (
+    # #264: recover each existing leg's PLANNED stop. Two populations, and the
+    # order matters - the override rows must win, so they are written first and
+    # the general rule is barred from touching them by its own `IS NULL` guard.
+    #
+    # 1. Legs whose trade had an `sl_override`: the planned stop is that event's
+    #    `sl_after`. This is the only surviving record of it - `legs.sl` may have
+    #    been ratcheted since, and `signals.sl` is the value the override replaced.
+    "UPDATE legs l SET initial_sl = (ov.payload->>'sl_after')::numeric "
+    "FROM trades t, events ov "
+    "WHERE l.initial_sl IS NULL AND t.id = l.trade_id "
+    "  AND ov.kind = 'sl_override' "
+    "  AND (ov.payload->>'signal_id')::int = t.signal_id "
+    "  AND (ov.payload->>'account_id')::int = t.account_id "
+    "  AND ov.payload->>'sl_after' IS NOT NULL",
+    # 2. Everything else planned against the channel's own stop, which is what
+    #    the measurement was already using and is correct for these rows.
+    "UPDATE legs l SET initial_sl = s.sl "
+    "FROM trades t, signals s "
+    "WHERE l.initial_sl IS NULL AND t.id = l.trade_id AND s.id = t.signal_id "
+    "  AND s.sl IS NOT NULL",
     # #200: seed the epoch clock from the ONLY record of an epoch boundary that
     # exists today. Filling it with now() instead would claim every live epoch
     # began at deploy time and silently reset the accumulations this column was

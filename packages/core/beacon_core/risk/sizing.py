@@ -238,9 +238,18 @@ def deployed_risk_from_planned(*, planned_risk, planned_legs, filled_legs) -> De
     being the ORIGINAL one on both sides, since `legs.sl` is ratcheted in place
     and using the moved stop would report a de-levered trade as risking nothing.
 
-    Returns None when it cannot be measured (no plan, no fills, zero planned
-    units). None means "not measured" and is excluded downstream — never zero,
-    which would read as "deployed nothing" and flatter the ratio."""
+    Returns None when it cannot be measured: no `planned_risk`, or no planned
+    units to take the ratio over. None means "not measured" and is excluded
+    downstream rather than averaged in.
+
+    NOTHING FILLED IS ZERO, NOT NONE, and that distinction is the point of the
+    field. A trade that planned 998 and filled none of it deployed 0% - that is
+    a measurement, and it is the strongest de-levering signal there is. Excluding
+    it would hide exactly what #188 added this to catch: an arm that looks good
+    on planned-risk R because it quietly took less risk, not because it chose
+    better. `test_nothing_filled_is_zero_but_no_plan_is_none` pins it.
+    (This docstring previously said "no fills" returned None. It never did, and
+    it should not - the sentence was wrong, not the arithmetic.)"""
     if planned_risk is None:
         return None
     planned_units = risk_units(planned_legs)

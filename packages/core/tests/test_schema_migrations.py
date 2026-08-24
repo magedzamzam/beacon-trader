@@ -28,7 +28,7 @@ import re
 
 from beacon_core.db import base as B
 from beacon_core.db.base import Base
-from beacon_core.db.models import Trade
+from beacon_core.db.models import Leg, Trade
 
 
 def _added_columns(table: str) -> set[str]:
@@ -407,3 +407,25 @@ def test_the_widths_leave_room_rather_than_fitting_exactly():
     longest_mode = max(len(m) for m in set(L.ORDERS) | {"CANCEL"})
     assert cols["role"] >= longest_role + 8, "leave headroom on role"
     assert cols["mode"] >= longest_mode + 4, "leave headroom on mode"
+
+
+def test_initial_sl_has_an_alter():
+    """#264: `legs` is the busiest table on the box — written on every fill and
+    read whole on every monitor tick — so a mapped column with no ALTER breaks
+    reads immediately against a pre-existing schema."""
+    assert "initial_sl" in Leg.__table__.columns
+    assert "initial_sl" in _added_columns("legs")
+
+
+def test_the_initial_sl_backfill_prefers_the_override_over_the_signal_stop():
+    """Order matters. A leg whose trade had an `sl_override` was planned against
+    the OVERRIDDEN stop; `signals.sl` is precisely the value the override
+    replaced. The override statement must therefore run first, and the general
+    one is kept off those rows by its own `IS NULL` guard — which only works if
+    the override statement really does come first."""
+    stmts = [s for s in B.STARTUP_BACKFILLS if "initial_sl" in s]
+    assert len(stmts) == 2, stmts
+    assert "sl_override" in stmts[0], "the override backfill must run first"
+    assert "signals" in stmts[1]
+    for s in stmts:
+        assert "l.initial_sl IS NULL" in s, s

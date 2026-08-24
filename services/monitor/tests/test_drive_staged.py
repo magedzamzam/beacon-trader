@@ -97,3 +97,32 @@ def test_the_absolute_entry_age_ceiling_is_checked_before_a_rung_deploys():
     assert "ladder: max entry age" in DRIVE
     # measured from the signal, not from the tranche's own clock
     assert "entry_age = (now - trade.created_at)" in DRIVE
+
+
+# --- deployed_risk measures against the PLANNED stop (#264) -------------------
+RISK = SRC[SRC.index("async def _record_deployed_risk("):]
+RISK = RISK[:RISK.index("\nasync def ", 10)]
+
+
+def test_deployed_risk_uses_the_legs_planned_stop():
+    """`signals.sl` stopped being the planned stop when `sl_override` (#249)
+    began replacing it before the plan was built. Measuring a leg sized against
+    4648.20 on a stop of 4654.20 read 1.8% low on trade 1391 — and only on
+    accounts with `sl_distance` set, which is one of the three A/B arms, so the
+    error was biased rather than noisy."""
+    assert "leg.initial_sl if leg.initial_sl is not None else sig.sl" in RISK
+    assert "_stop(l)" in RISK
+    # the two leg sets must agree on the stop, or the ratio is meaningless
+    assert RISK.count("_stop(l)") == 2
+
+
+def test_it_still_refuses_the_ratcheted_stop():
+    """The property #188 added `signals.sl` for. `legs.sl` is moved in place by
+    the ratchet, so a breakeven trade would report ~0 deployed risk."""
+    assert "l.sl)" not in RISK, "legs.sl must never be the measurement stop"
+
+
+def test_the_executor_stamps_the_planned_stop_when_the_leg_is_made():
+    """One construction site, and `pleg.sl` is already post-override there."""
+    ex = (MAIN.parent.parent / "executor" / "main.py").read_text(encoding="utf-8")
+    assert "sl=pleg.sl, initial_sl=pleg.sl" in ex

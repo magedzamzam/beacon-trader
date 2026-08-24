@@ -577,10 +577,22 @@ async def _record_deployed_risk(session, trade) -> None:
     number instead of double-counting. Cheap — the legs are already loaded by
     the caller's own query path.
 
-    The original stop comes from `signals.sl`, NOT `legs.sl`: the ratchet engine
-    mutates the leg stop in place, so a trade that moved to breakeven would
-    otherwise record ~0 deployed risk and flatter the very ratio this exists to
-    measure.
+    The stop is the leg's PLANNED one - `legs.initial_sl` - and never `legs.sl`:
+    the ratchet engine moves the leg stop in place, so a trade that ran to
+    breakeven would otherwise record ~0 deployed risk and flatter the very ratio
+    this exists to measure.
+
+    It is not `signals.sl` either, though it was until #264. That worked only
+    while the channel's stop and the planned stop were the same number, which
+    `sl_override` (#249) ended: the override replaces the stop at PLAN time,
+    before any fill, so a leg sized against 4648.20 was being measured against
+    4654.20 and the ratio came out 1.8% low on trade 1391. The error is confined
+    to accounts with `sl_distance` configured - which is one of the three A/B
+    arms, so it was biased, not merely noisy.
+
+    `signals.sl` remains the fallback for legs written before the column existed;
+    for those rows it is the best available answer and, where no override was in
+    play, the exactly correct one.
 
     Measurement only — nothing reads this on the trading path."""
     sig = await session.get(Signal, trade.signal_id)
@@ -588,8 +600,12 @@ async def _record_deployed_risk(session, trade) -> None:
         return
     legs = (await session.execute(select(Leg).where(
         Leg.trade_id == trade.id))).scalars().all()
-    planned = [(l.lot, l.entry, sig.sl) for l in legs]
-    filled = [(l.lot, l.fill_price, sig.sl) for l in legs
+
+    def _stop(leg):
+        return leg.initial_sl if leg.initial_sl is not None else sig.sl
+
+    planned = [(l.lot, l.entry, _stop(l)) for l in legs]
+    filled = [(l.lot, l.fill_price, _stop(l)) for l in legs
               if l.fill_price is not None]
     try:
         dep = deployed_risk_from_planned(planned_risk=trade.planned_risk,

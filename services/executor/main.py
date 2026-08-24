@@ -1016,9 +1016,14 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         placed_lots = Decimal("0")     # size that actually reached the broker (#179)
         tranche_legs = {}          # ladder trigger -> the Leg ids it owns (#250)
         for pleg in valid:
+            # `pleg.sl` is already post-override - `SLO.apply` rewrote the parsed
+            # signal before the plan was built - so the planned stop is captured
+            # here, at the only place a Leg is constructed, and stays put while
+            # the ratchet moves `sl` underneath it (#264).
             leg = Leg(trade_id=trade.id, tp_index=pleg.tp_index,
                       order_type=pleg.order_type, entry=pleg.entry, tp=pleg.tp,
-                      sl=pleg.sl, lot=pleg.lot, status="pending")
+                      sl=pleg.sl, initial_sl=pleg.sl, lot=pleg.lot,
+                      status="pending")
             session.add(leg)
             await session.flush()
             if getattr(pleg, "tranche", None):

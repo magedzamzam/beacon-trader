@@ -266,6 +266,12 @@ class Leg(Base):
     # broker linkage
     broker_order_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)   # working order dealId
     broker_position_ref: Mapped[str | None] = mapped_column(String(64), nullable=True) # open position dealId
+    # THE STOP THIS LEG WAS PLANNED WITH: after `sl_override` (#249), before the
+    # ratchet. Neither of the two stops already on hand is that number - `legs.sl`
+    # is moved in place by the ratchet, and `signals.sl` is the channel's stop,
+    # which the override replaces at plan time. Measurement reads this (#264);
+    # nothing on the trading path does.
+    initial_sl: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="pending")
     # pending|working|open|closed|rejected|cancelled|expired
     outcome: Mapped[str | None] = mapped_column(String(16), nullable=True)  # tp_hit|sl_hit|manual|expired
