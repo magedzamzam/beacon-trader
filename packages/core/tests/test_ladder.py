@@ -378,3 +378,149 @@ def test_the_deep_default_still_risks_what_the_single_shot_would_have():
     assert len(rungs) >= 5
     assert total <= target
     assert target - total < Decimal(len(rungs)) * INSTR.lot_step * Decimal("40")
+
+
+# --- what a rung really risks -------------------------------------------------
+def _real_risk(rung, market):
+    """What this rung LOSES if it fills and the stop is hit.
+
+    Measured from the price it ACTUALLY fills at, derived here from the market
+    rather than read off the rung — reading `rung.entry` would just re-state
+    whatever the planner believed, which is the thing under test. A MARKET rung
+    fills at its trigger if it has one and at the market if it does not; a
+    LIMIT/STOP fills at its own resting level or not at all."""
+    if rung.order_type == "MARKET":
+        fills_at = rung.trigger if rung.trigger is not None else Decimal(str(market))
+    else:
+        fills_at = rung.entry
+    return rung.lot * abs(fills_at - rung.sl)
+
+
+def test_a_market_rung_is_budgeted_on_the_price_it_will_fill_at():
+    """The risk-parity guarantee, at the level it can actually break.
+
+    `lot = risk_cash / |entry - sl|`, so budgeting a MARKET rung on its NOMINAL
+    level while it fills somewhere else puts on a position whose real risk is
+    scaled by the ratio of the two distances. A SELL whose near edge is 4649 with
+    the stop at 4657 was sized on 8 points and filled at 4645, where the real
+    distance is 12: the same rung carrying 1.5x the money it declared."""
+    sig = ParsedSignal(symbol="XAUUSD", direction="SELL",
+                       entry_from=Decimal("4649"), entry_to=Decimal("4653"),
+                       sl=Decimal("4657"),
+                       tps=[Decimal(t) for t in ("4650", "4646", "4643", "4637")])
+    rows = [L._row(L.WHEN_SIGNAL, L.DO_OPEN, L.ORDER_POSITION, L.LVL_ENTRY_FROM, 3)]
+    rungs = L.plan_ladder(sig, rows, current_price=Decimal("4645"))
+    L.size_ladder(rungs, budget=Decimal("200"), instrument=INSTR)
+    assert rungs and rungs[0].order_type == "MARKET"
+    # the fill price, not the near edge, is what it was sized on
+    assert rungs[0].entry == Decimal("4645")
+    assert abs(_real_risk(rungs[0], Decimal("4645")) - rungs[0].risk_cash) <= Decimal("1")
+    # and to name the number this is defending: the near edge is 4 points closer
+    # to the stop than the fill is, so the old sizing was 12/8 = 1.5x the budget.
+    nominal = Decimal("200") / abs(sig.entry_from - sig.sl)
+    assert nominal * abs(Decimal("4645") - sig.sl) > Decimal("290")
+
+
+def test_a_deferred_market_rung_is_budgeted_on_its_trigger():
+    """A rung waiting on MID does not fill at MID's nominal distance from the
+    stop by accident — it fills BECAUSE price reached MID, so MID is its entry.
+    Sizing it on the level column (ENTRY-FROM, say) while it fills at MID is the
+    same error one trigger later."""
+    sig = _one_zone(entry_from="4000", entry_to="4000", sl="3980",
+                    tps=("4010", "4020", "4030"))
+    mid = L.mid_level(sig.entry_to, sig.sl)
+    rows = [L._row(L.WHEN_MID, L.DO_OPEN, L.ORDER_POSITION, L.LVL_ENTRY_FROM, 2)]
+    rungs = L.plan_ladder(sig, rows, current_price=Decimal("4002"))
+    L.size_ladder(rungs, budget=Decimal("100"), instrument=INSTR)
+    assert len(rungs) == 1
+    assert rungs[0].entry == mid, "it fills where its trigger is, not at ENTRY-FROM"
+    assert abs(_real_risk(rungs[0], Decimal("4002")) - rungs[0].risk_cash) <= Decimal("1")
+
+
+def test_the_whole_default_grid_risks_only_what_it_was_given():
+    """Every cell, both zone shapes, one to eight TPs: fill everything, hit the
+    stop, and never exceed the budget. The per-rung fix above is only worth
+    having if it holds for the tables the platform actually ships with."""
+    budget = Decimal("300")
+    for direction in ("BUY", "SELL"):
+        for n in range(1, L.MAX_TPS + 1):
+            for zone in (True, False):
+                sig = (_sig(tps=tuple(str(4010 + 10 * i) for i in range(n)))
+                       if direction == "BUY" else
+                       _sell(tps=tuple(str(4170 - 10 * i) for i in range(n))))
+                if not zone:
+                    sig.entry_to = sig.entry_from
+                # Sweep the market AWAY from the entry as well as onto it. At the
+                # edge itself a MARKET rung's fill and its nominal level coincide
+                # and the bug hides; it only shows when the two differ, which is
+                # the ordinary case — the signal is read seconds after it prints.
+                for away in (Decimal("0"), Decimal("3"), Decimal("-3")):
+                    px = sig.entry_from + (away if direction == "BUY" else -away)
+                    rungs = L.plan_ladder(sig, L.rows_for(None, sig), current_price=px)
+                    if not rungs:
+                        continue
+                    L.size_ladder(rungs, budget=budget, instrument=INSTR)
+                    total = sum(_real_risk(r, px) for r in rungs)
+                    assert total <= budget + Decimal("1"), (
+                        f"{direction} zone={zone} tps={n} px={px}: "
+                        f"risked {total} of {budget}")
+
+
+def test_rungs_sharing_a_trigger_can_want_different_order_types():
+    """Why a tranche cannot carry ONE order type for all its legs.
+
+    A tranche groups rungs by the price they WAIT FOR. The shipped 1-zone cells
+    from three TPs up put a MARKET rung and a STOP rung on the same `mid`
+    trigger — one takes size at MID, the other rests above it and fills only if
+    price comes back. Deploying both as whichever type the first leg happened to
+    have turned the confirmation order into an unconfirmed market fill."""
+    mixed = []
+    for zone in (L.ZONE_SINGLE, L.ZONE_RANGE):
+        for n in range(1, L.MAX_TPS + 1):
+            by_trigger = {}
+            for r in L.DEFAULT_MATRIX[zone][n]:
+                if r.get("action") != L.DO_OPEN:
+                    continue
+                by_trigger.setdefault(r["when"], set()).add(
+                    L.BROKER_ORDER_TYPE.get(r["order"], r["order"]))
+            mixed += [(zone, n, w) for w, k in by_trigger.items() if len(k) > 1]
+    assert mixed, "if this ever empties, the per-leg placement below is untested"
+
+    sig = _one_zone(entry_from="4000", entry_to="4000", sl="3980",
+                    tps=("4010", "4020", "4030"))
+    rungs = L.plan_ladder(sig, L.rows_for(None, sig), current_price=Decimal("4002"))
+    at_mid = [r for r in rungs if r.tranche == L.WHEN_MID]
+    assert {r.order_type for r in at_mid} == {"MARKET", "STOP"}
+    # and they rest at DIFFERENT prices, so one mode could not have served both
+    assert len({r.entry for r in at_mid}) == 2
+
+
+# --- which broker order a rung is --------------------------------------------
+@pytest.mark.parametrize("planned,expected", [
+    ("MARKET", "MARKET"),
+    ("LIMIT", "LIMIT"),
+    ("STOP", "STOP"),
+    (L.ORDER_POSITION, "MARKET"),      # the operator's word for "take it now"
+    ("position", "MARKET"),            # case is the operator's, not the code's
+    (" stop ", "STOP"),
+])
+def test_a_rungs_order_type_maps_to_one_broker_order(planned, expected):
+    assert L.order_kind(planned) == expected
+
+
+def test_an_unknown_order_type_becomes_a_market_order():
+    """`plan_ladder` already defaults this way. Failing the other way would rest
+    an order that waits for a price nobody set, which never fills and never
+    expires — the failure mode that is hardest to notice."""
+    assert L.order_kind("nonsense") == "MARKET"
+    assert L.order_kind(None) == "MARKET"
+
+
+def test_the_tranches_mode_is_only_a_fallback():
+    """The leg's own type wins. Reading the tranche's label instead is what
+    market-filled every confirmation STOP that shared a trigger with a MARKET
+    rung; the label is kept only for rows written before the fix, where it is
+    the sole record of what was intended."""
+    assert L.order_kind("STOP", "MARKET") == "STOP"
+    assert L.order_kind(None, "STOP") == "STOP"
+    assert L.order_kind("", "LIMIT") == "LIMIT"

@@ -292,7 +292,7 @@ async def _staged_pending(session, trade_id) -> list:
         StagedTranche.state == "pending"))).scalars().all()
 
 
-async def _drive_staged(session, trade, adapter, smap, mid, ttl_min) -> None:
+async def _drive_staged(session, trade, adapter, smap, quote, mid, ttl_min) -> None:
     """Drive the staged-entry LADDER (#250) for one trade, one tick.
 
     Every pending tranche is one row of the operator's table waiting for its
@@ -323,8 +323,24 @@ async def _drive_staged(session, trade, adapter, smap, mid, ttl_min) -> None:
         return
 
     direction = se.direction
-    price = float(mid)
     now = utcnow()
+    cfg = STG.staged_config(se.cfg)
+    # AGE OF THE WHOLE ENTRY, measured from the signal (#158) — the same anchor
+    # `entry_expiry_reason` uses for legs that are already working.
+    entry_age = (now - trade.created_at).total_seconds() / 60.0 if trade.created_at else 0.0
+    # THE SIDE THAT WOULD ACTUALLY TRADE, not the mid. Every decision below is
+    # "would the market have done this to us?", and the market only ever deals on
+    # one side. On a wide spread the mid says a level was reached while the price
+    # we could really transact at is still short of it, so rungs deployed early
+    # and the TP1 cancel fired against a target that had not printed.
+    #   * ENTRY side is what we PAY to get in: offer for a BUY, bid for a SELL.
+    #   * TARGET side is what a TP prints against: bid for a BUY, offer for a SELL
+    #     (the side `_process_trade` already uses for stop/target reconciliation).
+    _mid = float(mid)
+    _q_in = getattr(quote, "offer" if direction == "BUY" else "bid", None)
+    _q_out = getattr(quote, "bid" if direction == "BUY" else "offer", None)
+    entry_px = float(_q_in) if _q_in is not None else _mid
+    target_px = float(_q_out) if _q_out is not None else _mid
 
     # --- cancel rows first: reaching TP1 pulls everything else, and a rung that
     #     would otherwise deploy on this same tick must not slip out ahead of it.
@@ -337,7 +353,8 @@ async def _drive_staged(session, trade, adapter, smap, mid, ttl_min) -> None:
         # opened; an ENTRY-TO cancel row is the other way round.
         _on_target = tr.role.endswith(LAD.WHEN_TP1)
         _hit = LAD.reached_target if _on_target else LAD.reached
-        if tr.trigger_level is None or not _hit(direction, price, tr.trigger_level):
+        _px = target_px if _on_target else entry_px
+        if tr.trigger_level is None or not _hit(direction, _px, tr.trigger_level):
             continue
         # THE PRECONDITION. "price reaches TP1 -> cancel everything else" means
         # *our* first target was hit, so stop adding size to a move we are already
@@ -390,13 +407,56 @@ async def _drive_staged(session, trade, adapter, smap, mid, ttl_min) -> None:
 
     # --- rungs waiting for their level ---------------------------------------
     for tr in pending:
-        if str(tr.role or "").startswith("cancel:"):
-            continue
         minutes = (now - tr.state_since).total_seconds() / 60.0
+        if str(tr.role or "").startswith("cancel:"):
+            # A CANCEL ROW OWNS NO LEGS, so it cannot expire alongside them - and
+            # it used to be skipped here outright. Between that and the fill
+            # precondition above, a trade where nothing ever filled kept a pending
+            # tranche for ever: `_staged_pending` never emptied, the trade never
+            # closed, its planned risk sat in the open-risk caps blocking later
+            # signals, and the monitor made a full broker round-trip for it on
+            # every tick. It answers to the same entry-TTL clock as the rungs do -
+            # once no rung can still deploy, there is nothing left to cancel.
+            if ttl_min and minutes > float(ttl_min):
+                tr.state, tr.state_since = "expired", now
+                tr.reason = "ladder: nothing left to cancel"[:96]
+                session.add(Event(trade_id=trade.id, kind="staged_expired", payload={
+                    "tranche": tr.role, "level": str(tr.trigger_level),
+                    "reason": "cancel row outlived the entry TTL"}))
+                log.info("trade %s ladder cancel row %s expired with the rungs",
+                         trade.id, tr.role)
+            continue
         legs = (await session.execute(select(Leg).where(
             Leg.id.in_(tr.leg_ids or []), Leg.status == "staged"))).scalars().all()
 
-        if tr.trigger_level is None or not LAD.reached(direction, price, tr.trigger_level):
+        # THE ABSOLUTE CEILING, before the trigger test. `max_entry_age_minutes`
+        # bounds the age of the whole entry no matter how late a rung deploys —
+        # that is the sentence it is documented by — but it was only ever asked
+        # about legs ALREADY WORKING. A pending rung sailed past it and could open
+        # a brand-new position hours after the signal, on a setup the operator had
+        # declared stale; the ceiling then cancelled that position's own order a
+        # tick later, so the knob turned into "place it, then pull it".
+        if STG.entry_age_exceeded(cfg, entry_age):
+            for leg in legs:
+                leg.status, leg.outcome, leg.closed_at = "expired", "expired", now
+            tr.state, tr.state_since = "expired", now
+            tr.reason = "ladder: max entry age"[:96]
+            session.add(Event(trade_id=trade.id, kind="staged_expired", payload={
+                "tranche": tr.role, "level": str(tr.trigger_level),
+                "reason": "max_entry_age", "age_minutes": round(entry_age, 1)}))
+            log.info("trade %s ladder rung %s expired (entry age %.1fm)",
+                     trade.id, tr.role, entry_age)
+            continue
+
+        # Same split as the cancel loop: `clean_matrix` accepts `{"when": "tp1",
+        # "action": "open"}`, so an operator can write "when price reaches TP1,
+        # open a STOP for TP4" - and asking the entry-side `reached` about a TP is
+        # true from the first tick, which is the bug already fixed above.
+        _tgt = str(tr.role or "").endswith(LAD.WHEN_TP1)
+        _hit = LAD.reached_target if _tgt else LAD.reached
+        if tr.trigger_level is None or not _hit(direction,
+                                                target_px if _tgt else entry_px,
+                                                tr.trigger_level):
             # Not yet. A rung cannot wait forever: the trade stays alive while any
             # tranche is pending, so it answers to the entry-TTL clock.
             if ttl_min and minutes > float(ttl_min):
@@ -414,18 +474,27 @@ async def _drive_staged(session, trade, adapter, smap, mid, ttl_min) -> None:
         # DEPLOY. POSITION means take it now; LIMIT/STOP rest at the rung's level.
         # The resting window is deliberate, not inherited (#158): deployed_ttl_minutes
         # when configured, else the resolved entry TTL.
-        cfg = STG.staged_config(se.cfg)
         good_till = utcnow() + timedelta(
             minutes=effective_entry_ttl_min(
                 {"entry_ttl_minutes": STG.deployed_ttl_minutes(cfg, ttl_min)}))
         side_buy = direction == "BUY"
-        # Rows planned before the POSITION->MARKET translation still carry the
-        # operator's word, so accept both rather than stranding them.
-        is_market = (tr.mode or "") in ("MARKET", LAD.ORDER_POSITION)
-        order_type = (OrderType.STOP if tr.mode == LAD.ORDER_STOP
-                      else OrderType.MARKET if is_market else OrderType.LIMIT)
         placed = 0
+        armed = False
         for leg in legs:
+            # PER LEG, NOT PER TRANCHE. A tranche groups the rungs that share a
+            # TRIGGER; it does not follow that they share an ORDER TYPE. Every
+            # 1-zone cell from 3 TPs up puts a MARKET rung and a STOP rung on the
+            # same `mid` trigger, and taking one mode for the whole tranche
+            # market-filled the STOP rungs - a confirmation order meant to rest at
+            # the entry and fill only if price came back was instead opened at MID
+            # with no confirmation at all, at a worse price and with the risk the
+            # confirmation existed to avoid. `legs.order_type` already held the
+            # right answer per rung; the tranche's `mode` is an audit label and is
+            # only consulted for rows written before this.
+            _kind = LAD.order_kind(leg.order_type, tr.mode)
+            is_market = _kind == "MARKET"
+            order_type = (OrderType.STOP if _kind == "STOP"
+                          else OrderType.MARKET if is_market else OrderType.LIMIT)
             try:
                 res = await adapter.place_order(PlaceOrderRequest(
                     broker_symbol=smap.broker_epic,
@@ -464,6 +533,7 @@ async def _drive_staged(session, trade, adapter, smap, mid, ttl_min) -> None:
                     leg.created_at = utcnow()      # reset the TTL clock: deployed late
                     tr.broker_order_ref = res.broker_order_ref
                     placed += 1
+                    armed = armed or order_type is OrderType.STOP
                     session.add(Event(trade_id=trade.id, leg_id=leg.id, kind="staged_deployed",
                                       payload={"tranche": tr.role, "mode": tr.mode,
                                                "level": str(tr.trigger_level)}))
@@ -475,7 +545,24 @@ async def _drive_staged(session, trade, adapter, smap, mid, ttl_min) -> None:
                 _broker_error("staged_deploy", f"Ladder rung deploy failed: {exc}",
                               symbol=trade.symbol, account_id=trade.account_id)
             await asyncio.sleep(1.0 / max(settings.broker_rate_per_sec, 0.1))
-        tr.state = "armed" if tr.mode == LAD.ORDER_STOP else "deployed"
+        # A rung that put NOTHING at the broker is not deployed. Recording it as
+        # such left the trade waiting on orders that do not exist: nothing would
+        # ever fill it, nothing would ever expire it (a deployed tranche is out of
+        # `_staged_pending`'s reach), and the Trade view showed a live rung.
+        if not placed:
+            tr.state, tr.state_since = STG.REJECTED, utcnow()
+            tr.reason = ("ladder: every rung rejected" if legs
+                         else "ladder: no rung left to place")[:96]
+            session.add(Event(trade_id=trade.id, kind="staged_rejected", payload={
+                "tranche": tr.role, "level": str(tr.trigger_level),
+                "legs": len(legs)}))
+            log.warning("trade %s ladder rung %s: all %s orders rejected",
+                        trade.id, tr.role, len(legs))
+            continue
+        # ARMED means "a STOP is resting at the broker waiting for confirmation".
+        # With mixed rungs the tranche is armed if ANY of its legs is one, and
+        # only legs that were actually accepted count.
+        tr.state = "armed" if armed else "deployed"
         tr.state_since = utcnow()
         tr.reason = f"ladder: reached {tr.trigger_level}"[:96]
         log.info("trade %s ladder rung %s -> %s (%s legs at %s)",
@@ -1109,7 +1196,7 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
         # a staging failure must never disturb capital management of open legs.
         if staged_pending:                          # skip the StagedEntry query for normal trades
             try:
-                await _drive_staged(session, trade, adapter, smap, mid, ttl_min)
+                await _drive_staged(session, trade, adapter, smap, quote, mid, ttl_min)
             except Exception as exc:
                 log.warning("staged-entry drive failed (trade %s): %s", trade.id, exc)
 

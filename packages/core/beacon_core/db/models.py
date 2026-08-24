@@ -587,7 +587,8 @@ class StagedTranche(Base):
     # that replaced them every 30s. `mode` held 'POSITION' at exactly 8 by luck.
     # `test_schema_migrations` now pins every value against these widths.
     role: Mapped[str] = mapped_column(String(32))                          # ladder trigger, or cancel:<trigger>
-    state: Mapped[str] = mapped_column(String(12), default="pending")      # pending|deployed|armed|filled|expired|skipped
+    state: Mapped[str] = mapped_column(String(12), default="pending")
+    # pending|deployed|armed|filled|expired|skipped|cancelled|rejected
     mode: Mapped[str | None] = mapped_column(String(16), nullable=True)    # POSITION | LIMIT | STOP | CANCEL
     trigger_level: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)  # reclaim STOP trigger
     broker_order_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)  # armed STOP working-order id

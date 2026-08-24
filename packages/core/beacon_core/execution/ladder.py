@@ -397,21 +397,27 @@ def plan_ladder(sig, rows: Optional[List[dict]] = None, *,
         if entry is None:
             continue
         tp = tps[idx - 1]
-        # A rung that fills AT THE MARKET is judged against the market, not
-        # against its nominal level. `build_plan` drops a MARKET leg whose TP the
-        # price has already passed (`_tp_beyond` against current_price); the
-        # ladder checked only tp-vs-level, so a POSITION rung planned at 4637 with
-        # TP1 4640 would fill at 4641.49 — above its own target. That books a loss
-        # and labels it tp_hit. A resting LIMIT/STOP is unaffected: it fills at its
-        # level or not at all.
-        if (current_price is not None
-                and BROKER_ORDER_TYPE.get(r["order"]) == "MARKET"):
-            px = Decimal(str(current_price))
-            ahead = (Decimal(str(tp)) > px if sig.direction == "BUY"
-                     else Decimal(str(tp)) < px)
-            if not ahead:
-                continue                 # the market is already past this target
-        # The same two entry guards build_plan applies, against THIS rung's entry.
+        wait_for = trigger_level(r["when"], sig)
+        # A MARKET RUNG'S ENTRY IS THE PRICE IT FILLS AT, not its nominal level.
+        # `build_plan` does exactly this — a MARKET leg's entry IS current_price
+        # (planner.py) — and everything downstream depends on it, because
+        # `lot = risk_cash / |entry - sl|`. Budgeting on the nominal level while
+        # filling somewhere else puts on MORE risk than planned: sized on
+        # |4649-4657| = 8 but filled at 4645, the real distance is 12 and the
+        # position carries 1.5x its budget. That breaks the one guarantee #250
+        # exists to make.
+        #
+        # A signal rung fills now, at the market. A deferred MARKET rung fills
+        # when its trigger is reached, so the trigger IS its fill price. A resting
+        # LIMIT/STOP is untouched: it fills at its own level or not at all.
+        if BROKER_ORDER_TYPE.get(r["order"]) == "MARKET":
+            fill_at = (Decimal(str(current_price))
+                       if r["when"] == WHEN_SIGNAL and current_price is not None
+                       else wait_for)
+            if fill_at is not None:
+                entry = Decimal(str(fill_at))
+        # The same two entry guards build_plan applies, against THIS rung's entry
+        # — which, for a MARKET rung, is now the price it will really fill at.
         if min_stop_distance is not None and abs(Decimal(str(tp)) - entry) < Decimal(str(min_stop_distance)):
             continue                     # tp within the broker's minimum distance
         if (max_tp_distance_pct is not None and entry
@@ -432,7 +438,6 @@ def plan_ladder(sig, rows: Optional[List[dict]] = None, *,
         # different prices. Conflating them made `mid / STOP / ENTRY-FROM` wait on
         # ENTRY-FROM — which a BUY is already at or below — so the rung deployed
         # at once instead of at MID.
-        wait_for = trigger_level(r["when"], sig)
         if r["when"] != WHEN_SIGNAL and wait_for is None:
             continue                     # a trigger this signal cannot produce
         # No de-duplication here, deliberately. It was needed when ONE table had to
@@ -450,6 +455,31 @@ def plan_ladder(sig, rows: Optional[List[dict]] = None, *,
             tranche=r["when"],
             trigger=None if r["when"] == WHEN_SIGNAL else wait_for))
     return legs
+
+
+def order_kind(leg_order_type, fallback=None) -> str:
+    """Which broker order one rung is, as MARKET | LIMIT | STOP.
+
+    Small, but it is the decision that put 23 unintended positions on the demo
+    account, so it lives here where it can be tested rather than inline in the
+    monitor's placement loop. Two things it has to get right:
+
+      * PER RUNG. A tranche groups rungs by the price they WAIT FOR, and rungs
+        sharing a trigger need not share an order type - the shipped 1-zone cells
+        from three TPs up put a MARKET rung and a STOP rung on the same `mid`.
+        Reading one type off the tranche market-filled the STOP rungs.
+      * POSITION IS THE OPERATOR'S WORD for MARKET. Rows planned before the
+        translation was introduced still carry it, so it must not be stranded.
+
+    Anything unrecognised is MARKET, matching `plan_ladder`'s own default, so a
+    rung is never silently turned into a resting order that waits forever.
+    """
+    kind = str(leg_order_type or fallback or "").strip().upper()
+    if kind == ORDER_STOP:
+        return "STOP"
+    if kind == ORDER_LIMIT:
+        return "LIMIT"
+    return "MARKET"                    # MARKET, POSITION, or anything unknown
 
 
 def cancel_rows(rows: Optional[List[dict]] = None) -> List[str]:

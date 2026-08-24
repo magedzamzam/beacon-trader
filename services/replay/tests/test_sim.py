@@ -372,3 +372,144 @@ def test_reaching_tp1_after_a_fill_still_cancels_the_rest():
         waiting = [t for t in trade.tranches if t.role != LAD.WHEN_SIGNAL]
         assert all(t.state in STG.TERMINAL_STATES for t in waiting), \
             [(t.role, t.state) for t in waiting]
+
+
+# --- the ladder as the monitor runs it ---------------------------------------
+def _step_all(trade, s_, v, n_warm):
+    for i in range(n_warm + 1, len(s_)):
+        sim.step(trade, s_[i], variant=v)
+    return trade
+
+
+def _one_zone(**kw):
+    """A single-level signal, so the grid's 1-ZONE half applies. From three TPs
+    up those cells put a MARKET rung and a STOP rung on the SAME `mid` trigger,
+    which is what the next few tests are about."""
+    base = dict(entry=4000.0, entry_to=4000.0, sl=3980.0,
+                tps=(4010.0, 4020.0, 4030.0))
+    base.update(kw)
+    return signal(**base)
+
+
+def test_a_confirmation_stop_does_not_fill_on_the_bar_that_deploys_it():
+    """`level` is what the tranche WAITED FOR; `leg.entry` is where the order
+    RESTS. The 1-zone 3-TP cell waits for MID (3990) and then rests a STOP back
+    at the entry (4000) — a bet that price recovers.
+
+    Handing the deploy trigger to `SimLeg.trigger` set that stop at 3990, which
+    the very bar that deployed it had just traded through: every confirmation
+    STOP filled instantly, and the confirmation it exists to wait for never had
+    to happen. Here price touches 3990 and then sits below 4000, so a correctly
+    placed stop must still be working."""
+    v = _staged_variant()
+    trade, why, s_, _mc, n_warm = _staged_plan(
+        v, _one_zone(), [4000, (3998, 3998, 3989, 3992), 3992, 3992])
+    assert why is None and trade.entry_style == sim.STAGED
+    _step_all(trade, s_, v, n_warm)
+
+    mid = next(t for t in trade.tranches if t.role == LAD.WHEN_MID)
+    assert mid.state in (STG.ARMED, STG.DEPLOYED), (mid.state, mid.reason)
+    stops = [l for l in trade.legs if l.order_type == "STOP"]
+    assert stops, "the 1-zone 3-TP cell must arm a confirmation STOP"
+    for leg in stops:
+        assert float(leg.entry) == 4000.0
+        assert float(leg.trigger) == 4000.0, "a STOP fires at its OWN level"
+        assert leg.status != F.OPEN, "price never regained 4000 — it cannot have filled"
+
+
+def test_a_confirmation_stop_fills_when_price_actually_comes_back():
+    """The other half: the rule is not simply disabled. Once price does regain
+    the entry, the armed STOP fills there."""
+    v = _staged_variant()
+    trade, why, s_, _mc, n_warm = _staged_plan(
+        v, _one_zone(), [4000, (3998, 3998, 3989, 3992), (3992, 4003, 3992, 4002), 4002])
+    assert why is None
+    _step_all(trade, s_, v, n_warm)
+    stops = [l for l in trade.legs if l.order_type == "STOP"]
+    assert any(l.status in (F.OPEN, F.CLOSED) for l in stops), \
+        [(l.status, l.entry, l.trigger) for l in stops]
+
+
+def test_a_deployed_market_rung_fills_at_its_trigger_not_the_bar_open():
+    """The monitor sends the market order the moment price reaches the rung's
+    trigger, so that is where it fills. Filling it at the bar's OPEN credited a
+    backtest with an entry live could never have got — here the bar opens at 4000
+    and the rung triggers at MID 3990, ten points better for a BUY."""
+    v = _staged_variant()
+    trade, why, s_, _mc, n_warm = _staged_plan(
+        v, _one_zone(), [4000, (3998, 3998, 3989, 3992), 3992, 3992])
+    assert why is None
+    _step_all(trade, s_, v, n_warm)
+
+    mkt = [l for l in trade.legs
+           if l.order_type == "MARKET" and l.status in (F.OPEN, F.CLOSED)
+           and l.trigger is not None]
+    assert mkt, "the 1-zone 3-TP cell must take size at MID"
+    for leg in mkt:
+        assert abs(float(leg.fill_price) - 3990.0) < 1.0, \
+            f"filled at {leg.fill_price}, not at its 3990 trigger"
+
+
+def test_a_cancel_row_that_is_not_tp1_is_honoured_too():
+    """The grammar allows a cancel row on any trigger; replay only ever read
+    `tp1`, so a ladder that stops adding size once the far edge trades would run
+    unthrottled in the backtest while cancelling live — the two arms measuring
+    different rules."""
+    rows = [{"when": "signal", "action": "open", "order": "POSITION",
+             "level": "ENTRY_FROM", "target": 1},
+            {"when": "mid", "action": "open", "order": "POSITION",
+             "level": "MID", "target": 2},
+            {"when": "entry_to", "action": "cancel_all"}]
+    v = _staged_variant(ladders={"1": {"3": rows}})
+    # opens at the market (4000), then trades down THROUGH the entry (the cancel
+    # trigger) and on to MID — the `mid` rung must never deploy.
+    trade, why, s_, _mc, n_warm = _staged_plan(
+        v, _one_zone(), [4000, (4000, 4000, 3999, 3999), (3999, 3999, 3988, 3991), 3991])
+    assert why is None and trade.entry_style == sim.STAGED
+    _step_all(trade, s_, v, n_warm)
+    mid = next(t for t in trade.tranches if t.role == LAD.WHEN_MID)
+    assert mid.state in STG.TERMINAL_STATES, (mid.state, mid.reason)
+
+
+def test_the_cancel_row_pulls_the_signal_tranches_orders_too():
+    """"Cancel everything else" means every order still working for this signal.
+    Live queries the TRADE's working legs; replay skipped the signal tranche, so
+    a resting entry live had already withdrawn stayed alive in the backtest and
+    could still fill."""
+    # The market rung targets TP2, not TP1, so reaching TP1 leaves it OPEN — the
+    # trade must still be running when the cancel fires, or the ordinary
+    # trade-closed cleanup would pull the resting order and prove nothing.
+    rows = [{"when": "signal", "action": "open", "order": "POSITION",
+             "level": "ENTRY_FROM", "target": 2},
+            {"when": "signal", "action": "open", "order": "LIMIT",
+             "level": "MID", "target": 3},
+            {"when": "tp1", "action": "cancel_all"}]
+    v = _staged_variant(ladders={"1": {"3": rows}})
+    # the POSITION rung fills at once, then price runs to TP1 (4010) but not TP2
+    trade, why, s_, _mc, n_warm = _staged_plan(
+        v, _one_zone(), [4000, (4000, 4012, 4000, 4011), 4011, 4011])
+    assert why is None and trade.entry_style == sim.STAGED
+    _step_all(trade, s_, v, n_warm)
+
+    assert any(l.status in (F.OPEN, F.CLOSED) for l in trade.legs), \
+        "the precondition needs something filled"
+    resting = [l for l in trade.legs if l.order_type == "LIMIT"]
+    assert resting, "the fixture must leave a resting order to pull"
+    assert not any(l.status == F.WORKING for l in resting), \
+        [(l.order_type, l.status) for l in resting]
+    sig_tr = next(t for t in trade.tranches if t.role == LAD.WHEN_SIGNAL)
+    assert sig_tr.state in STG.TERMINAL_STATES, (sig_tr.state, sig_tr.reason)
+
+
+def test_a_tranche_of_mixed_rungs_is_armed_and_labelled_mixed():
+    """The `mid` tranche of a 1-zone 3-TP signal owns a MARKET rung and a STOP
+    rung. It is ARMED because one of them rests at the broker, and its `mode`
+    label says so rather than claiming one type for both."""
+    v = _staged_variant()
+    trade, why, s_, _mc, n_warm = _staged_plan(
+        v, _one_zone(), [4000, (3998, 3998, 3989, 3992), 3992, 3992])
+    assert why is None
+    _step_all(trade, s_, v, n_warm)
+    mid = next(t for t in trade.tranches if t.role == LAD.WHEN_MID)
+    assert mid.mode == "MIXED", mid.mode
+    assert mid.state == STG.ARMED, (mid.state, mid.reason)

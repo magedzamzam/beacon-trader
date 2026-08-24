@@ -42,10 +42,11 @@ FILLED = "filled"        # at least one leg filled
 EXPIRED = "expired"      # gave up waiting
 SKIPPED = "skipped"      # never deployed, deliberately
 CANCELLED = "cancelled"  # its resting order was pulled at the broker (#161)
+REJECTED = "rejected"    # tried to deploy; the broker took none of its orders
 
 # A tranche in any of these is RESOLVED: it owns nothing at the broker any more,
 # so "armed with a live broker_order_ref" is never a permanent state (#161).
-TERMINAL_STATES = (FILLED, EXPIRED, SKIPPED, CANCELLED)
+TERMINAL_STATES = (FILLED, EXPIRED, SKIPPED, CANCELLED, REJECTED)
 
 
 # The whole staged config: a master flag, and the two #158 brakes.

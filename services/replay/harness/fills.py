@@ -197,8 +197,9 @@ def try_fill(leg: SimLeg, direction: str, bar: B.Bar, *,
              slippage_points: float = 0.0) -> bool:
     """Fill `leg` inside `bar` if its order type says so. Returns True on a fill.
 
-    MARKET fills at the bar's open on the side we pay, plus slippage. LIMIT fills
-    at its level when the correct side reaches it (passive — no slippage). STOP
+    MARKET fills at the bar's open on the side we pay, plus slippage - UNLESS it
+    carries a trigger, in which case it fills there (see below). LIMIT fills at
+    its level when the correct side reaches it (passive — no slippage). STOP
     fills at its trigger plus slippage: a stop entry crosses the spread by
     construction and is the fill most exposed to a fast market.
     """
@@ -206,7 +207,16 @@ def try_fill(leg: SimLeg, direction: str, bar: B.Bar, *,
         return False
     ot = leg.order_type
     if ot == "MARKET":
-        px = B.entry_price_now(direction, bar) + B.adverse(direction, slippage_points)
+        # A LADDER RUNG deployed mid-bar did not fill at the open. The monitor
+        # sends its market order the moment price reaches the rung's trigger, so
+        # the trigger is where it fills - and the bar's open can be a long way
+        # from there, in either direction, which showed up as replayed staged
+        # entries live could never have got. A signal-time MARKET leg carries no
+        # trigger and still fills at the open, which is right: it is sent before
+        # the bar, not during it.
+        base = (float(leg.trigger) if leg.trigger is not None
+                else B.entry_price_now(direction, bar))
+        px = base + B.adverse(direction, slippage_points)
     elif ot == "LIMIT":
         if not B.limit_touched(direction, leg.entry, bar):
             return False

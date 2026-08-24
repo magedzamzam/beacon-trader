@@ -213,9 +213,19 @@ def plan_trade(*, signal: ParsedSignal, signal_id: int, source_id, account_id: i
             plan = FanoutPlan(symbol=signal.symbol, direction=signal.direction,
                               order_type="LIMIT", legs=legs)
             entry_style = STAGED
+            # Resolve each cancel row to the price that fires it, here where
+            # the signal is in hand - the monitor stores exactly this on the
+            # tranche. This used to keep only `tp1`, so a ladder that cancelled
+            # on ENTRY_TO ran unthrottled in replay while cancelling live: the
+            # backtest would be measuring a different rule than the one it is
+            # meant to stand in for.
+            _cancels = {}
+            for _w in LAD.cancel_rows(ladder_rows):
+                _lvl = LAD.trigger_level(_w, signal)
+                if _lvl is not None:
+                    _cancels[_w] = float(_lvl)
             staged_geo = {"mid": float(LAD.mid_level(signal.entry_to, signal.sl)),
-                          "tp1": float(signal.tps[0]) if signal.tps else None,
-                          "cancel_on": LAD.cancel_rows(ladder_rows)}
+                          "cancels": _cancels}
     if entry_style == SINGLE_SHOT:
         plan = build_plan(
             signal, current_price=mc.current_price,
@@ -379,23 +389,34 @@ def _staged_step(trade: SimTrade, bar: B.Bar) -> None:
 
     # A cancel row first: reaching TP1 pulls every other rung, and a rung that
     # would otherwise deploy on this same bar must not slip out ahead of it.
-    tp1 = geo.get("tp1")
-    if tp1 is not None and LAD.WHEN_TP1 in (geo.get("cancel_on") or ()):
-        # The FAVOURABLE extreme against reached_TARGET: a TP touched inside the
-        # minute is a touch, and TP1 sits in the winning direction, so the
-        # entry-side `reached` would be true from the very first bar.
+    for _when, _lvl in (geo.get("cancels") or {}).items():
+        # A TARGET-side trigger reads the other way round from an entry-side one,
+        # and against the FAVOURABLE extreme: a TP touched inside the minute is a
+        # touch, and TP1 sits in the winning direction, so the entry-side
+        # `reached` would be true from the very first bar. Same split as the
+        # monitor's.
+        _tgt = _when == LAD.WHEN_TP1
+        _hit = LAD.reached_target if _tgt else LAD.reached
+        _px = B.favourable_extreme(trade.direction, bar) if _tgt else adverse_px
+        if not _hit(trade.direction, _px, _lvl):
+            continue
         # The same precondition the monitor applies. F.OPEN / F.CLOSED are the
         # sim's equivalents of the live statuses it counts, so both sides answer
         # "did anything actually fill?" the same way — a replay that cancelled
         # where live did not would be measuring a different strategy (#250 cr. 6).
-        _held = any(l.status in (F.OPEN, F.CLOSED) for l in trade.legs)
-        if _held and LAD.reached_target(
-                trade.direction, B.favourable_extreme(trade.direction, bar), tp1):
-            for tr in trade.tranches:
-                if tr.role != LAD.WHEN_SIGNAL and tr.state not in STG.TERMINAL_STATES:
-                    tr.reason = "ladder: TP1 reached"
-                    _resolve_tranche(trade, tr, STG.CANCELLED, bar.ts)
-            return
+        if not any(l.status in (F.OPEN, F.CLOSED) for l in trade.legs):
+            continue
+        # EVERY tranche, INCLUDING the signal one, which this used to skip.
+        # "Cancel everything else" means every order still working for this
+        # signal, and live pulls them all — it queries the trade's working legs,
+        # not one tranche's. Leaving the signal tranche's resting orders alive
+        # let replay fill entries live had already withdrawn. `_resolve_tranche`
+        # touches only PENDING and WORKING legs, so open positions are untouched.
+        for tr in trade.tranches:
+            if tr.state not in STG.TERMINAL_STATES:
+                tr.reason = "ladder: %s reached" % _when
+                _resolve_tranche(trade, tr, STG.CANCELLED, bar.ts)
+        return
 
     for tr in trade.tranches:
         if tr.role == LAD.WHEN_SIGNAL or tr.state != STG.PENDING:
@@ -427,17 +448,32 @@ def _rung_level(trade: SimTrade, tr: Tranche):
 def _deploy(trade: SimTrade, tr: Tranche, level: float, bar: B.Bar) -> None:
     """Place a rung's orders. A STOP rung goes to ARMED (resting at the broker);
     anything else to DEPLOYED. Each leg's TTL clock starts now (#158)."""
-    mode = None
+    # Rungs sharing a trigger need not share an order type - every 1-zone cell
+    # from 3 TPs up pairs a MARKET rung with a STOP one on `mid` - so the tranche
+    # is ARMED if ANY leg rests as a STOP, and its `mode` label says MIXED rather
+    # than claiming the last leg's type for all of them. Matches the monitor.
+    armed, modes = False, set()
     for i in tr.leg_indices:
         leg = trade.legs[i]
         if not leg.is_pending:
             continue
         mode = leg.order_type or "LIMIT"
+        modes.add(mode)
+        armed = armed or mode == LAD.ORDER_STOP
+        # THE RUNG'S OWN LEVEL, not the level that deployed it. `level` is what
+        # the tranche WAITED FOR; `leg.entry` is where the order RESTS - two
+        # different prices, and `SimLeg.trigger` means the second. Passing the
+        # first made every confirmation STOP fire on the bar it was placed,
+        # because a bar that reached the deploy trigger trivially satisfies a
+        # stop set at that same trigger: the confirmation the rung exists to wait
+        # for never had to happen. A deferred MARKET rung fills AT its trigger
+        # too (`fills.try_fill`), and after the sizing fix its entry already IS
+        # that price, so the same field carries it. A LIMIT rests at its entry.
         leg.deploy(bar.ts, mode, float(leg.entry),
-                   trigger=float(level) if mode == LAD.ORDER_STOP else None)
-    tr.mode = mode
+                   trigger=None if mode == LAD.ORDER_LIMIT else float(leg.entry))
+    tr.mode = (modes.pop() if len(modes) == 1 else "MIXED" if modes else None)
     tr.trigger_level = float(level)
-    tr.state = STG.ARMED if mode == LAD.ORDER_STOP else STG.DEPLOYED
+    tr.state = STG.ARMED if armed else STG.DEPLOYED
     tr.state_since = bar.ts
 
 

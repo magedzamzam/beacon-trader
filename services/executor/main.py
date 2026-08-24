@@ -225,6 +225,21 @@ async def _accounts_for(session, source: Source):
     return rows
 
 
+def _audit_chase_guard(session, plan, sig, acct, current) -> None:
+    """Record the chase guard's decision (#67) whenever it prevented a chase — a
+    MARKET hint rested as a LIMIT, or the signal skipped — so a bad-fill-avoided
+    is visible in the Activity feed rather than silent. Called on BOTH entry
+    styles: the guard decides whether the SIGNAL is taken at all, so a laddered
+    account needs the same audit trail as a single-shot one."""
+    guarded = [d for d in (plan.entry_decisions or [])
+               if d.get("decision") in ("limit", "skip")]
+    if guarded:
+        session.add(Event(kind="entry_chase_guard",
+                          payload={"signal_id": sig.id, "account_id": acct.id,
+                                   "current_price": str(current),
+                                   "decisions": guarded}))
+
+
 async def handle_signal(signal_id: int) -> None:
     async with Session()() as session:
         sig = await session.get(Signal, signal_id)
@@ -536,6 +551,12 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                 chase_tolerance_r=Decimal(str(planner_cfg.get("chase_tolerance_r", "0.25"))),
                 chase_tolerance_atr=Decimal(str(planner_cfg.get("chase_tolerance_atr", "0"))),
                 beyond_tolerance=str(planner_cfg.get("beyond_tolerance", "limit")))
+            # The guard's decision is auditable on both paths or on neither.
+            # It was logged only for single-shot, so an operator reading the
+            # Activity feed for a laddered account saw no bad-fill-avoided
+            # entries at all and could not tell the guard was even running —
+            # while the A/B it feeds is built on the two arms deciding alike.
+            _audit_chase_guard(session, _control, sig, acct, current)
             _rungs = [] if not _control.legs else LAD.plan_ladder(
                 parsed, ladder_rows,
                 max_tp_distance_pct=max_tp_pct if max_tp_pct > 0 else None,
@@ -576,14 +597,7 @@ async def _execute_on_account(session, sig, parsed, source, acct,
                 chase_tolerance_atr=Decimal(str(planner_cfg.get("chase_tolerance_atr", "0"))),
                 beyond_tolerance=str(planner_cfg.get("beyond_tolerance", "limit")),
             )
-            # Audit the chase-guard decision (#67) whenever it prevented a chase —
-            # a MARKET hint rested as a LIMIT, or was skipped — so a bad-fill-avoided
-            # is visible in the Activity feed, not silent.
-            _guarded = [d for d in plan.entry_decisions if d.get("decision") in ("limit", "skip")]
-            if _guarded:
-                session.add(Event(kind="entry_chase_guard",
-                                  payload={"signal_id": sig.id, "account_id": acct.id,
-                                           "current_price": str(current), "decisions": _guarded}))
+            _audit_chase_guard(session, plan, sig, acct, current)
         # Session risk multiplier (#81): de-size entries in the higher-loss
         # London/NY overlap window while keeping London/Asian full. Config-driven
         # (trading_hours.sessions[].risk_mult); fail-open x1.0.
@@ -1149,11 +1163,19 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             for _when, _ids in tranche_legs.items():
                 if not _ids:
                     continue
-                _pl = next((p for p in valid if getattr(p, "tranche", None) == _when), None)
+                _mine = [p for p in valid if getattr(p, "tranche", None) == _when]
+                _pl = _mine[0] if _mine else None
+                # A tranche groups rungs by TRIGGER, and rungs sharing a trigger can
+                # want different ORDER TYPES - every 1-zone cell from 3 TPs up pairs
+                # a MARKET rung with a STOP one on `mid`. `mode` is the audit label
+                # for the whole group, so it must not quietly claim the first leg's
+                # type for all of them; the monitor places each leg on its own
+                # `legs.order_type`. MIXED is the honest label.
+                _modes = {p.order_type for p in _mine if p.order_type}
                 session.add(StagedTranche(
                     trade_id=trade.id, role=_when,
                     state="deployed" if _when == LAD.WHEN_SIGNAL else "pending",
-                    mode=(_pl.order_type if _pl else None),
+                    mode=(_modes.pop() if len(_modes) == 1 else "MIXED" if _modes else None),
                     trigger_level=(_pl.trigger if _pl and _pl.trigger is not None else None),
                     leg_ids=_ids))
             # A `cancel everything else` row owns no legs, so it needs a row of its
