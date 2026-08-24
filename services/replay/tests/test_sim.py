@@ -192,15 +192,18 @@ def test_horizon_capped_trades_are_marked_to_market_not_won():
 
 
 # --- staged -------------------------------------------------------------------
-def _staged_variant(ladder=None, **staged):
-    """A staged variant. #250 replaced the thirteen tuning knobs with a ladder
-    table, so what a staged variant carries now is that table."""
+def _staged_variant(ladders=None, **staged):
+    """A staged variant. The ladder is a GLOBAL GRID (#250), not an entry-policy
+    key, so it is set on the variant — `entry_policy["ladder"]` is ignored by the
+    sim and offering it here would be a knob that does nothing.
+
+    `ladders` is a grid: {zone: {tp_count: [rows]}}."""
     cfg = {"enabled": True}
     cfg.update(staged)
     ep = {"entry_style": "staged", "ttl_minutes": 120, "staged": cfg}
-    if ladder is not None:
-        ep["ladder"] = ladder
-    return build_variant(variant_dict(entry_policy=ep, sl_rules=NO_RATCHET))
+    v = build_variant(variant_dict(entry_policy=ep, sl_rules=NO_RATCHET,
+                                   staged_ladders=ladders))
+    return v
 
 
 WARMUP_HOURS = 40
@@ -302,3 +305,70 @@ def test_reaching_tp1_cancels_every_other_rung():
     assert waiting, "the default ladder should leave rungs waiting on MID"
     assert all(t.state in STG.TERMINAL_STATES for t in waiting), \
         [(t.role, t.state) for t in waiting]
+
+
+def test_a_market_already_past_tp1_does_not_cancel_unfilled_rungs():
+    """Signal 1431 in miniature. The cancel-on-TP1 row used to fire on price
+    alone, before anything filled, and took every rung with it — seven orders
+    placed and seven withdrawn, deployed_risk 0.00.
+
+    A ladder of resting orders only, so nothing can fill: price sits above TP1
+    for the whole path and never trades down to either entry."""
+    zone = signal(entry=4637.0, entry_to=4633.0, sl=4627.0,
+                  tps=(4640.0, 4643.0, 4646.0))
+    # A LIMIT-only grid cell, injected as a real variant grid: resting orders
+    # only, so the fixture genuinely cannot fill and the precondition is the only
+    # thing under test.
+    rows = [{"when": "signal", "action": "open", "order": "LIMIT",
+             "level": "ENTRY_TO", "target": 2},
+            {"when": "signal", "action": "open", "order": "LIMIT",
+             "level": "ENTRY_TO", "target": 3},
+            {"when": "tp1", "action": "cancel_all"}]
+    v = _staged_variant(ladders={"2": {"3": rows}})
+    trade, why, s_, _mc, n_warm = _staged_plan(v, zone, [4641.5] * 5)
+    assert why is None and trade.entry_style == sim.STAGED
+    for i in range(n_warm + 1, len(s_)):
+        sim.step(trade, s_[i], variant=v)
+
+    assert not any(l.status in (F.OPEN, F.CLOSED) for l in trade.legs), \
+        "the fixture must not fill anything"
+    assert not [l for l in trade.legs if l.status == F.CANCELLED], \
+        "nothing filled, so the TP1 rule must not fire"
+    assert [l for l in trade.legs if l.tp in (4643.0, 4646.0)], \
+        "the deeper TPs, still ahead of the market, must survive"
+
+
+def test_a_market_rung_whose_target_the_price_has_passed_is_not_planned():
+    """A POSITION rung fills AT the market. Planned at 4637 with TP1 4640 it
+    would fill at 4641.5 — above its own target — booking a loss and labelling it
+    tp_hit. `build_plan` drops such a leg; the ladder now does too."""
+    zone = signal(entry=4637.0, entry_to=4633.0, sl=4627.0,
+                  tps=(4640.0, 4643.0, 4646.0))
+    rows = [{"when": "signal", "action": "open", "order": "POSITION",
+             "level": "ENTRY_FROM", "target": 1},
+            {"when": "signal", "action": "open", "order": "POSITION",
+             "level": "ENTRY_FROM", "target": 2},
+            {"when": "tp1", "action": "cancel_all"}]
+    at = LAD.plan_ladder(zone, rows, current_price=4641.5)
+    tps = {float(r.tp) for r in at}
+    assert 4640.0 not in tps, "TP1 is behind the market — must not be planned"
+    assert 4643.0 in tps, "TP2 is ahead of the market — must survive"
+    assert all(r.order_type == "MARKET" for r in at), \
+        "POSITION must reach the broker as MARKET"
+
+
+def test_reaching_tp1_after_a_fill_still_cancels_the_rest():
+    """The rule is not weakened: once a rung has filled and TP1 is reached, the
+    remaining rungs are still pulled."""
+    zone = signal(entry=4000.0, entry_to=3990.0, sl=3980.0,
+                  tps=(4010.0, 4020.0, 4030.0))
+    v = _staged_variant()
+    trade, why, s_, _mc, n_warm = _staged_plan(
+        v, zone, [4000, (4000, 4001, 3995, 3999), (3999, 4015, 3998, 4012), 4012])
+    assert why is None and trade.entry_style == sim.STAGED
+    for i in range(n_warm + 1, len(s_)):
+        sim.step(trade, s_[i], variant=v)
+    if any(l.status in (F.OPEN, F.CLOSED) for l in trade.legs):
+        waiting = [t for t in trade.tranches if t.role != LAD.WHEN_SIGNAL]
+        assert all(t.state in STG.TERMINAL_STATES for t in waiting), \
+            [(t.role, t.state) for t in waiting]

@@ -184,7 +184,7 @@ def plan_trade(*, signal: ParsedSignal, signal_id: int, source_id, account_id: i
         # A variant may carry its own `staged_ladders` to test a different grid;
         # absent, it is the shipped default.
         ladder_rows = LAD.rows_for(
-            LAD.matrix_with_defaults(getattr(variant, "staged_ladders", None)), signal)
+            LAD.matrix_with_defaults(variant.staged_ladders), signal)
         # Same guards, and the same whole-signal chase skip, as the control arm —
         # a replayed staged arm that took signals live skipped would be comparing
         # different populations (#152/#155).
@@ -200,7 +200,8 @@ def plan_trade(*, signal: ParsedSignal, signal_id: int, source_id, account_id: i
         legs = LAD.plan_ladder(
             signal, ladder_rows,
             max_tp_distance_pct=max_tp_pct if max_tp_pct > 0 else None,
-            min_stop_distance=variant.min_stop_distance)
+            min_stop_distance=variant.min_stop_distance,
+            current_price=mc.current_price)
         # The SAME fallback the executor takes: no row the signal can support (no
         # such TP, or geometry that puts a rung on the wrong side of its own stop)
         # and the account runs single-shot. Without it a replayed "staged" arm
@@ -383,8 +384,13 @@ def _staged_step(trade: SimTrade, bar: B.Bar) -> None:
         # The FAVOURABLE extreme against reached_TARGET: a TP touched inside the
         # minute is a touch, and TP1 sits in the winning direction, so the
         # entry-side `reached` would be true from the very first bar.
-        if LAD.reached_target(trade.direction,
-                              B.favourable_extreme(trade.direction, bar), tp1):
+        # The same precondition the monitor applies. F.OPEN / F.CLOSED are the
+        # sim's equivalents of the live statuses it counts, so both sides answer
+        # "did anything actually fill?" the same way — a replay that cancelled
+        # where live did not would be measuring a different strategy (#250 cr. 6).
+        _held = any(l.status in (F.OPEN, F.CLOSED) for l in trade.legs)
+        if _held and LAD.reached_target(
+                trade.direction, B.favourable_extreme(trade.direction, bar), tp1):
             for tr in trade.tranches:
                 if tr.role != LAD.WHEN_SIGNAL and tr.state not in STG.TERMINAL_STATES:
                     tr.reason = "ladder: TP1 reached"

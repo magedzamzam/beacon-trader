@@ -288,8 +288,8 @@ def test_the_two_level_ladder_reproduces_250s_zone_spec():
     shape = {(str(r.trigger), r.order_type, str(r.entry), r.tp_index) for r in rungs}
     # "1 position at ENTRY-FROM -> TP1, 1 position at ENTRY-FROM -> TP2,
     #  a LIMIT at ENTRY-TO -> TP1, a LIMIT at ENTRY-TO -> TP3"
-    assert ("None", "POSITION", "4180", 1) in shape
-    assert ("None", "POSITION", "4180", 2) in shape
+    assert ("None", "MARKET", "4180", 1) in shape   # POSITION -> MARKET
+    assert ("None", "MARKET", "4180", 2) in shape
     assert ("None", "LIMIT", "4176", 1) in shape
     assert ("None", "LIMIT", "4176", 3) in shape
     # "LIMITs filled -> open a STOP order at ENTRY-FROM -> TP2"
@@ -308,7 +308,7 @@ def test_a_zone_cell_may_place_two_orders_on_one_level_for_one_target():
     at_entry_for_tp2 = [r for r in L.plan_ladder(sig, L.DEFAULT_MATRIX[L.ZONE_RANGE][3])
                         if r.entry == Decimal("4180") and r.tp_index == 2]
     assert len(at_entry_for_tp2) == 2
-    assert {r.order_type for r in at_entry_for_tp2} == {"POSITION", "STOP"}
+    assert {r.order_type for r in at_entry_for_tp2} == {"MARKET", "STOP"}
 
 
 def test_the_grid_picks_the_cell_that_matches_the_signal():

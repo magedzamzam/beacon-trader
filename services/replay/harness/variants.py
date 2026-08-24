@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
+from beacon_core.execution import ladder as LAD
 from . import signal_overrides as SO
 
 from beacon_core.execution import strategy as ST
@@ -133,6 +134,11 @@ class Variant:
     # default, and every result reports what it did, because a lever that
     # silently applied to nothing would report the baseline as the treatment.
     signal_overrides: Optional[Dict[str, Any]] = None
+    # The staged-entry ladder GRID to run (#250), zone shape x TP count. Absent
+    # means the shipped default, which is what live runs. Present lets a run
+    # BACKTEST a ladder before anyone arms it — the whole point of criterion 6 —
+    # and it is validated at parse time so a bad cell fails the run, not a trade.
+    staged_ladders: Optional[Dict[str, Any]] = None
     horizon_bars: int = 1440
     # Which price a ratchet trigger reads inside a bar. "extreme" is the closest
     # match to a monitor polling many times a minute (and to the MFE latching in
@@ -274,6 +280,7 @@ def build_variant(d: dict) -> Variant:
         costs=d.get("costs") or {},
         trading_hours=d.get("trading_hours") or None,
         signal_overrides=SO.parse(d.get("signal_overrides")),
+        staged_ladders=LAD.clean_matrix(d.get("staged_ladders")),
         horizon_bars=int(d.get("horizon_bars") or 1440),
         ratchet_price=str(d.get("ratchet_price") or "extreme"),
         ratchet_timing=_ratchet_timing(d.get("ratchet_timing")),

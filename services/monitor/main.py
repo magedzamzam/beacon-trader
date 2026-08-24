@@ -339,6 +339,25 @@ async def _drive_staged(session, trade, adapter, smap, mid, ttl_min) -> None:
         _hit = LAD.reached_target if _on_target else LAD.reached
         if tr.trigger_level is None or not _hit(direction, price, tr.trigger_level):
             continue
+        # THE PRECONDITION. "price reaches TP1 -> cancel everything else" means
+        # *our* first target was hit, so stop adding size to a move we are already
+        # in — it presumes we are IN it. Without this the rule fires on price
+        # alone, so a signal arriving when the market has ALREADY run past TP1
+        # cancelled its entire ladder before a single rung filled, taking TP2..TP5
+        # with it when every one of them was still ahead of the market.
+        #
+        # Signal 1431: price 4641.49, TPs 4640/4643/4646/4650/4653. Seven rungs
+        # placed, all seven withdrawn, deployed_risk 0.00. 18.8% of tradeable
+        # signals arrive that way (33% on src 7, 1.3% on src 5), so it was also a
+        # channel-correlated selection difference against Arms A and B.
+        #
+        # STATUS, not fill_price: 667 closed legs carry a NULL fill_price because a
+        # 0 fill is stored as unknown (#159), so a fill_price test would miss them.
+        _held = (await session.execute(select(func.count()).select_from(Leg).where(
+            Leg.trade_id == trade.id,
+            Leg.status.in_(("open", "closed"))))).scalar() or 0
+        if not _held:
+            continue                # nothing filled — there is no move to be done with
         cancelled = 0
         for other in pending:
             if other.id == tr.id or other.state != "pending":
@@ -400,7 +419,9 @@ async def _drive_staged(session, trade, adapter, smap, mid, ttl_min) -> None:
             minutes=effective_entry_ttl_min(
                 {"entry_ttl_minutes": STG.deployed_ttl_minutes(cfg, ttl_min)}))
         side_buy = direction == "BUY"
-        is_market = (tr.mode or "") == LAD.ORDER_POSITION
+        # Rows planned before the POSITION->MARKET translation still carry the
+        # operator's word, so accept both rather than stranding them.
+        is_market = (tr.mode or "") in ("MARKET", LAD.ORDER_POSITION)
         order_type = (OrderType.STOP if tr.mode == LAD.ORDER_STOP
                       else OrderType.MARKET if is_market else OrderType.LIMIT)
         placed = 0

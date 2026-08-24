@@ -539,7 +539,8 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             _rungs = [] if not _control.legs else LAD.plan_ladder(
                 parsed, ladder_rows,
                 max_tp_distance_pct=max_tp_pct if max_tp_pct > 0 else None,
-                min_stop_distance=smap.min_stop_distance)
+                min_stop_distance=smap.min_stop_distance,
+                current_price=current)
             if not _rungs:
                 # Every row was dropped — the signal has no TP any row targets, or
                 # the geometry puts each rung on the wrong side of its own stop.
@@ -1034,10 +1035,19 @@ async def _execute_on_account(session, sig, parsed, source, acct,
             for _attempt in (1, 2):
                 try:
                     _is_market = _otype == "MARKET"
+                    # A STOP is not a LIMIT. The old `MARKET else LIMIT` turned a
+                    # signal-triggered STOP rung into a LIMIT at the same level,
+                    # which fills from the opposite side — the inverse of what a
+                    # stop entry is for. No default grid cell puts a STOP on the
+                    # `signal` trigger today, but the ladder table lets an
+                    # operator do it, so it must not silently invert.
+                    _is_stop = _otype == "STOP"
                     res = await adapter.place_order(PlaceOrderRequest(
                         broker_symbol=smap.broker_epic,
                         side=OrderSide.BUY if side_buy else OrderSide.SELL,
-                        order_type=OrderType.MARKET if _is_market else OrderType.LIMIT,
+                        order_type=(OrderType.MARKET if _is_market
+                                    else OrderType.STOP if _is_stop
+                                    else OrderType.LIMIT),
                         quantity=pleg.lot,
                         limit_price=None if _is_market else pleg.entry,
                         stop_loss=pleg.sl, take_profit=_tp,
