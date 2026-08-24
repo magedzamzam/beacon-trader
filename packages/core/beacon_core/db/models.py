@@ -579,9 +579,16 @@ class StagedTranche(Base):
     __table_args__ = (Index("ix_staged_tranches_trade", "trade_id"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     trade_id: Mapped[int] = mapped_column(ForeignKey("trades.id"), index=True)
-    role: Mapped[str] = mapped_column(String(8))                           # toe_in | runner | reclaim
+    # WIDE ENOUGH FOR THE LADDER'S VOCABULARY, not just the old engine's.
+    # These were String(8), sized for toe_in|runner|reclaim. #250's ladder uses
+    # the trigger name as the role — `entry_from` (10) and `cancel:tp1` (10) —
+    # and the overflow rolled back the transaction AFTER the orders had already
+    # gone to the broker, leaving 9 orphaned LIMITs on DemoC and a retry loop
+    # that replaced them every 30s. `mode` held 'POSITION' at exactly 8 by luck.
+    # `test_schema_migrations` now pins every value against these widths.
+    role: Mapped[str] = mapped_column(String(32))                          # ladder trigger, or cancel:<trigger>
     state: Mapped[str] = mapped_column(String(12), default="pending")      # pending|deployed|armed|filled|expired|skipped
-    mode: Mapped[str | None] = mapped_column(String(8), nullable=True)     # LIMIT | MARKET | STOP
+    mode: Mapped[str | None] = mapped_column(String(16), nullable=True)    # POSITION | LIMIT | STOP | CANCEL
     trigger_level: Mapped[Decimal | None] = mapped_column(NUM, nullable=True)  # reclaim STOP trigger
     broker_order_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)  # armed STOP working-order id
     leg_ids: Mapped[list] = mapped_column(JSON, default=list)              # the Leg ids this tranche owns

@@ -360,3 +360,50 @@ def test_the_epoch_digest_backfill_is_self_limiting_and_leaves_the_clock_alone()
     src = inspect.getsource(B.backfill_epoch_digests)
     assert "epoch_digest.is_(None)" in src, "must only stamp rows that have none"
     assert "r.epoch_started_at" not in src and ".epoch_started_at =" not in src
+
+
+# --- the ladder's vocabulary must fit the columns it is stored in -------------
+def test_every_ladder_role_and_mode_fits_its_column():
+    """A live incident, not a hypothetical. `staged_tranches.role` was String(8),
+    sized for toe_in|runner|reclaim. #250's ladder writes the TRIGGER name as the
+    role, so `cancel:tp1` (10) overflowed on every staged trade — and because the
+    executor places orders BEFORE the tranche rows are flushed, the rollback left
+    9 real LIMIT orders resting at the broker with no Leg row, which the durable
+    queue then retried every 30 seconds.
+
+    So this asserts the whole vocabulary against the actual column widths rather
+    than trusting that today's names happen to fit."""
+    from beacon_core.db.models import StagedTranche
+    from beacon_core.execution import ladder as L
+
+    cols = {c.name: c.type.length for c in StagedTranche.__table__.columns
+            if getattr(c.type, "length", None)}
+
+    roles = set(L.WHENS) | {f"cancel:{w}" for w in L.WHENS}
+    for r in roles:
+        assert len(r) <= cols["role"], \
+            f"role {r!r} is {len(r)} chars, column holds {cols['role']}"
+
+    modes = set(L.ORDERS) | {"CANCEL"}
+    for m in modes:
+        assert len(m) <= cols["mode"], \
+            f"mode {m!r} is {len(m)} chars, column holds {cols['mode']}"
+
+    from beacon_core.execution import staging as S
+    for st in (S.PENDING, S.DEPLOYED, S.ARMED, S.FILLED, S.EXPIRED,
+               S.SKIPPED, S.CANCELLED):
+        assert len(st) <= cols["state"], \
+            f"state {st!r} is {len(st)} chars, column holds {cols['state']}"
+
+
+def test_the_widths_leave_room_rather_than_fitting_exactly():
+    """`mode` held 'POSITION' at exactly 8 of 8. Fitting by luck is how the next
+    value that is one character longer becomes another orphaned-order incident."""
+    from beacon_core.db.models import StagedTranche
+    from beacon_core.execution import ladder as L
+    cols = {c.name: c.type.length for c in StagedTranche.__table__.columns
+            if getattr(c.type, "length", None)}
+    longest_role = max(len(f"cancel:{w}") for w in L.WHENS)
+    longest_mode = max(len(m) for m in set(L.ORDERS) | {"CANCEL"})
+    assert cols["role"] >= longest_role + 8, "leave headroom on role"
+    assert cols["mode"] >= longest_mode + 4, "leave headroom on mode"
