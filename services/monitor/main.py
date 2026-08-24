@@ -283,6 +283,38 @@ async def _analyze_outcome(session, trade, ai_cfg) -> None:
         log.warning("AI outcome analysis failed (trade %s): %s", trade.id, exc)
 
 
+async def _commit_now(session, label: str, trade_id) -> bool:
+    """Make what has just been recorded DURABLE before the next broker call.
+
+    `tick()` commits once, at the end, for every trade it processed. Between an
+    `adapter.place_order()` returning and that commit there is a window in which
+    a real order exists at the broker and nothing in the database knows it. If
+    the commit then fails - a bad row, a deadlock, the connection dropping - the
+    tranche is still `pending` and its legs still `staged`, so the NEXT tick
+    reaches the same trigger and places the whole rung again.
+
+    That is not hypothetical. On 2026-08-24 a `varchar(8)` overflow on
+    `staged_tranches.role` failed exactly this insert; the rollback left 48
+    working orders and 23 unmanaged positions on DemoC, growing every 30s until
+    the broker rate-limited us. Widening the column removed that trigger. It did
+    not remove the window, and the window spans every trade in the tick.
+
+    Returns False on failure, having rolled back so the session is usable again -
+    a failed commit otherwise poisons the session for every trade after it."""
+    try:
+        await session.commit()
+        return True
+    except Exception as exc:
+        try:
+            await session.rollback()
+        except Exception:
+            pass
+        log.error("commit failed at %s (trade %s): %s", label, trade_id, exc)
+        _broker_error("staged_commit", f"Could not persist {label}: {exc}",
+                      account_id=None)
+        return False
+
+
 async def _staged_pending(session, trade_id) -> list:
     """Non-terminal tranches (pending) for a staged trade — the ones the DECIDE
     engine still acts on. Once deployed/armed, a tranche's legs are ordinary
@@ -318,12 +350,39 @@ async def _drive_staged(session, trade, adapter, smap, quote, mid, ttl_min) -> N
         StagedEntry.trade_id == trade.id))).scalar_one_or_none()
     if se is None:
         return
+    now = utcnow()
+
+    # --- a tranche caught mid-deploy, BEFORE the no-work early return ---------
+    # `deploying` means orders may be sitting at the broker with nothing in the
+    # database pointing at them. It is deliberately NOT self-healing: guessing
+    # which anonymous working order belongs to which rung is exactly how a
+    # foreign dealId ended up on 506 legs (#234). Make it loud instead, once.
+    #
+    # This runs above `if not pending: return` on purpose. The case it exists for
+    # is a trade whose only surviving tranche IS the stuck one - which is by
+    # definition not pending, so behind that return it could never fire.
+    for tr in (await session.execute(select(StagedTranche).where(
+            StagedTranche.trade_id == trade.id,
+            StagedTranche.state == STG.DEPLOYING))).scalars().all():
+        held = (now - tr.state_since).total_seconds() / 60.0 if tr.state_since else 0.0
+        if held < 5 or (tr.reason or "").startswith("STUCK"):
+            continue
+        tr.reason = f"STUCK mid-deploy {held:.0f}m - check the broker"[:96]
+        session.add(Event(trade_id=trade.id, kind="staged_deploy_stuck", payload={
+            "tranche": tr.role, "minutes": round(held, 1),
+            "legs": tr.leg_ids or []}))
+        log.error("trade %s tranche %s STUCK mid-deploy for %.0fm - orders may "
+                  "exist at the broker with no local record", trade.id, tr.role, held)
+        _broker_error("staged_deploy_stuck",
+                      f"Ladder rung {tr.role} on trade {trade.id} was interrupted "
+                      f"mid-deploy {held:.0f}m ago; check for unmanaged orders.",
+                      symbol=trade.symbol, account_id=trade.account_id)
+
     pending = await _staged_pending(session, trade.id)
     if not pending:
         return
 
     direction = se.direction
-    now = utcnow()
     cfg = STG.staged_config(se.cfg)
     # AGE OF THE WHOLE ENTRY, measured from the signal (#158) — the same anchor
     # `entry_expiry_reason` uses for legs that are already working.
@@ -342,6 +401,11 @@ async def _drive_staged(session, trade, adapter, smap, quote, mid, ttl_min) -> N
     entry_px = float(_q_in) if _q_in is not None else _mid
     target_px = float(_q_out) if _q_out is not None else _mid
 
+    # --- a tranche caught mid-deploy ------------------------------------------
+    # `deploying` means orders may be sitting at the broker with nothing in the
+    # database pointing at them. It is deliberately NOT self-healing: guessing
+    # which anonymous working order belongs to which rung is how a foreign dealId
+    # ends up on one of our legs (#234). Make it loud instead, once.
     # --- cancel rows first: reaching TP1 pulls everything else, and a rung that
     #     would otherwise deploy on this same tick must not slip out ahead of it.
     for tr in list(pending):
@@ -478,9 +542,27 @@ async def _drive_staged(session, trade, adapter, smap, quote, mid, ttl_min) -> N
             minutes=effective_entry_ttl_min(
                 {"entry_ttl_minutes": STG.deployed_ttl_minutes(cfg, ttl_min)}))
         side_buy = direction == "BUY"
+        # THE INTENT LOG. Record "about to place orders for this tranche" and make
+        # it durable BEFORE the first broker call. `_staged_pending` only returns
+        # `pending`, so from here on this tranche cannot be driven again whatever
+        # happens next - the worst case becomes one rung stuck and visible rather
+        # than the same rung re-placed every 30 seconds.
+        #
+        # If this commit fails nothing has been placed yet, the rollback puts the
+        # tranche back to `pending`, and the next tick simply retries. That is the
+        # safe direction to fail in, and it is the reason the write happens here
+        # rather than after.
+        tr.state, tr.state_since = STG.DEPLOYING, utcnow()
+        if not await _commit_now(session, "staged_deploy_intent", trade.id):
+            continue
         placed = 0
         armed = False
         for leg in legs:
+            # Never place a leg twice. If a previous attempt got as far as the
+            # broker and persisted the ref, that order is live and this one would
+            # double the size.
+            if leg.broker_order_ref or leg.broker_position_ref:
+                continue
             # PER LEG, NOT PER TRANCHE. A tranche groups the rungs that share a
             # TRIGGER; it does not follow that they share an ORDER TYPE. Every
             # 1-zone cell from 3 TPs up puts a MARKET rung and a STOP rung on the
@@ -544,6 +626,12 @@ async def _drive_staged(session, trade, adapter, smap, quote, mid, ttl_min) -> N
                 log.warning("ladder deploy failed (trade %s leg %s): %s", trade.id, leg.id, exc)
                 _broker_error("staged_deploy", f"Ladder rung deploy failed: {exc}",
                               symbol=trade.symbol, account_id=trade.account_id)
+            # PER LEG, immediately: the broker reference is the only link back to
+            # an order that now exists, and it is worth a round-trip to not lose
+            # it. If this fails, stop - the tranche stays `deploying`, so nothing
+            # re-places it, and the stuck-detector above will surface it.
+            if not await _commit_now(session, "staged_leg_placed", trade.id):
+                break
             await asyncio.sleep(1.0 / max(settings.broker_rate_per_sec, 0.1))
         # A rung that put NOTHING at the broker is not deployed. Recording it as
         # such left the trade waiting on orders that do not exist: nothing would
@@ -558,6 +646,7 @@ async def _drive_staged(session, trade, adapter, smap, quote, mid, ttl_min) -> N
                 "legs": len(legs)}))
             log.warning("trade %s ladder rung %s: all %s orders rejected",
                         trade.id, tr.role, len(legs))
+            await _commit_now(session, "staged_deploy_rejected", trade.id)
             continue
         # ARMED means "a STOP is resting at the broker waiting for confirmation".
         # With mixed rungs the tranche is armed if ANY of its legs is one, and
@@ -565,6 +654,7 @@ async def _drive_staged(session, trade, adapter, smap, quote, mid, ttl_min) -> N
         tr.state = "armed" if armed else "deployed"
         tr.state_since = utcnow()
         tr.reason = f"ladder: reached {tr.trigger_level}"[:96]
+        await _commit_now(session, "staged_deploy_done", trade.id)
         log.info("trade %s ladder rung %s -> %s (%s legs at %s)",
                  trade.id, tr.role, tr.state, placed, tr.trigger_level)
 
@@ -1210,7 +1300,10 @@ async def _process_trade(session, trade, ai_cfg=None) -> None:
         # and arms the reclaim STOP on a break — its deployed legs then flow through
         # the same reconciliation/ratchet/TTL above on later ticks. Best-effort:
         # a staging failure must never disturb capital management of open legs.
-        if staged_pending:                          # skip the StagedEntry query for normal trades
+        # `staged_pending` alone is not the right gate any more: a trade whose
+        # only surviving tranche is stuck in `deploying` has nothing pending, and
+        # that is precisely the trade whose orphaned orders need surfacing.
+        if staged_pending or trade.entry_style == "staged":
             try:
                 await _drive_staged(session, trade, adapter, smap, quote, mid, ttl_min)
             except Exception as exc:

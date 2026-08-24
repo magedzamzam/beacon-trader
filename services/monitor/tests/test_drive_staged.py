@@ -126,3 +126,56 @@ def test_the_executor_stamps_the_planned_stop_when_the_leg_is_made():
     """One construction site, and `pleg.sl` is already post-override there."""
     ex = (MAIN.parent.parent / "executor" / "main.py").read_text(encoding="utf-8")
     assert "sl=pleg.sl, initial_sl=pleg.sl" in ex
+
+
+# --- orphaned orders: the intent log (#259, monitor site) --------------------
+def test_the_intent_is_durable_before_any_order_is_placed():
+    """`tick()` commits once at the end for every trade. Between place_order()
+    returning and that commit, a real order exists that the database knows
+    nothing about — and if the commit fails, the tranche is still `pending` so
+    the next tick places the whole rung AGAIN. That is how one varchar overflow
+    became 48 working orders and 23 unmanaged positions on 2026-08-24."""
+    assert "tr.state, tr.state_since = STG.DEPLOYING, utcnow()" in DRIVE
+    intent = DRIVE.index('_commit_now(session, "staged_deploy_intent"')
+    first_order = DRIVE.index("await adapter.place_order(")
+    assert intent < first_order, "the intent must be committed BEFORE placing"
+
+
+def test_a_failed_intent_commit_places_nothing():
+    """The safe direction to fail in: nothing at the broker, tranche rolled back
+    to `pending`, next tick simply retries."""
+    tail = DRIVE[DRIVE.index('_commit_now(session, "staged_deploy_intent"'):]
+    assert tail[:200].count("continue") == 1
+
+
+def test_a_deploying_tranche_is_never_driven_again():
+    """`_staged_pending` returns only `pending`, so `deploying` is out of the
+    drive loop's reach — that is the whole safety property. A duplicated rung is
+    money; a stuck one is a phone call."""
+    pend = SRC[SRC.index("async def _staged_pending("):]
+    pend = pend[:pend.index("\nasync def ", 10)]
+    assert 'StagedTranche.state == "pending"' in pend
+    assert "DEPLOYING" not in pend
+
+
+def test_each_placement_is_persisted_as_it_happens():
+    assert '_commit_now(session, "staged_leg_placed"' in DRIVE
+    # and a leg already carrying a broker ref is never sent twice
+    assert "if leg.broker_order_ref or leg.broker_position_ref:" in DRIVE
+
+
+def test_a_stuck_tranche_is_surfaced_and_not_silently_healed():
+    """Guessing which anonymous working order belongs to which rung is how a
+    foreign dealId ended up on 506 legs (#234). Alert, don't adopt."""
+    assert "staged_deploy_stuck" in DRIVE
+    assert "STUCK mid-deploy" in DRIVE
+    # above the no-work early return, or the one case it exists for can't reach it
+    stuck = DRIVE.index("StagedTranche.state == STG.DEPLOYING")
+    early = DRIVE.index("if not pending:\n        return")
+    assert stuck < early, "the stuck check must run before the early return"
+
+
+def test_the_driver_runs_even_with_nothing_pending():
+    """A trade whose only surviving tranche is stuck has nothing pending — and is
+    exactly the trade whose orphaned orders need surfacing."""
+    assert 'if staged_pending or trade.entry_style == "staged":' in SRC

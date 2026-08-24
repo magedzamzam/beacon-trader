@@ -36,6 +36,10 @@ ENTRY_STYLES = ("market", "limit", "staged")
 
 # --- tranche states (persisted per tranche on the sidecar row) ----------------
 PENDING = "pending"      # not yet deployed — waiting for its trigger level
+DEPLOYING = "deploying"  # orders are being placed RIGHT NOW, or were when
+                         # something failed - either way they may exist at the
+                         # broker, so this tranche must never be driven again
+                         # until a human has looked (#259, monitor site)
 DEPLOYED = "deployed"    # a LIMIT/MARKET order is working/open for this tranche
 ARMED = "armed"          # a STOP is resting at the broker
 FILLED = "filled"        # at least one leg filled
