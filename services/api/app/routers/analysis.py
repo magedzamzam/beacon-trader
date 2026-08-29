@@ -6,7 +6,8 @@ from beacon_core.analysis import bayes as B
 from beacon_core.analysis import excursion as EX
 from beacon_core.analysis import excursion_store as EXS
 from beacon_core.analysis import feature_vector as FV
-from beacon_core.analysis.report import (execution_tax_report, excursion_report,
+from beacon_core.analysis.report import (session_multiplier_reading,
+                                        execution_tax_report, excursion_report,
                                          shadow_engine_report,
                                          stop_geometry_report)
 from beacon_core.execution import bayes_gate as BG
@@ -282,6 +283,25 @@ async def excursion_ladder(date_from: str = None, date_to: str = None,
         raise HTTPException(400, "basis must be 'signal' or 'fill'")
     return await excursion_report(db, parse_iso_utc(date_from),
                                   parse_iso_utc(date_to), basis=basis)
+
+
+@router.get("/session_multiplier")
+async def session_multiplier(date_from: str = None, date_to: str = None,
+                             basis: str = EXS.BASIS_SIGNAL,
+                             db: AsyncSession = Depends(get_db)):
+    """What each session `risk_mult` is DOING, on the exit-independent label (#270).
+
+    `settings.trading_hours` lets a session halve our size and one does - newyork
+    0.5, set 2026-07-16 and never evaluated, because nothing in the engine ever
+    reported what a multiplier was costing. Read `hour_matched` before acting on
+    the headline: a session IS a set of hours, so the unrestricted comparison is
+    confounded by hour of day.
+
+    Measure-only. No config moves off this page."""
+    if basis not in (EXS.BASIS_SIGNAL, EXS.BASIS_FILL):
+        raise HTTPException(400, "basis must be 'signal' or 'fill'")
+    return await session_multiplier_reading(db, parse_iso_utc(date_from),
+                                            parse_iso_utc(date_to), basis=basis)
 
 
 @router.get("/shadow_engine")

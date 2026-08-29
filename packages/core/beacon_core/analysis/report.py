@@ -2141,6 +2141,292 @@ def filter_removed_set(skips, control_trades, *, base_rate,
     }
 
 
+# --- session risk multipliers, measured (#270) ---------------------------------
+# `settings.trading_hours` lets a session carry a `risk_mult`, and the executor
+# multiplies it into `session_size_factor` (`services/executor/main.py`). One is
+# set: newyork 0.5, on 2026-07-16, never evaluated. Nothing in the engine reports
+# what a multiplier is DOING, so a folk belief ("New York is dangerous") has been
+# halving our size for six weeks with no instrument pointed at it. The events and
+# the excursion labels are both already there; this is the rollup that was missing.
+SESSION_MULT_UNTESTED = "UNTESTED"        # never fired, or one side of the contrast is empty
+SESSION_MULT_ACCUMULATE = "ACCUMULATE"    # below the decisive floor - no interval offered
+SESSION_MULT_CORRECT = "CORRECT"          # the de-sized cohort really is worse
+SESSION_MULT_INVERTED = "INVERTED"        # we are de-sizing the BETTER cohort
+SESSION_MULT_NO_EVIDENCE = "NO_EVIDENCE"  # interval spans zero at N
+# A one-block interval has zero between-block variance. It is not "tight", and it
+# is not NO_EVIDENCE either - there was no test. It gets its own word so it can
+# never be read as one of the four above.
+SESSION_MULT_UNDECIDABLE = "UNDECIDABLE"
+
+SESSION_MULT_MIN_N = 30       # CLAUDE.md 2.4 - the same floor as every other verdict here
+SESSION_MULT_HOUR_MIN_N = 10  # per-hour rows each cohort needs to join the matched row
+
+
+def _tp1_rate(rows):
+    return round(sum(r["tp1"] for r in rows) / len(rows), 4) if rows else None
+
+
+def _session_mult_contrast(desized, full, *, min_n, n_boot, seed) -> dict:
+    """One de-sized-vs-full contrast on `tp1_first`, day-block bootstrapped.
+
+    The value resampled is the 0/1 `tp1_first` label, so the "mean" IS the hit
+    rate and the difference of means IS the gap. Whole days are drawn together
+    for both cohorts (`day_block_bootstrap_diff`) because they share a day's
+    regime; resampling them independently would break exactly the correlation the
+    day block exists to preserve."""
+    by_day: dict = {}
+    for r in desized:
+        by_day.setdefault(r["day"], []).append((float(r["tp1"]), True))
+    for r in full:
+        by_day.setdefault(r["day"], []).append((float(r["tp1"]), False))
+    blk = day_block_bootstrap_diff(by_day, n_boot=n_boot, seed=seed)
+    n_dec = min(len(desized), len(full))
+
+    if not desized or not full:
+        verdict = SESSION_MULT_UNTESTED
+        reason = ("one side of the contrast is empty - the multiplier never fired, "
+                  "or nothing ran at full size in the same window. Nothing has "
+                  "been measured; this is not a null result")
+    elif n_dec < min_n:
+        verdict = SESSION_MULT_ACCUMULATE
+        reason = (f"{n_dec} on the smaller side, below the {min_n} floor - the gap "
+                  "is reported but no interval is offered to act on")
+    elif blk["degenerate"]:
+        verdict = SESSION_MULT_UNDECIDABLE
+        reason = (f"{blk['n_blocks']} day block(s): a single block has zero "
+                  "between-block variance, so the interval is a point and not a "
+                  "measurement. Widen the window before reading it")
+    elif not _excludes_zero(blk):
+        verdict = SESSION_MULT_NO_EVIDENCE
+        reason = (f"gap {blk['mean']} with interval [{blk['ci_low']}, "
+                  f"{blk['ci_high']}] over {blk['n_blocks']} day blocks - spans "
+                  "zero, so the multiplier is neither justified nor refuted")
+    elif blk["mean"] > 0:
+        verdict = SESSION_MULT_INVERTED
+        reason = (f"the de-sized cohort hits TP1 {blk['mean']} MORE often, "
+                  f"interval [{blk['ci_low']}, {blk['ci_high']}] over "
+                  f"{blk['n_blocks']} day blocks excluding zero - size is being "
+                  "cut on the BETTER cohort")
+    else:
+        verdict = SESSION_MULT_CORRECT
+        reason = (f"the de-sized cohort hits TP1 {abs(blk['mean'])} LESS often, "
+                  f"interval [{blk['ci_low']}, {blk['ci_high']}] over "
+                  f"{blk['n_blocks']} day blocks excluding zero - the multiplier "
+                  "is pointed the right way")
+
+    return {
+        "n_desized": len(desized), "n_full": len(full),
+        "tp1_first_desized": _tp1_rate(desized), "tp1_first_full": _tp1_rate(full),
+        "gap": blk["mean"], "ci": (blk["ci_low"], blk["ci_high"]),
+        "n_blocks": blk["n_blocks"], "degenerate": blk["degenerate"],
+        "verdict": verdict, "reason": reason,
+    }
+
+
+def session_multiplier_report(rows, *, min_n: int = SESSION_MULT_MIN_N,
+                              hour_min_n: int = SESSION_MULT_HOUR_MIN_N,
+                              n_boot: int = DEFAULT_BOOT,
+                              seed: int = DEFAULT_SEED) -> dict:
+    """What each session `risk_mult` is actually doing, per session and factor.
+
+    `rows`: one per signal that has an excursion row, all pure dicts -
+      `{"tp1_first": bool/0/1, "day": "YYYY-MM-DD" (or a datetime),
+        "hour": int UTC, "session": <id> or None, "factor": <float> or None}`
+    A row carries `session`/`factor` when a `session_desize` event fired for that
+    signal (`events.kind='entry_filtered'`, `payload.reason='session_desize'`);
+    everything else ran at full size and is the comparison cohort.
+
+    Read on `tp1_first` and NOT on realised P&L on purpose: the excursion ladder
+    is exit-independent, so it cannot be moved by the exit geometry, and our exit
+    books TP1 then ratchets - hit rate is the dominant term in this book's P&L,
+    not the tail. A multiplier is judged by whether the cohort it shrinks is
+    worse, which is a property of the SIGNAL and not of what we did with it.
+
+    TWO ROWS PER GROUP, and the second is not optional. The unrestricted
+    comparison is confounded by hour of day - "NY hours are simply different
+    hours" would explain any gap - so `hour_matched` re-runs the contrast over
+    only the UTC hours where BOTH cohorts have at least `hour_min_n` rows. A
+    reader must not be able to miss that restriction, so it is returned beside
+    the headline rather than left to be asked for.
+
+    Verdicts are `UNTESTED / ACCUMULATE / CORRECT / INVERTED / NO_EVIDENCE`, plus
+    `UNDECIDABLE` for a one-block interval - which is neither a null result nor a
+    tight one, and refusing to call it either is the whole point.
+
+    SHADOW / measure-only (CLAUDE.md 2): this returns a report. It changes no
+    config and nothing on the trading path reads it. A `risk_mult` value moves
+    only by a deliberate weekend act, after the per-arm test in #269 reads."""
+    clean = []
+    for r in rows or ():
+        tp1 = r.get("tp1_first")
+        if tp1 is None:
+            continue
+        day = r.get("day")
+        if hasattr(day, "date"):
+            day = str(day.date())
+        elif day not in (None, ""):
+            day = str(day)[:10]
+        if not day:
+            continue                # cannot join a block; never pooled into a fake one
+        sess = r.get("session")
+        fac = r.get("factor")
+        try:
+            hour = None if r.get("hour") is None else int(r["hour"])
+        except (TypeError, ValueError):
+            hour = None
+        try:
+            fac = None if fac is None else float(fac)
+        except (TypeError, ValueError):
+            fac = None
+        clean.append({"tp1": 1 if tp1 else 0, "day": day, "hour": hour,
+                      "session": None if sess in (None, "") else str(sess),
+                      "factor": fac})
+
+    # A row with no session/factor ran at full size. `1.0` belongs on the full
+    # side too: a multiplier that multiplies by one has nothing to test, and
+    # letting it form a contrast would manufacture a result out of a no-op.
+    def _is_full(r):
+        return r["session"] is None or r["factor"] in (None, 1.0)
+
+    full_all = [r for r in clean if _is_full(r)]
+    groups: dict = {}
+    for r in clean:
+        if not _is_full(r):
+            groups.setdefault((r["session"], r["factor"]), []).append(r)
+
+    out: dict = {}
+    for (sess, fac), desized in sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1])):
+        head = _session_mult_contrast(desized, full_all, min_n=min_n,
+                                      n_boot=n_boot, seed=seed)
+
+        d_hours: dict = {}
+        f_hours: dict = {}
+        for r in desized:
+            d_hours[r["hour"]] = d_hours.get(r["hour"], 0) + 1
+        for r in full_all:
+            f_hours[r["hour"]] = f_hours.get(r["hour"], 0) + 1
+        shared = sorted(h for h in d_hours
+                        if h is not None and d_hours[h] >= hour_min_n
+                        and f_hours.get(h, 0) >= hour_min_n)
+        matched = _session_mult_contrast(
+            [r for r in desized if r["hour"] in shared],
+            [r for r in full_all if r["hour"] in shared],
+            min_n=min_n, n_boot=n_boot, seed=seed)
+        matched["hours_utc"] = shared
+        matched["hour_min_n"] = hour_min_n
+        if not shared:
+            matched["reason"] = (
+                f"no UTC hour has {hour_min_n} rows in BOTH cohorts, so the "
+                "hour-of-day confound cannot be removed from this comparison at "
+                "all - read the headline row as confounded, not as clean")
+
+        out[f"{sess}@{fac:g}"] = {
+            "session": sess, "factor": fac,
+            **head,
+            "hour_matched": matched,
+        }
+
+    return {
+        "sessions": out, "n_groups": len(out), "min_n": min_n,
+        "note": ("Exit-independent (`tp1_first` off the excursion ladder), so a "
+                 "verdict here is about the SIGNALS a multiplier shrinks and not "
+                 "about what our exit did with them. Read `hour_matched` before "
+                 "acting: the unrestricted row is confounded by hour of day, "
+                 "because a session IS a set of hours. Measure-only - no config "
+                 "moves off this report."),
+    }
+
+
+async def session_multiplier_reading(session, frm=None, to=None,
+                                     basis: str = "signal",
+                                     min_n: int = SESSION_MULT_MIN_N) -> dict:
+    """`session_multiplier_report` off the ledger. Read-only.
+
+    The de-sized set is every signal that emitted a `session_desize` event; the
+    comparison cohort is every other signal with an excursion row in the window.
+    Deduped by signal, because one signal fans out to three arms and each logs
+    its own event - counting it three times would triple one side of a contrast
+    that is about signals, not about legs.
+
+    `Event.payload` is a generic `JSON` column, not `JSONB`, so it is read as a
+    dict in Python rather than indexed in SQL: `->>` and `astext` are Postgres
+    JSONB operators and this must keep working on the column as declared.
+
+    NAMING THE SESSION. The factor is a PRODUCT over every active window, so it
+    cannot be attributed on its own; events carry `sessions` (#270) and that is
+    used when present. Older events predate the stamp, so they fall back to the
+    CURRENT `trading_hours` config: if exactly one enabled session carries a
+    `risk_mult` below 1, it is the only window that could have produced a
+    de-size, and it is named. If more than one does, the group is labelled
+    `unattributed` rather than guessed - a wrong session name is worse here than
+    no name, because the whole point is deciding which window to change.
+
+    The excursion gate travels with it (#187) - these numbers are only as good as
+    the reconstruction they are read off, and a reader must not have to fetch the
+    gate separately to find out whether they are usable."""
+    from sqlalchemy import select
+    from ..db.models import Event, Signal, SignalExcursion
+
+    # The fallback name for events emitted before the `sessions` stamp.
+    legacy_name = "unattributed"
+    try:
+        from ..trading_hours.service import load_config
+        _cfg = await load_config(session)
+        _below = [x["id"] for x in (_cfg.get("sessions") or [])
+                  if bool(x.get("enabled", True))
+                  and float(x.get("risk_mult", 1.0)) < 1.0]
+        if len(_below) == 1:
+            legacy_name = _below[0]
+    except Exception as exc:                    # pragma: no cover - defensive
+        log.debug("session_multiplier: config unreadable, not naming: %s", exc)
+
+    ev = (await session.execute(
+        select(Event.payload).where(Event.kind == "entry_filtered"))).scalars().all()
+    desize: dict = {}
+    for pl in ev:
+        if not isinstance(pl, dict) or pl.get("reason") != "session_desize":
+            continue
+        try:
+            sid = int(pl["signal_id"])
+            fac = float(pl["factor"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        names = pl.get("sessions")
+        name = ("+".join(sorted(str(x) for x in names))
+                if isinstance(names, list) and names else legacy_name)
+        # Same signal, three arms, one de-size decision. Deterministic among
+        # equals, and stable if a payload ever disagreed with itself.
+        prev = desize.get(sid)
+        if prev is None or (fac, name) < prev:
+            desize[sid] = (fac, name)
+
+    q = (select(SignalExcursion.signal_id, SignalExcursion.race,
+                SignalExcursion.entry_at)
+         .select_from(SignalExcursion)
+         .join(Signal, Signal.id == SignalExcursion.signal_id)
+         .where(SignalExcursion.basis == basis,
+                SignalExcursion.entry_at.isnot(None)))
+    # Backfilled signals never ran through the executor, so they can carry no
+    # de-size event and would silently stack the full-size side (#192).
+    if hasattr(Signal, "backfilled"):
+        q = q.where(Signal.backfilled.is_(False))
+    if frm is not None:
+        q = q.where(Signal.created_at >= frm)
+    if to is not None:
+        q = q.where(Signal.created_at < to)
+    rows = (await session.execute(q)).all()
+
+    out = session_multiplier_report(
+        [{"tp1_first": race == "tp1", "day": at, "hour": at.hour,
+          "session": desize[sid][1] if sid in desize else None,
+          "factor": desize[sid][0] if sid in desize else None}
+         for sid, race, at in rows],
+        min_n=min_n)
+    out["basis"] = basis
+    out["gate"] = await excursion_gate(session, basis=basis, frm=frm, to=to)
+    return out
+
+
 async def stop_geometry_report(session, frm=None, to=None,
                                floor: float = None) -> dict:
     """Per-signal sub-ATR stop labels + the widen-and-resize counterfactual (#189).

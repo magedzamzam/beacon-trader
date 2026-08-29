@@ -109,6 +109,18 @@ def risk_multiplier(sessions: List[dict], now_utc: dt.datetime) -> float:
     return max(0.0, min(1.0, mult))
 
 
+def desizing_sessions(sessions: List[dict], now_utc: dt.datetime) -> List[str]:
+    """Ids of the ACTIVE, enabled sessions whose `risk_mult` is below 1 at `now`.
+
+    `risk_multiplier` returns their PRODUCT, so the factor on its own cannot say
+    which window produced it - and a multiplier nobody can attribute is a
+    multiplier nobody can evaluate, which is how newyork 0.5 went six weeks
+    unexamined (#270). Pure and sorted, so the stamp is deterministic."""
+    return sorted(s["id"] for s in (sessions or DEFAULT_SESSIONS)
+                  if (lambda st: st["active"] and st["enabled"]
+                      and st["risk_mult"] < 1.0)(session_status(s, now_utc)))
+
+
 def status(sessions: List[dict], now_utc: dt.datetime) -> dict:
     per = [session_status(s, now_utc) for s in (sessions or DEFAULT_SESSIONS)]
     now = now_utc.astimezone(dt.timezone.utc)

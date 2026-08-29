@@ -147,3 +147,56 @@ def test_sessions_math_if_tz_available():
     if s["active"] == []:            # tz fell back to UTC (no tzdata) — skip
         return
     assert "London" in s["active"] and "New York" in s["active"]
+
+
+# --- #270: which window de-sized us -------------------------------------------
+def test_desizing_sessions_names_what_risk_multiplier_only_multiplies():
+    """`risk_multiplier` returns a PRODUCT over every active window, so the
+    factor alone cannot say which session produced it — and a multiplier nobody
+    can attribute is a multiplier nobody can evaluate, which is how newyork 0.5
+    ran six weeks unexamined."""
+    from beacon_core.trading_hours import sessions as S
+    cfg = [{"id": "ny", "tz": "UTC", "start": "08:00", "end": "17:00", "risk_mult": 0.5},
+           {"id": "ldn", "tz": "UTC", "start": "07:00", "end": "16:00", "risk_mult": 1.0}]
+    inside = dt.datetime(2026, 8, 26, 12, 0, tzinfo=dt.timezone.utc)
+    outside = dt.datetime(2026, 8, 26, 3, 0, tzinfo=dt.timezone.utc)
+    assert S.desizing_sessions(cfg, inside) == ["ny"]      # ldn is 1.0: not a de-size
+    assert S.desizing_sessions(cfg, outside) == []
+    # and it agrees with the factor it is explaining, in both directions
+    assert S.risk_multiplier(cfg, inside) == 0.5
+    assert S.risk_multiplier(cfg, outside) == 1.0
+
+
+def test_desizing_sessions_lists_every_contributor_and_is_deterministic():
+    """Two overlapping de-sizing windows multiply, so both have to be named or
+    the attribution is a guess dressed as a fact."""
+    from beacon_core.trading_hours import sessions as S
+    cfg = [{"id": "zulu", "tz": "UTC", "start": "08:00", "end": "17:00", "risk_mult": 0.5},
+           {"id": "alpha", "tz": "UTC", "start": "09:00", "end": "18:00", "risk_mult": 0.8}]
+    now = dt.datetime(2026, 8, 26, 12, 0, tzinfo=dt.timezone.utc)
+    assert S.desizing_sessions(cfg, now) == ["alpha", "zulu"]      # sorted
+    assert abs(S.risk_multiplier(cfg, now) - 0.4) < 1e-9
+
+
+def test_a_disabled_desizing_session_is_not_named():
+    """It does not multiply, so it must not be blamed."""
+    from beacon_core.trading_hours import sessions as S
+    cfg = [{"id": "ny", "tz": "UTC", "start": "08:00", "end": "17:00",
+            "risk_mult": 0.5, "enabled": False}]
+    now = dt.datetime(2026, 8, 26, 12, 0, tzinfo=dt.timezone.utc)
+    assert S.desizing_sessions(cfg, now) == []
+    assert S.risk_multiplier(cfg, now) == 1.0
+
+
+def test_the_executor_stamps_the_session_on_the_desize_event():
+    """The stamp is only useful if it is carried. It must also be a LABEL —
+    computed after sizing and read by nothing on the money path."""
+    from pathlib import Path
+    ex = (Path(__file__).resolve().parents[3]
+          / "services/executor/main.py").read_text(encoding="utf-8")
+    block = ex.split('"reason": "session_desize"', 1)[0].rsplit(
+        "if session_size_factor < 1:", 1)[1]
+    assert "th_service.desizing_sessions(session)" in block
+    # sizing reads session_size_factor, never the label
+    assert "size_factor = trend_size_factor * session_size_factor * filter_factor" in ex
+    assert "desizing_sessions" not in ex.split("size_factor = trend_size_factor", 1)[0]

@@ -105,6 +105,15 @@ export const api = {
   // The offline replay that fills the ladder. The route has always existed and
   // NOTHING called it — the page told you to POST it by hand (#187).
   excursionRecompute: (body = {}) => post("/analysis/excursion/recompute", body),
+  // What each session `risk_mult` is DOING (#270) — SHADOW, measure-only.
+  // Account-independent for the same reason the ladder is: the label is a
+  // property of the signal, not of what any one arm did with it.
+  sessionMultiplier: ({ from, to } = {}, basis = "signal") => {
+    const p = new URLSearchParams({ basis });
+    if (from) p.set("date_from", from);
+    if (to) p.set("date_to", to);
+    return req(`/analysis/session_multiplier?${p.toString()}`);
+  },
   // Sub-ATR stop labels + widen-and-resize counterfactual (#189) — SHADOW.
   stopGeometry: (range = {}, floor = "") => {
     const p = new URLSearchParams();

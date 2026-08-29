@@ -27,6 +27,7 @@ export default function Analysis({ account = "" }) {
   const [ladderErr, setLadderErr] = useState(null);
   const [basis, setBasis] = useState("signal");
   const [stopGeo, setStopGeo] = useState(null);
+  const [sessMult, setSessMult] = useState(null);
   const load = () => { setData(null); setErr(null); setGate(null);
     api.bayesAnalysis(minN, range.range, account).then(setData).catch(e => setErr(e.message));
     api.bayesGateReport(minN, range.range, account).then(setGate).catch(() => setGate(null)); };
@@ -38,6 +39,12 @@ export default function Analysis({ account = "" }) {
   useEffect(() => { setStopGeo(null);
     api.stopGeometry(range.range).then(setStopGeo).catch(() => setStopGeo(null));
     /* eslint-disable-next-line */ }, [range.fromIso, range.toIso]);
+  // #270: what each session `risk_mult` is doing. Same exit-independent label as
+  // the ladder above, so it follows the range and the basis and ignores the
+  // account filter. Shadow — nothing gates on it.
+  useEffect(() => { setSessMult(null);
+    api.sessionMultiplier(range.range, basis).then(setSessMult).catch(() => setSessMult(null));
+    /* eslint-disable-next-line */ }, [range.fromIso, range.toIso, basis]);
   useEffect(() => { setLadder(null); setLadderErr(null);
     api.excursionLadder(range.range, basis)
       .then(d => { setLadder(d); setLadderErr(null); })
@@ -52,6 +59,7 @@ export default function Analysis({ account = "" }) {
       {!err && data && <ExecutionTaxCard tax={data.execution_tax} />}
       {!err && <ExcursionLadderCard data={ladder} error={ladderErr} basis={basis} onBasis={setBasis}
         onRecomputed={() => setBasis(b => b)} />}
+      {!err && <SessionMultiplierCard data={sessMult} />}
       {!err && <StopGeometryCard data={stopGeo} />}
       {!err && gate && <BayesGateCard gate={gate} />}
       {!err && gate && <BayesGateConfigCard onSaved={load} />}
@@ -389,6 +397,102 @@ function RecomputeButton({ onDone }) {
 // breathing, so it is hit by the instrument's own noise rather than by the trade
 // being wrong. SHADOW: nothing gates on it, and there is no evaluator for a
 // stop-geometry gate today.
+// #270: `settings.trading_hours` lets a session halve our size and one does \u2014
+// newyork 0.5, set 2026-07-16 and never evaluated, because nothing in the engine
+// reported what a multiplier was costing. Sits beside the ladder because it is
+// read off the same exit-independent label.
+const MULT_TONE = {
+  INVERTED: "short", CORRECT: "long", NO_EVIDENCE: "muted",
+  ACCUMULATE: "warn", UNTESTED: "muted", UNDECIDABLE: "warn",
+};
+// `Td` takes no className/colSpan, and this table needs both, so the cells are
+// raw <td> carrying Td's own classes rather than a widened shared component.
+const CELL = "px-4 py-2.5 text-sm border-b border-edge/50";
+
+function multiplierRow(key, label, row) {
+  if (!row) return [];
+  const ci = row.ci || [];
+  const tone = row.gap > 0 ? "text-short" : row.gap < 0 ? "text-long" : "";
+  return [
+    <tr key={key}>
+      <td className={`${CELL} text-muted whitespace-nowrap`}>{label}</td>
+      <td className={CELL}>
+        <Badge tone={MULT_TONE[row.verdict] || "muted"}>{row.verdict}</Badge>
+      </td>
+      <td className={`${CELL} num`}>{row.n_desized} / {row.n_full}</td>
+      <td className={`${CELL} num`}>{pct(row.tp1_first_desized)}</td>
+      <td className={`${CELL} num`}>{pct(row.tp1_first_full)}</td>
+      <td className={`${CELL} num ${tone}`}>
+        {row.gap == null ? "\u2014" : spct(row.gap)}
+      </td>
+      <td className={`${CELL} num text-muted`}>
+        {ci[0] == null ? "\u2014" : `[${spct(ci[0])}, ${spct(ci[1])}]`}
+      </td>
+      <td className={`${CELL} num text-muted`}>{row.n_blocks}</td>
+    </tr>,
+  ];
+}
+
+function SessionMultiplierCard({ data }) {
+  if (!data) return null;
+  const groups = Object.entries(data.sessions || {});
+  return (
+    <Card>
+      <div className="px-4 py-3 border-b border-edge text-sm font-medium flex items-center gap-2 flex-wrap">
+        Session risk multipliers
+        <Badge tone="muted">shadow · measure-only</Badge>
+        <span className="text-muted font-normal text-xs">
+          · is the cohort we de-size actually the worse one?
+        </span>
+      </div>
+      <div className="px-4 py-2 text-[11px] text-muted border-b border-edge">
+        Read on <b>tp1_first</b> from the excursion ladder, so this is
+        exit-independent &mdash; a verdict here is about the <b>signals</b> a
+        multiplier shrinks, not about what our exit did with them. <b>Read the
+        hour-matched row before acting:</b> a session IS a set of hours, so the
+        unrestricted comparison is confounded by hour of day. A <b>positive</b>{" "}
+        gap means the de-sized cohort hits TP1 <b>more</b> often &mdash; size is
+        being cut on the better cohort.
+      </div>
+      {!groups.length ? (
+        <Empty>No session de-size events in this window &mdash; every session is
+          running at <span className="num">risk_mult 1.0</span>, so there is
+          nothing to test.</Empty>
+      ) : (
+        <Table minW={880}>
+          <thead><tr>
+            <Th>contrast</Th><Th>verdict</Th><Th>n de-sized / full</Th>
+            <Th>TP1 first (de-sized)</Th><Th>TP1 first (full)</Th>
+            <Th>gap</Th><Th>90% CI (day-block)</Th><Th>blocks</Th>
+          </tr></thead>
+          <tbody>
+            {groups.flatMap(([key, g]) => [
+              <tr key={key + ":head"}>
+                <td className={`${CELL} text-xs font-medium`} colSpan={8}>
+                  {g.session} · risk_mult <span className="num">{g.factor}</span>
+                </td>
+              </tr>,
+              ...multiplierRow(key + ":all", "all hours", g),
+              ...multiplierRow(
+                key + ":hm",
+                `hours ${(g.hour_matched?.hours_utc || []).join(", ") || "\u2014"} UTC`,
+                g.hour_matched),
+              <tr key={key + ":why"}>
+                <td className="px-4 py-2 text-[11px] text-muted border-b border-edge/50"
+                    colSpan={8}>
+                  {g.hour_matched?.reason || g.reason}
+                </td>
+              </tr>,
+            ])}
+          </tbody>
+        </Table>
+      )}
+      <div className="px-4 py-2 text-[11px] text-muted border-t border-edge">{data.note}</div>
+    </Card>
+  );
+}
+
+
 function StopGeometryCard({ data }) {
   if (!data || !data.n) return null;
   const b = data.below_floor || {};

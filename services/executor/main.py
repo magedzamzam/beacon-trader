@@ -705,10 +705,18 @@ async def _execute_on_account(session, sig, parsed, source, acct,
         if session_size_factor < 1:                     # session concentration de-size (#81)
             log.info("signal %s acct %s: de-sized session x%s",
                      sig.id, acct.id, session_size_factor)
+            # WHICH window de-sized us (#270). The factor is a PRODUCT over every
+            # active session, so on its own it cannot be attributed - and a
+            # multiplier that cannot be attributed cannot be evaluated, which is
+            # how newyork 0.5 ran six weeks unmeasured. A label on a telemetry
+            # event: computed after sizing, read by nothing on the trading path,
+            # and fail-safe to absent.
+            _desizers = await th_service.desizing_sessions(session)
             session.add(Event(kind="entry_filtered",
                               payload={"signal_id": sig.id, "account_id": acct.id,
                                        **_epoch,
                                        "reason": "session_desize",
+                                       **({"sessions": _desizers} if _desizers else {}),
                                        "factor": str(session_size_factor)}))
         if filter_factor != 1:                           # filtration scale (#84)
             log.info("signal %s acct %s: filtration scale x%s", sig.id, acct.id, filter_factor)

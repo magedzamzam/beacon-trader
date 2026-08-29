@@ -147,6 +147,21 @@ async def session_risk_multiplier(session, now: Optional[dt.datetime] = None) ->
         return 1.0
 
 
+async def desizing_sessions(session, now: Optional[dt.datetime] = None) -> list:
+    """Which session windows are de-sizing right now (#270) - a LABEL for the
+    `session_desize` event, never consulted for sizing.
+
+    `session_risk_multiplier` is deliberately left alone: it is on the money path
+    and this must not be able to change a lot size. Fail-safe to [] - an event
+    that cannot name its session is still an event."""
+    try:
+        cfg = await load_config(session)
+        return sessions.desizing_sessions(cfg["sessions"], now or utcnow())
+    except Exception as exc:
+        log.warning("desizing_sessions failed: %s", exc)
+        return []
+
+
 async def status(session) -> dict:
     cfg = await load_config(session)
     now = utcnow()
