@@ -67,17 +67,12 @@ def _semantic_rule(rule: dict) -> dict:
     return {k: _canon(v) for k, v in rule.items() if k not in COSMETIC_KEYS}
 
 
-def semantic_config(entry_filters, entry_policy) -> dict:
-    """The part of a strategy row an epoch is defined over.
+def semantic_filters(entry_filters) -> dict:
+    """`entry_filters`, stripped to what changes what the filter DOES.
 
-    `entry_filters` and `entry_policy` both, because the removed set is a
-    property of the arm as it ran: switching `entry_style` to staged changes
-    what the kept signals do, so pooling across that boundary describes an arm
-    that never existed either. `exit_policy` is deliberately NOT here — the
-    removed set is scored on the CONTROL's outcomes, so the filter arm's own
-    exit ladder cannot move it."""
+    Shared by both digests below so the two can never disagree about what a
+    cosmetic edit to a rule is."""
     ef = entry_filters or {}
-    ep = entry_policy or {}
     rules = ef.get("rules")
     out_ef = {k: _canon(v) for k, v in ef.items()
               if k != "rules" and k not in COSMETIC_KEYS}
@@ -86,8 +81,26 @@ def semantic_config(entry_filters, entry_policy) -> dict:
                            for r in rules]
     elif rules is not None:
         out_ef["rules"] = _canon(rules)
+    return out_ef
+
+
+def semantic_config(entry_filters, entry_policy) -> dict:
+    """The part of a strategy row an epoch is defined over.
+
+    `entry_filters` and `entry_policy` both, because the removed set is a
+    property of the arm as it ran: switching `entry_style` to staged changes
+    what the kept signals do, so pooling across that boundary describes an arm
+    that never existed either. `exit_policy` is deliberately NOT here — the
+    removed set is scored on the CONTROL's outcomes, so the filter arm's own
+    exit ladder cannot move it.
+
+    This is the identity for anything measured on an arm's KEPT trades, and it
+    is what `execution_strategies.epoch_digest` persists. It is NOT the identity
+    for the removed set — see `removed_set_digest` (#271)."""
+    ep = entry_policy or {}
     out_ep = {k: _canon(v) for k, v in ep.items() if k not in COSMETIC_KEYS}
-    return {"entry_filters": out_ef, "entry_policy": out_ep}
+    return {"entry_filters": semantic_filters(entry_filters),
+            "entry_policy": out_ep}
 
 
 def epoch_digest(entry_filters, entry_policy) -> str:
@@ -99,6 +112,43 @@ def epoch_digest(entry_filters, entry_policy) -> str:
     blob = json.dumps(semantic_config(entry_filters, entry_policy),
                       sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def removed_set_digest(entry_filters) -> str:
+    """Stable 16-hex identity for the REMOVED-SET experiment (#271).
+
+    Computed over `entry_filters` ALONE. The invariant, stated so it is not
+    re-argued: **a removed signal is never traded on this arm at all** — no
+    entry is attempted, no `entry_style` is consulted, no `sl_distance` is
+    applied — and its outcome is read entirely off the CONTROL's trade. So
+    nothing outside `entry_filters` can move it. That is verbatim the argument
+    `semantic_config` already uses to exclude `exit_policy`; it applies to
+    `entry_policy` for the same reason, and the two digests exist because one
+    identity was serving two experiments with different invariants.
+
+    The cost of not splitting them, measured: the 2026-08-24 act added
+    `entry_style: "staged"` to acct#7 while leaving the `adx_regime@1h` rule
+    byte-identical. The digest moved, so an accumulation of 117 decisive
+    removals — four times the `min_n` floor — became 20. Worse, acct#5 and
+    acct#7 ran the SAME rule that week and produced two epochs of 20 instead of
+    one of 40, with results identical to the decimal: the split carried no
+    information at all.
+
+    Same canonicalisation and the same `sha1`-over-sorted-JSON as
+    `epoch_digest`, never Python's `hash()` (salted per process)."""
+    blob = json.dumps(semantic_filters(entry_filters),
+                      sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def removed_set_epoch(entry_filters, digest: str | None = None) -> str:
+    """The legible removed-set epoch key, derived exactly like `epoch_name`.
+
+    Deliberately the same shape (`<rules>#<8 hex>`) so a reader recognises it,
+    and deliberately a DIFFERENT suffix so the two vocabularies can never be
+    mistaken for one another when both appear on the same event."""
+    return epoch_name(entry_filters, None,
+                      digest=digest or removed_set_digest(entry_filters))
 
 
 def _describe_rule(rule: dict) -> str:
@@ -154,12 +204,55 @@ def event_stamp(entry_filters, entry_policy=None) -> dict:
     that bypassed the API), and trusting it here would stamp the skips of the new
     configuration with the identity of the old one, which is the bug itself.
 
-    Returns both keys deliberately: `epoch_digest` is the join to
-    `execution_strategies`, `epoch` is what `report.filter_removed_set` groups
-    on."""
+    Returns FOUR keys, two pairs, because two experiments read this event and
+    they do not share an invariant (#271):
+
+      * `epoch_digest` / `epoch` — over `entry_filters` + `entry_policy`. The
+        join to `execution_strategies`, and the identity for anything measured on
+        this arm's KEPT trades. Unchanged, so nothing that reads them breaks.
+      * `removed_epoch_digest` / `removed_epoch` — over `entry_filters` alone.
+        What `report.filter_removed_set` groups on: the removed signal was never
+        traded here, so nothing else can move its outcome.
+    """
     digest = epoch_digest(entry_filters, entry_policy)
+    rdigest = removed_set_digest(entry_filters)
     return {"epoch_digest": digest,
-            "epoch": epoch_name(entry_filters, entry_policy, digest=digest)}
+            "epoch": epoch_name(entry_filters, entry_policy, digest=digest),
+            "removed_epoch_digest": rdigest,
+            "removed_epoch": removed_set_epoch(entry_filters, digest=rdigest)}
+
+
+def regroup_legacy_skips(skips, aliases) -> list:
+    """Re-key pre-#271 skips onto a removed-set epoch, BY HAND and on the record.
+
+    **There is no automatic backfill, and this says why rather than leaving a
+    silent gap.** Recomputing `removed_epoch_digest` for an existing
+    `entry_filtered` event would need the `entry_filters` that were live at that
+    event's `ts`. `execution_strategies` keeps one CURRENT row per
+    (account, source) — there is no history table and no audit trail of previous
+    pillar values — so for any row written more than once the historical filters
+    are simply gone. The combined `epoch` on the old events is not enough either:
+    two skips sharing it definitely share `entry_filters`, but two with different
+    values may differ only in `entry_policy`, which is exactly the case that has
+    to be merged. So the merge is a judgement made from the strategy history the
+    analyst has, and this makes it an explicit, reviewable argument instead of a
+    literal retyped into a weekly script.
+
+    `aliases` maps a legacy `epoch` value to the removed-set key it belongs to.
+    Rows already carrying `removed_epoch` (post-fix) are returned untouched:
+    the emitter's stamp is evidence and always outranks a hand mapping.
+
+    Returns new dicts; the input rows are never mutated."""
+    amap = dict(aliases or {})
+    out = []
+    for row in skips or ():
+        r = dict(row)
+        if not r.get("removed_epoch"):
+            key = amap.get(str(r.get("epoch") or ""))
+            if key:
+                r["removed_epoch"] = key
+        out.append(r)
+    return out
 
 
 # --- the arm that went dark ---------------------------------------------------

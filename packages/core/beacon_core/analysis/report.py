@@ -1936,6 +1936,13 @@ def filter_removed_set(skips, control_trades, *, base_rate,
 
     TWO DISCIPLINES ARE STRUCTURAL HERE, not left to the caller's memory.
 
+    `skips` rows should carry `removed_epoch` (#271) — the epoch keyed on
+    `entry_filters` alone. Rows that carry only `epoch` (emitted before that
+    fix) still work and group on it; those pre-fix skips are keyed on
+    `entry_filters` + `entry_policy`, so an `entry_policy` edit inside their
+    window split an accumulation that it could not have affected, and pooling
+    them back together has to be done by hand from the strategy history.
+
     **Epochs are never pooled.** `epoch` names the filter's configuration — its
     rule and its timeframe, e.g. `adx_regime@4h`. Do NOT hand-write it: since
     #200 it is `analysis.epochs.epoch_name(entry_filters, entry_policy)`, and it
@@ -1992,7 +1999,15 @@ def filter_removed_set(skips, control_trades, *, base_rate,
         sig = s.get("signal_id")
         if sig is None:
             continue
-        epochs.setdefault(str(s.get("epoch") or "?"), set()).add(sig)
+        # #271: group on `removed_epoch` when the skip carries one. It is keyed
+        # on `entry_filters` ALONE, because a removed signal is never traded on
+        # this arm and its outcome is read off the control — so an `entry_policy`
+        # edit cannot move it and must not reset its accumulation. Falls back to
+        # `epoch` for pre-fix events, which is why the two keys use different
+        # digest suffixes: the vocabularies stay distinguishable and never
+        # silently mix within one epoch.
+        epochs.setdefault(
+            str(s.get("removed_epoch") or s.get("epoch") or "?"), set()).add(sig)
 
     out: dict = {}
     for epoch, sigs in sorted(epochs.items()):

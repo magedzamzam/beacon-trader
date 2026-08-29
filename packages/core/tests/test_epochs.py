@@ -301,3 +301,139 @@ def test_a_rule_edit_mid_accumulation_produces_two_epochs_not_one():
         control, base_rate=0.5)
     assert pooled["n_epochs"] == 1
     assert pooled["epochs"]["adx_regime@1h"]["verdict"] != RP.FILTER_ACCUMULATE
+
+
+# --- the removed-set digest (#271) --------------------------------------------
+# `semantic_config` excludes `exit_policy` because the removed set is scored on
+# the CONTROL's outcomes. That argument applies verbatim to `entry_policy` — a
+# skipped signal is never traded on this arm at all — but the digest was doing
+# double duty for two experiments with different invariants and the removed-set
+# one was the loser: adding `entry_style: staged` to acct#7 while leaving the
+# `adx_regime@1h` rule byte-identical dropped its accumulation from 117 decisive
+# removals to 20, and split one 40-removal set across two arms into 20 + 20.
+STAGED = {"entry_style": "staged", "sl_distance": 4.0}
+
+
+def test_the_entry_policy_cannot_move_the_removed_set_digest():
+    """The invariant, pinned. Identical filters + different `entry_policy` is
+    ONE removed-set epoch and TWO kept-trade epochs."""
+    assert EP.removed_set_digest(ADX) == EP.removed_set_digest(ADX)
+    a = EP.removed_set_digest(ADX)
+    assert a == EP.removed_set_digest(ADX)
+    # different entry_policy, same filters
+    assert EP.epoch_digest(ADX, None) != EP.epoch_digest(ADX, STAGED)
+    assert EP.removed_set_digest(ADX) == EP.removed_set_digest(ADX)
+    st_plain, st_staged = EP.event_stamp(ADX, None), EP.event_stamp(ADX, STAGED)
+    assert st_plain["epoch_digest"] != st_staged["epoch_digest"]
+    assert st_plain["removed_epoch_digest"] == st_staged["removed_epoch_digest"]
+    assert st_plain["removed_epoch"] == st_staged["removed_epoch"]
+
+
+def test_the_exit_policy_cannot_move_it_either():
+    """`removed_set_digest` takes only `entry_filters`, so this is structural
+    rather than a rule someone has to remember."""
+    import inspect
+    assert list(inspect.signature(EP.removed_set_digest).parameters) == ["entry_filters"]
+
+
+def test_a_real_rule_change_does_move_the_removed_set_digest():
+    """The accumulation must still reset on anything that changes what the
+    filter actually removes."""
+    base = EP.removed_set_digest(ADX)
+    assert EP.removed_set_digest(_with(min_adx=30)) != base
+    assert EP.removed_set_digest(_with(timeframe="4h")) != base
+    off = {"rules": [{**ADX["rules"][0], "enabled": False}]}
+    assert EP.removed_set_digest(off) != base
+
+
+def test_a_cosmetic_rename_is_still_free_on_the_removed_set():
+    renamed = {"rules": [{**ADX["rules"][0], "name": "adx_1h_v2",
+                          "note": "documented 2026-08-29"}]}
+    assert EP.removed_set_digest(renamed) == EP.removed_set_digest(ADX)
+
+
+def test_the_removed_set_digest_is_stable_across_processes():
+    """sha1 over canonicalised JSON, never Python's salted `hash()` — a digest
+    that moved on restart would invent an epoch boundary every deploy."""
+    d = EP.removed_set_digest(ADX)
+    assert len(d) == 16 and all(c in "0123456789abcdef" for c in d)
+    assert d == EP.removed_set_digest({"rules": [dict(reversed(
+        list(ADX["rules"][0].items())))]})
+
+
+def test_the_two_epoch_names_never_look_like_one_another():
+    """Both vocabularies appear on the same event, so their suffixes must differ
+    whenever the entry_policy contributes anything at all."""
+    st = EP.event_stamp(ADX, STAGED)
+    assert st["epoch"] != st["removed_epoch"]
+    assert st["removed_epoch"].endswith(st["removed_epoch_digest"][:8])
+    assert st["removed_epoch"].startswith("adx_regime@1h+trendingTrue#")
+
+
+def test_one_rule_on_two_arms_is_one_removed_set_not_two():
+    """The observed cost, end to end. acct5 (no entry_style) and acct7 (staged)
+    ran a byte-identical `adx_regime@1h` rule and produced two epochs of 20
+    decisive removals with results identical to the decimal — the split carried
+    no information, and neither half reached the N>=30 floor that the pooled 40
+    clears."""
+    a5, a7 = EP.event_stamp(ADX, None), EP.event_stamp(ADX, STAGED)
+    skips, control = [], []
+    for i in range(40):
+        stamp = a5 if i < 20 else a7
+        skips.append({"signal_id": i, "epoch": stamp["epoch"],
+                      "removed_epoch": stamp["removed_epoch"]})
+        control.append({"signal_id": i, "realized_pl": -100.0, "planned_risk": 100.0,
+                        "day": f"2026-08-{(i % 5) + 1:02d}", "source_id": i % 3})
+    for i in range(100, 140):
+        control.append({"signal_id": i, "realized_pl": 50.0, "planned_risk": 100.0,
+                        "day": f"2026-08-{(i % 5) + 1:02d}", "source_id": i % 3})
+
+    out = RP.filter_removed_set(skips, control, base_rate=0.5)
+    assert out["n_epochs"] == 1, out["epochs"].keys()
+    (only,) = out["epochs"].values()
+    assert only["n_skipped"] == 40
+    assert only["verdict"] != RP.FILTER_ACCUMULATE   # 40 >= MIN_REMOVED_N
+
+    # Keyed the old way — on the combined digest — the same 40 are two epochs of
+    # 20, both stalled below the floor.
+    old = RP.filter_removed_set(
+        [{"signal_id": s["signal_id"], "epoch": s["epoch"]} for s in skips],
+        control, base_rate=0.5)
+    assert old["n_epochs"] == 2
+    assert all(e["verdict"] == RP.FILTER_ACCUMULATE for e in old["epochs"].values())
+
+
+def test_pre_fix_skips_still_group_on_their_own_key():
+    """Forward-only, like #253. A skip carrying only `epoch` must keep working
+    rather than collapsing into a "?" bucket with everything else."""
+    st = EP.event_stamp(ADX, STAGED)
+    rows = [{"signal_id": 1, "epoch": st["epoch"]},
+            {"signal_id": 2, "epoch": st["epoch"], "removed_epoch": st["removed_epoch"]}]
+    out = RP.filter_removed_set(rows, [], base_rate=0.5)
+    assert set(out["epochs"]) == {st["epoch"], st["removed_epoch"]}
+
+
+def test_the_hand_regroup_is_explicit_and_never_overrides_a_real_stamp():
+    """There is no automatic backfill — `execution_strategies` keeps no history,
+    so the `entry_filters` live at an old event's `ts` are simply gone. The
+    merge is a judgement, and this makes it a recorded one."""
+    st = EP.event_stamp(ADX, STAGED)
+    rows = [{"signal_id": 1, "epoch": "skip_adx_trending_1h"},
+            {"signal_id": 2, "epoch": "something_else"},
+            {"signal_id": 3, "epoch": "skip_adx_trending_1h",
+             "removed_epoch": st["removed_epoch"]}]
+    out = EP.regroup_legacy_skips(rows, {"skip_adx_trending_1h": "adx@1h#legacy"})
+    assert out[0]["removed_epoch"] == "adx@1h#legacy"
+    assert "removed_epoch" not in out[1]          # unmapped: left alone, not guessed
+    assert out[2]["removed_epoch"] == st["removed_epoch"]   # emitter outranks the map
+    assert rows[0] == {"signal_id": 1, "epoch": "skip_adx_trending_1h"}   # not mutated
+
+
+def test_the_executor_stamps_the_removed_epoch_too():
+    """`**_epoch` on the filtration_skip event spreads whatever `event_stamp`
+    returns, so this is really a check that nothing downstream strips it."""
+    assert "removed_epoch" in EP.event_stamp(ADX, None)
+    ex = (REPO_ROOT / "services/executor/main.py").read_text(encoding="utf-8")
+    skip = ex.split('"reason": "filtration_skip"', 1)[0].rsplit(
+        'kind="entry_filtered"', 1)[1]
+    assert "**_epoch" in skip
