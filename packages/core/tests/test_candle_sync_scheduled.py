@@ -9,6 +9,7 @@ committed.
 So the thing worth pinning is not that the script exists -- it is that something
 RUNS it on a cadence, and that the image it runs from actually contains it.
 """
+import datetime as dt
 import re
 from pathlib import Path
 
@@ -69,10 +70,15 @@ def test_one_pass_remains_the_default():
 
 def test_a_failed_pass_does_not_kill_the_loop():
     """A broker hiccup at 03:00 must not leave the store frozen until someone
-    notices -- which is exactly how this issue started."""
+    notices -- which is exactly how this issue started.
+
+    The guarantee moved into `beacon_core.worker.run_loop` (#258), which is where
+    all three workers now get it; `test_worker_scaffolding` drives the semantics
+    directly. What this file still owns is that candle-sync uses it."""
     src = SCRIPT.read_text(encoding="utf-8")
-    assert re.search(r"except Exception.*?\n.*?sync pass failed", src), \
-        "sync_once() must be wrapped so one bad pass does not exit the loop"
+    assert "run_loop(" in src, \
+        "sync_once() must run under the shared loop so a bad pass does not exit it"
+    assert "while True:" not in src, "the loop must not be hand-rolled here again"
 
 
 def test_it_has_its_own_healthcheck_not_the_api_image_s():
@@ -94,9 +100,18 @@ def test_the_probe_measures_FRESHNESS():
 
 def test_the_probe_does_not_cry_wolf_over_the_weekend():
     """Gold prints no bars Friday 21:00Z -> Sunday 22:00Z. A naive age check goes
-    red every weekend, gets muted, and then hides a real stall."""
+    red every weekend, gets muted, and then hides a real stall.
+
+    The window itself is `beacon_core.worker.market_closed` now (#258) and is
+    tested there; the probe must still consult it."""
     src = SCRIPT.read_text(encoding="utf-8")
-    assert "market closed" in src, "the freshness probe must exempt the market close"
+    assert "market_closed(" in src, "the freshness probe must exempt the market close"
+    from beacon_core.worker import market_closed, staleness_exit
+    sat = dt.datetime(2026, 8, 29, 12, tzinfo=dt.timezone.utc)
+    assert market_closed(sat)
+    # ... and a closed market must suppress the verdict, not pass a stale one
+    assert staleness_exit(age_min=4000, limit_min=30, subject="newest bar",
+                          closed=True) == 0
 
 
 # --- the shadow producer runs on the same terms (#224) -----------------------

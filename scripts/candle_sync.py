@@ -10,13 +10,16 @@ stored (encrypted) in `brokers.credentials_ref`, so no new secrets are needed.
 Resumes from MAX(ts) in the DB by default. Idempotent: ON CONFLICT DO NOTHING on
 uq_candle_ts, so re-running never duplicates and never rewrites history.
 """
-import argparse, asyncio, json, os, sys
+import argparse, asyncio, json, sys
 from collections import Counter
 from datetime import datetime, timedelta, timezone
-from sqlalchemy.ext.asyncio import create_async_engine
 from beacon_core.brokers.capital_com import CapitalComAdapter
 from beacon_core.brokers.registry import get_adapter, resolve_credentials
 from beacon_core.brokers.types import BrokerError
+from beacon_core.logging import get_logger
+from beacon_core.worker import market_closed, run_loop, staleness_exit, worker_engine
+
+log = get_logger("candle-sync")
 
 MAX_BARS = 1000
 # The provider's own resolution vocabulary is the adapter's (#257); this script
@@ -59,7 +62,11 @@ async def sync_once(a):
     """One catch-up pass. Resumes from MAX(ts); idempotent via ON CONFLICT."""
     tf = TF_NAME[a.resolution]
 
-    eng = create_async_engine(os.environ["DATABASE_URL"])
+    async with worker_engine() as eng:
+        return await _sync_with_engine(a, eng, tf)
+
+
+async def _sync_with_engine(a, eng, tf):
     async with eng.connect() as conn:
         q = ("select id,name,is_demo,credentials_ref,type "
              "from public.brokers where enabled")
@@ -86,12 +93,11 @@ async def sync_once(a):
                    if mx else datetime(2026, 1, 1)))
     end = (datetime.strptime(a.until, "%Y-%m-%dT%H:%M:%S") if a.until
            else datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0, second=0))
-    print("broker=%s (type=%s is_demo=%s)  epic=%s  symbol=%s tf=%s  source=%s"
-          % (br[1], br[4], is_demo, epic, a.symbol, tf, source))
-    print("db max ts = %s" % mx)
-    print("fetching  %s -> %s" % (start, end))
+    log.info("broker=%s (type=%s is_demo=%s) epic=%s symbol=%s tf=%s source=%s",
+             br[1], br[4], is_demo, epic, a.symbol, tf, source)
+    log.info("db max ts = %s; fetching %s -> %s", mx, start, end)
     if start >= end:
-        print("nothing to do -- already current"); return
+        log.info("nothing to do -- already current"); return
 
     # #257: the bars come through the BrokerAdapter, which already owns this
     # provider's hostnames, session tokens, 401 re-auth and 429 back-off. This
@@ -121,23 +127,24 @@ async def sync_once(a):
                 else:
                     rows.append(row)
             if nwin % 10 == 0:
-                print("  window %d  cursor=%s  rows=%d" % (nwin, cursor, len(rows)))
+                log.info("window %d cursor=%s rows=%d", nwin, cursor, len(rows))
             cursor = wend
             await asyncio.sleep(a.throttle)
     finally:
         await cap.aclose()
 
-    print("\nfetched %d insertable bars over %d windows (%d empty)" % (len(rows), nwin, empties))
+    log.info("fetched %d insertable bars over %d windows (%d empty)",
+             len(rows), nwin, empties)
     if skipped:
-        print("SKIPPED (constraint violations / incomplete, NOT repaired): %s" % dict(skipped))
-    qc = Counter(r[-1] for r in rows)
-    print("quality: %s" % dict(qc))
+        log.warning("SKIPPED (constraint violations / incomplete, NOT repaired): %s",
+                    dict(skipped))
+    log.info("quality: %s", dict(Counter(r[-1] for r in rows)))
     if errs:
-        print("windows that ERRORED (not fetched): %s" % dict(errs))
+        log.warning("windows that ERRORED (not fetched): %s", dict(errs))
     if a.dry_run:
-        print("\n--dry-run: nothing written"); return
+        log.info("--dry-run: nothing written"); return
     if not rows:
-        print("nothing to insert"); return
+        log.info("nothing to insert"); return
 
     ins = 0
     async with eng.begin() as conn:
@@ -153,47 +160,37 @@ async def sync_once(a):
                 "spread_nominal,source,quality) VALUES " + vals +
                 " ON CONFLICT (symbol,timeframe,ts) DO NOTHING")
             ins += res.rowcount
-    print("\nINSERTED %d new bars (%d were already present)" % (ins, len(rows) - ins))
+    log.info("INSERTED %d new bars (%d were already present)", ins, len(rows) - ins)
     async with eng.connect() as conn:
         r = (await conn.exec_driver_sql(
             "select count(*), min(ts), max(ts) from public.candles where symbol='%s' "
             "and timeframe='%s'" % (a.symbol, tf))).fetchone()
-        print("candles now: n=%s  %s -> %s" % (r[0], r[1], r[2]))
-    await eng.dispose()
+        log.info("candles now: n=%s  %s -> %s", r[0], r[1], r[2])
 
 async def _freshness_exit(a) -> int:
     """0 when the store is current, 1 when it has gone stale (#224).
 
-    Weekends are the trap: gold does not print bars from Friday 21:00Z to Sunday
-    22:00Z, so a naive age check goes red every weekend and gets muted, which is
-    how a real stall then hides. Age is therefore measured against the last bar
-    the MARKET could have produced, not against now."""
+    The QUERY is here because "stale" means something different per store; the
+    JUDGEMENT and its vocabulary are shared (#258, `worker.staleness_exit`), so
+    three probes cannot answer the same question three different ways."""
     tf = TF_NAME[a.resolution]
-    eng = create_async_engine(os.environ["DATABASE_URL"])
-    try:
-        async with eng.connect() as conn:
-            mx = (await conn.exec_driver_sql(
-                "select max(ts) from public.candles where symbol='%s' and timeframe='%s'"
-                % (a.symbol, tf))).scalar()
-    finally:
-        await eng.dispose()
+    async with worker_engine() as eng, eng.connect() as conn:
+        mx = (await conn.exec_driver_sql(
+            "select max(ts) from public.candles where symbol='%s' and timeframe='%s'"
+            % (a.symbol, tf))).scalar()
     if mx is None:
-        print("UNHEALTHY: no bars at all for %s %s" % (a.symbol, tf))
-        return 1
+        return staleness_exit(age_min=None, limit_min=a.healthcheck,
+                              subject="newest bar",
+                              missing="no bars at all for %s %s" % (a.symbol, tf))
     now = datetime.now(timezone.utc)
-    age_min = (now - mx).total_seconds() / 60.0
-    # Saturday, and Sunday before the 22:00Z open: the market is shut, so the
-    # newest bar is legitimately old and staleness cannot be judged.
-    wd, hour = now.weekday(), now.hour
-    closed = wd == 5 or (wd == 6 and hour < 22) or (wd == 4 and hour >= 21)
-    if closed:
-        print("OK (market closed): newest bar %s, age %.0f min not judged" % (mx, age_min))
-        return 0
-    if age_min > a.healthcheck:
-        print("UNHEALTHY: newest bar %s is %.0f min old (limit %d)" % (mx, age_min, a.healthcheck))
-        return 1
-    print("OK: newest bar %s, age %.0f min" % (mx, age_min))
-    return 0
+    return staleness_exit(
+        age_min=(now - mx).total_seconds() / 60.0,
+        limit_min=a.healthcheck,
+        subject="newest bar %s" % mx,
+        # Gold prints nothing from Friday 21:00Z to Sunday 22:00Z, so an
+        # unguarded age check goes red every weekend, gets muted, and a real
+        # stall then hides behind the mute.
+        closed=market_closed(now))
 
 
 async def main():
@@ -220,17 +217,7 @@ async def main():
     a = ap.parse_args()
     if a.healthcheck:
         sys.exit(await _freshness_exit(a))
-    while True:
-        try:
-            await sync_once(a)
-        except Exception as exc:                 # a bad pass must not kill the loop
-            print("sync pass failed: %s" % exc, flush=True)
-            if not a.loop:
-                raise
-        if not a.loop:
-            return
-        print("--- sleeping %ds ---" % a.loop, flush=True)
-        await asyncio.sleep(a.loop)
+    await run_loop(lambda: sync_once(a), name="candle-sync", interval=a.loop, logger=log)
 
 
 asyncio.run(main())

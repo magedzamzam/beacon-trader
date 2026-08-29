@@ -27,19 +27,19 @@ and running it every fifteen produce the same ledger.
 import argparse
 import asyncio
 import datetime as dt
-import os
-import sys
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
 
 from beacon_core.db.models import Candle, Signal, Source
+from beacon_core.logging import get_logger
 from beacon_core.generator import producer as P
 from beacon_core.generator import rules as G
 from beacon_core.generator.config import KIND_ENGINE, engine_config
 from beacon_core.market import bars as B
 from beacon_core.market.context import ContextBuilder
+from beacon_core.worker import run_loop, worker_sessions
+
+log = get_logger("engine-producer")
 
 DEFAULT_LOOKBACK_DAYS = 7
 # How far back one pass may repair. 16 bars is 4h on a 15m frame:
@@ -119,7 +119,7 @@ async def run_once(session, symbol: str, lookback_days: int,
         except G.ConfigError as exc:
             # Loudly, not silently: a config that cannot be parsed is a strategy
             # that will never fire, and a flat curve reads as a finding.
-            print("source %s: bad generator config: %s" % (src.id, exc), flush=True)
+            log.warning("source %s: bad generator config: %s", src.id, exc)
             out["reasons"]["bad_config"] = out["reasons"].get("bad_config", 0) + 1
             continue
 
@@ -153,9 +153,9 @@ async def run_once(session, symbol: str, lookback_days: int,
                 continue
 
             row = P.shadow_signal_row(res["signal"], src.id, res["closed_at"])
-            print("source %s: SHADOW %s %s @ %s sl=%s tps=%s"
-                  % (src.id, row["direction"], row["symbol"], row["signal_at"],
-                     row["sl"], row["tps"]), flush=True)
+            log.info("source %s: SHADOW %s %s @ %s sl=%s tps=%s",
+                     src.id, row["direction"], row["symbol"], row["signal_at"],
+                     row["sl"], row["tps"])
             out["emitted"] += 1
             # Carried forward in-loop rather than re-read: the caps have to see
             # a signal this pass just wrote, or a catch-up over a quiet gap
@@ -179,25 +179,12 @@ async def main():
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
 
-    eng = create_async_engine(os.environ["DATABASE_URL"])
-    Session = sessionmaker(eng, class_=AsyncSession, expire_on_commit=False)
-    try:
-        while True:
-            try:
-                async with Session() as s:
-                    res = await run_once(s, a.symbol, a.lookback_days,
-                                         a.dry_run, a.catchup_bars)
-                print("engine producer: %s" % res, flush=True)
-            except Exception as exc:            # a bad pass must not kill the loop
-                print("engine producer pass failed: %s" % exc, flush=True)
-                if not a.loop:
-                    raise
-            if not a.loop:
-                return
-            await asyncio.sleep(a.loop)
-    finally:
-        await eng.dispose()
+    async with worker_sessions() as (_eng, Session):
+        async def once():
+            async with Session() as s:
+                return await run_once(s, a.symbol, a.lookback_days,
+                                      a.dry_run, a.catchup_bars)
+        await run_loop(once, name="engine-producer", interval=a.loop, logger=log)
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+asyncio.run(main())

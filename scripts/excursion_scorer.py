@@ -24,15 +24,17 @@ exactly as they are — `recompute` upserts per signal and never deletes.
 """
 import argparse
 import asyncio
-import os
 import sys
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
 
 from beacon_core.analysis import excursion_store as EXS
+from beacon_core.logging import get_logger
+from beacon_core.worker import (run_loop, staleness_exit, worker_engine,
+                                worker_sessions)
+
+log = get_logger("excursion-scorer")
 
 DEFAULT_DAYS = 30
 
@@ -88,24 +90,17 @@ async def _unscored_exit(a) -> int:
     """Health IS the absence of a scoring backlog.
 
     A liveness probe would have been green through the entire 15-day stall,
-    because nothing was running at all."""
-    eng = create_async_engine(os.environ["DATABASE_URL"])
-    try:
-        async with eng.connect() as c:
-            row = (await c.execute(text(UNSCORED_SQL),
-                                   {"symbol": a.symbol, "days": a.days})).one()
-    finally:
-        await eng.dispose()
+    because nothing was running at all. The QUERY is here (a backlog is not a
+    stale bar); the JUDGEMENT is shared (#258)."""
+    async with worker_engine() as eng, eng.connect() as c:
+        row = (await c.execute(text(UNSCORED_SQL),
+                               {"symbol": a.symbol, "days": a.days})).one()
     n, oldest = int(row[0] or 0), float(row[1] or 0.0)
     if n == 0:
         print("OK: nothing scoreable is unscored")
         return 0
-    if oldest > a.healthcheck:
-        print("UNHEALTHY: %d scoreable signal(s) unscored, oldest %.0f min "
-              "(limit %d)" % (n, oldest, a.healthcheck))
-        return 1
-    print("OK: %d unscored, oldest %.0f min — within the next pass" % (n, oldest))
-    return 0
+    return staleness_exit(age_min=oldest, limit_min=a.healthcheck,
+                          subject="%d scoreable signal(s) unscored, oldest" % n)
 
 
 async def main():
@@ -124,24 +119,11 @@ async def main():
     if a.healthcheck:
         sys.exit(await _unscored_exit(a))
 
-    eng = create_async_engine(os.environ["DATABASE_URL"])
-    Session = sessionmaker(eng, class_=AsyncSession, expire_on_commit=False)
-    try:
-        while True:
-            try:
-                async with Session() as s:
-                    print("excursion scorer: %s" % summarise(await score_once(s, a)),
-                          flush=True)
-            except Exception as exc:         # a bad pass must not kill the loop
-                print("excursion scorer pass failed: %s" % exc, flush=True)
-                if not a.loop:
-                    raise
-            if not a.loop:
-                return
-            print("--- sleeping %ds ---" % a.loop, flush=True)
-            await asyncio.sleep(a.loop)
-    finally:
-        await eng.dispose()
+    async with worker_sessions() as (_eng, Session):
+        async def once():
+            async with Session() as s:
+                return summarise(await score_once(s, a))
+        await run_loop(once, name="excursion-scorer", interval=a.loop, logger=log)
 
 
 asyncio.run(main())
