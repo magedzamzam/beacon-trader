@@ -524,6 +524,13 @@ export default function Strategies() {
 // A grid rather than one table because #250's ladders are not one shape
 // truncated: its 3-TP ladder opens TP3 as a MID-triggered STOP, its 4-TP ladder
 // opens TP3 immediately at signal time. No single table could be both.
+// The grid keys arrive as numbers from the API and as strings once they have
+// been round-tripped through JSON, so every read goes through this.
+const LADDER_TPS = [1, 2, 3, 4, 5, 6, 7, 8];
+const ladderCell = (grid, z, k) =>
+  grid?.[z]?.[k] || grid?.[String(z)]?.[String(k)] || [];
+const ladderSet = (grid, z, k) => ladderCell(grid, z, k).length > 0;
+
 function LadderGrid() {
   const [grid, setGrid] = useState(null);
   const [zone, setZone] = useState(2);
@@ -538,7 +545,7 @@ function LadderGrid() {
       .catch((e) => setErr(e.message));
   }, []);
 
-  const cell = grid?.[zone]?.[n] || grid?.[String(zone)]?.[String(n)] || [];
+  const cell = ladderCell(grid, zone, n);
   const setCell = (rows) => {
     setSaved(false);
     setGrid((g) => ({ ...g, [zone]: { ...(g[zone] || g[String(zone)]), [n]: rows } }));
@@ -564,6 +571,61 @@ function LadderGrid() {
         <Button onClick={save} disabled={!grid}>Save grid</Button>
       </div>
 
+      {/* #267: the coverage matrix. An empty cell is legitimate and
+          load-bearing -- it means "no ladder for that signal shape, run the
+          ordinary single-shot entry" -- but until this existed the only way to
+          learn WHICH of the 16 shapes runs a ladder was to click through all
+          sixteen. For a config that silently changes how real orders are
+          placed, that should be a glance. Purely client-side: `api.ladders()`
+          already returns the whole grid and the component was rendering one
+          cell of it. Doubles as navigation. */}
+      {grid && (
+        <div className="space-y-1">
+          <div className="overflow-x-auto">
+            <table className="text-[11px]">
+              <thead>
+                <tr>
+                  <th className="pr-2" />
+                  {LADDER_TPS.map((k) => (
+                    <th key={k} className="px-1.5 text-muted font-medium">{k}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {[1, 2].map((z) => (
+                  <tr key={z}>
+                    <td className="pr-2 text-muted whitespace-nowrap">{z}-Zone</td>
+                    {LADDER_TPS.map((k) => {
+                      const set = ladderSet(grid, z, k);
+                      const here = zone === z && n === k;
+                      return (
+                        <td key={k} className="text-center px-1.5 py-1">
+                          <button
+                            type="button"
+                            onClick={() => { setZone(z); setN(k); }}
+                            aria-label={`${z}-Zone, ${k} TP`}
+                            title={set
+                              ? `${z}-Zone · ${k} TP — a ladder runs`
+                              : `${z}-Zone · ${k} TP — single shot`}
+                            className={`w-2.5 h-2.5 rounded-full inline-block align-middle ${
+                              here ? "ring-2 ring-beacon " : ""
+                            }${set ? "bg-beacon" : "bg-edge"}`}
+                          />
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="text-[11px] text-muted">
+            Filled = a ladder runs for that signal shape · empty = single shot.
+            Click a dot to edit it.
+          </div>
+        </div>
+      )}
+
       <div className="flex items-end gap-3 flex-wrap border-b border-edge pb-3">
         <Field label="Entry shape">
           <Select value={zone} onChange={(e) => setZone(Number(e.target.value))}>
@@ -573,7 +635,7 @@ function LadderGrid() {
         </Field>
         <Field label="Take-profits on the signal">
           <Select value={n} onChange={(e) => setN(Number(e.target.value))}>
-            {[1, 2, 3, 4, 5, 6, 7, 8].map((k) => (
+            {LADDER_TPS.map((k) => (
               <option key={k} value={k}>{k} TP{k === 1 ? "" : "s"}</option>
             ))}
           </Select>
@@ -585,7 +647,7 @@ function LadderGrid() {
 
       <ErrorNote>{err}</ErrorNote>
       {!grid ? <Empty>Loading the grid…</Empty>
-        : <LadderEditor rows={cell} onChange={setCell} />}
+        : <LadderEditor rows={cell} onChange={setCell} zone={zone} tps={n} />}
     </div>
   );
 }
