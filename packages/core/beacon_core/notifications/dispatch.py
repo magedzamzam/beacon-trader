@@ -26,6 +26,10 @@ _EMOJI = {
     "order_placed": "📤", "order_filled": "🟢", "order_cancelled": "⚪",
     "tp_hit": "🎯", "sl_hit": "🔴", "sl_moved": "🛡️", "trade_closed": "🏁",
     "broker_error": "⚠️", "daily_summary": "📊", "arm_dark": "🌑",
+    # #265: a measurement-integrity alarm reads as a chart going flat, not as a
+    # generic bell. Every id in `EVENT_IDS` must have an entry here — the
+    # fallback below is for an unknown id, not for one we forgot to triage.
+    "estimator_degenerate": "📉",
 }
 _DIR_EMOJI = {"BUY": "🔼", "SELL": "🔽"}
 
@@ -91,6 +95,12 @@ def _default_message(event_id: str, ctx: dict) -> tuple[str, str]:
         # three identical headlines and must open each to learn which arm it is
         # (#207). Symbol-bearing events never reach here, so they are unchanged.
         _head += f" {ctx['account']}"
+    elif ctx.get("estimator"):
+        # A measurement-integrity alarm carries neither symbol nor account, so
+        # without this it falls through to a bare label and the ONE thing the
+        # headline must say — which estimator went flat — is buried mid-sentence
+        # inside `detail` (#265, same argument as #207 for symbol-less events).
+        _head += f" {ctx['estimator']}"
     _head += f" — {_label}"
     if _pl not in (None, ""):
         try:
@@ -113,6 +123,7 @@ def _default_message(event_id: str, ctx: dict) -> tuple[str, str]:
     add("TP", ctx.get("tp"))
     add("SL", ctx.get("sl"))
     add("Account", ctx.get("account"))
+    add("Estimator", ctx.get("estimator"))
     add("Source", ctx.get("channel") or ctx.get("source"))
     # Daily digest rows (#198). Absent on every other event, so `add`'s
     # empty-skip keeps the existing messages byte-identical.

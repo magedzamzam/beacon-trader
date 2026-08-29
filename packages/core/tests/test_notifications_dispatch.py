@@ -357,3 +357,37 @@ def test_resolve_channel_passes_plaintext_and_defaults():
     # decrypt() passes through non-`enc:v1:` values unchanged
     assert cfg["smtp_host"] == "smtp.x" and cfg["smtp_port"] == 587
     assert cfg["smtp_password"] == "plaintext-passthrough" and cfg["enabled"] is True
+
+
+# --- #265: the estimator alarm reads like its siblings -------------------------
+def test_every_defined_event_carries_a_triage_emoji():
+    """`_EMOJI.get(event_id, "bell")` is a fallback for an UNKNOWN id, not a
+    licence to forget one. `estimator_degenerate` shipped without an entry and
+    rendered as a generic bell next to siblings that all carry a glyph — this
+    pins the next new event to the same bar."""
+    from beacon_core.notifications.config import EVENT_IDS
+    missing = [e for e in EVENT_IDS if e not in D._EMOJI]
+    assert missing == [], f"events with no triage emoji: {missing}"
+
+
+def test_estimator_degenerate_names_the_estimator_in_the_headline():
+    """The event carries neither symbol nor account, so without a branch of its
+    own the headline says only "Estimator label degenerate" and WHICH estimator
+    went flat is buried mid-sentence inside `detail`. With a second watched
+    label that becomes two identical headlines (#265, the #207 argument)."""
+    head, body = D._default_message(
+        "estimator_degenerate",
+        {"estimator": "regime", "detail": "every one of 117 observations is 'trending'"})
+    assert head.startswith("\U0001f4c9 regime — ")
+    assert "Estimator label degenerate" in head
+    assert "Estimator: regime" in body        # and in the detail block
+
+
+def test_symbol_and_account_events_are_unchanged_by_the_estimator_branch():
+    """The new branch is an `elif` behind both existing ones, so every
+    symbol-bearing and account-bearing event must be byte-identical."""
+    assert D._default_message("arm_dark", {"account": "Account 7", "detail": "x"})[0] \
+        == "\U0001f311 Account 7 — A/B arm not trading"
+    head, _ = D._default_message("tp_hit", {"symbol": "XAUUSD", "direction": "BUY",
+                                            "estimator": "regime", "pl": 12.5})
+    assert head.startswith("\U0001f3af \U0001f53c BUY XAUUSD — ")   # symbol still wins
