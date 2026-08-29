@@ -15,7 +15,7 @@ import httpx
 
 from .base import BrokerAdapter
 from .types import (
-    AccountInfo, AuthError, BrokerError, BrokerInstrument, BrokerOrder,
+    AccountInfo, AuthError, BrokerCandle, BrokerError, BrokerInstrument, BrokerOrder,
     BrokerPosition, BrokerQuote, ClosePositionResult, Direction, ModifyOrderRequest,
     ModifyPositionRequest, NetworkError, NotFoundError, OrderSide,
     OrderStatus, OrderType, PlaceOrderRequest, RateLimitError, to_dec, to_price,
@@ -179,6 +179,101 @@ class CapitalComAdapter(BrokerAdapter):
                 self._sec_token = sec
         except httpx.RequestError as exc:
             log.warning("account switch to %s errored: %s", acct, exc)
+
+    # --- price history (#257) -------------------------------------------------
+    # `scripts/candle_sync.py` used to hand-roll a complete second Capital REST
+    # client - demo/live hostnames, POST /session, CST + X-SECURITY-TOKEN, 401
+    # re-auth, 429 back-off - purely because the adapter had no way to reach
+    # /prices. That put `backend-capital.com` and this broker's session semantics
+    # outside the adapter layer, and its copy was strictly weaker (sys.exit on an
+    # auth failure, and no share of the session/rate-limit budget the executor and
+    # monitor are already accounting for).
+    _PRICES_MAX_RETRIES = 4
+    _PRICES_BACKOFF_BASE = 1.0    # seconds: 1, 2, 4 on a 429
+
+    # Capital's own resolution vocabulary, and how many minutes each spans.
+    RESOLUTIONS = {"MINUTE": 1, "MINUTE_5": 5, "MINUTE_15": 15, "MINUTE_30": 30,
+                   "HOUR": 60, "HOUR_4": 240, "DAY": 1440}
+    _PRICE_TIME_FMT = "%Y-%m-%dT%H:%M:%S"
+
+    @staticmethod
+    def _parse_candle(bar: dict) -> Optional[BrokerCandle]:
+        """One `/prices` element -> `BrokerCandle`, or None if it is not a bar.
+
+        Capital nests each side under `openPrice.bid` / `openPrice.ask` and dates
+        the bar by `snapshotTimeUTC`. Whether a bar is USABLE is not decided here
+        - that is candle-store policy (crossed quotes, `ck_candle_hl`) and lives
+        with the store. This only decides whether the payload is a bar at all."""
+        raw_ts = bar.get("snapshotTimeUTC") or bar.get("snapshotTime")
+        ts = parse_iso_utc(raw_ts)
+        if ts is None:
+            return None
+
+        def side(field: str, which: str):
+            block = bar.get(field) or {}
+            return to_dec(block.get(which)) if isinstance(block, dict) else None
+
+        return BrokerCandle(
+            ts=ts,
+            open_bid=side("openPrice", "bid"), open_ask=side("openPrice", "ask"),
+            high_bid=side("highPrice", "bid"), high_ask=side("highPrice", "ask"),
+            low_bid=side("lowPrice", "bid"), low_ask=side("lowPrice", "ask"),
+            close_bid=side("closePrice", "bid"), close_ask=side("closePrice", "ask"),
+            volume=to_dec(bar.get("lastTradedVolume")),
+            raw=bar,
+        )
+
+    async def fetch_candles(self, broker_symbol: str, resolution: str,
+                            frm: dt.datetime, to: dt.datetime, *,
+                            max_bars: int = 1000) -> List[BrokerCandle]:
+        """GET /prices/{epic} over [frm, to), oldest first.
+
+        An empty list is a normal answer, not a failure: Capital 404s a window
+        with no bars in it, which is every window over a weekend. Retrying that
+        four times only burns rate limit, so it returns immediately - the same
+        judgement the script's own client had reached, kept.
+
+        Times are sent naive-UTC because that is the format Capital's API takes;
+        an aware datetime is converted rather than rejected, so a caller cannot
+        silently ask for the wrong window by passing the wrong kind."""
+        res = (resolution or "MINUTE").upper()
+        if res not in self.RESOLUTIONS:
+            raise BrokerError(f"unknown Capital.com resolution '{resolution}'; "
+                              f"known: {sorted(self.RESOLUTIONS)}")
+
+        def _fmt(v: dt.datetime) -> str:
+            if v.tzinfo is not None:
+                v = v.astimezone(dt.timezone.utc).replace(tzinfo=None)
+            return v.strftime(self._PRICE_TIME_FMT)
+
+        params = {"resolution": res, "max": int(max_bars),
+                  "from": _fmt(frm), "to": _fmt(to)}
+        last: Optional[BrokerError] = None
+        for attempt in range(self._PRICES_MAX_RETRIES):
+            try:
+                data = await self._request(
+                    "GET", f"/api/v1/prices/{broker_symbol}", params=params)
+                break
+            except NotFoundError:
+                return []                      # no bars in this window - normal
+            except RateLimitError as exc:
+                last = exc
+                if attempt < self._PRICES_MAX_RETRIES - 1:
+                    await asyncio.sleep(self._PRICES_BACKOFF_BASE * (2 ** attempt))
+            except NetworkError as exc:
+                last = exc
+                if attempt < self._PRICES_MAX_RETRIES - 1:
+                    await asyncio.sleep(self._PRICES_BACKOFF_BASE * (2 ** attempt))
+        else:
+            log.warning("prices %s %s: %s attempts exhausted",
+                        broker_symbol, res, self._PRICES_MAX_RETRIES)
+            raise last if last else BrokerError("Capital.com /prices unavailable")
+
+        bars = (data or {}).get("prices") or []
+        out = [c for c in (self._parse_candle(b) for b in bars if isinstance(b, dict))
+               if c is not None]
+        out.sort(key=lambda c: c.ts)
+        return out
 
     def _auth_headers(self) -> Dict[str, str]:
         return {

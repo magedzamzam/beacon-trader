@@ -106,6 +106,32 @@ class BrokerQuote:
 
 
 @dataclass
+class BrokerCandle:
+    """One historical bar, bid AND ask, normalised across providers (#257).
+
+    Bid and ask are separate series, not a mid and a spread: the replay harness
+    and the candle store both need to know which side of the book a level came
+    from, and averaging them away is not recoverable. `ts` is the bar's OPEN, UTC.
+
+    `raw` is kept for the same reason every other broker type keeps it - the
+    thing that decides whether a bar is usable (`candle_sync.classify`) is
+    candle-store POLICY and lives above the adapter, so it must be able to see
+    what the provider actually said.
+    """
+    ts: datetime
+    open_bid: Optional[Decimal] = None
+    open_ask: Optional[Decimal] = None
+    high_bid: Optional[Decimal] = None
+    high_ask: Optional[Decimal] = None
+    low_bid: Optional[Decimal] = None
+    low_ask: Optional[Decimal] = None
+    close_bid: Optional[Decimal] = None
+    close_ask: Optional[Decimal] = None
+    volume: Optional[Decimal] = None
+    raw: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class BrokerInstrument:
     broker_symbol: str
     name: str
