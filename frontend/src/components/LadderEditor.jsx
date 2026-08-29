@@ -1,5 +1,6 @@
 import { Plus, Trash2, RotateCcw } from "lucide-react";
 import { Select, NumberInput, Button } from "./form";
+import LadderDiagram from "./LadderDiagram";
 
 /**
  * LadderEditor (#250) — ONE CELL of the global ladder grid, as a table you can read.
@@ -51,7 +52,7 @@ function readback(r) {
   return `When ${label(WHENS, r.when)}, open a ${r.order} at ${label(LEVELS, r.level)} targeting TP${r.target}.`;
 }
 
-export default function LadderEditor({ rows, onChange }) {
+export default function LadderEditor({ rows, onChange, zone = 2, tps }) {
   const list = rows || [];
   const update = (i, patch) => onChange(list.map((r, j) => (j === i ? { ...r, ...patch } : r)));
   const remove = (i) => onChange(list.filter((_, j) => j !== i));
@@ -127,8 +128,25 @@ export default function LadderEditor({ rows, onChange }) {
         </Button>
       </div>
 
-      <div className="rounded-lg border border-edge bg-panel2/40 p-2.5 space-y-1">
-        {list.map((r, i) => <div key={i} className="text-[11px] text-muted">{readback(r)}</div>)}
+      {/* #268: the readback said it, now it also shows it. The prose stays —
+          it is exact, it is what a screen reader gets, and the diagram is a
+          schematic that deliberately carries no prices. */}
+      <div className="rounded-lg border border-edge bg-panel2/40 p-2.5">
+        <div className="flex flex-col md:flex-row md:items-start gap-3">
+          <div className="space-y-1 flex-1 min-w-0">
+            {list.length
+              ? list.map((r, i) => (
+                  <div key={i} className="text-[11px] text-muted">{readback(r)}</div>))
+              : <div className="text-[11px] text-muted">
+                  No rungs — a signal of this shape runs the ordinary single-shot entry.
+                </div>}
+          </div>
+          {!!list.length && (
+            <div className="md:w-auto md:shrink-0">
+              <LadderDiagram rows={list} zone={zone} tps={tps} />
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="text-[11px] text-muted">
