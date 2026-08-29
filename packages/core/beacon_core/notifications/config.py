@@ -176,7 +176,12 @@ def is_quiet_suppressed(event_id: str, policy, now) -> bool:
 
 
 # --- Policy validation (shared by the API write path, #209/#210) --------------
-POLICY_KEYS = ("daily_summary", "arm_dark", "quiet_hours")
+POLICY_KEYS = ("daily_summary", "arm_dark", "quiet_hours", "estimator_health")
+
+
+# The estimator-health alarm's sample floor lives with the estimator that owns
+# it; imported here so the API clamp and the module guard can never disagree.
+from ..analysis.estimators import DEGENERATE_MIN_N as _EST_DEGENERATE_MIN_N
 
 
 def _num(v, default, lo, hi, *, cast=float):
@@ -202,6 +207,18 @@ def clean_policy(key: str, value) -> dict:
         out["cooldown_hours"] = _num(v.get("cooldown_hours", 6), 6, 0.25, 168)
         out["min_signals"] = _num(v.get("min_signals", 10), 10, 1, 1000, cast=int)
         out["threshold"] = _num(v.get("threshold", 0.80), 0.80, 0.0, 1.0)
+    elif key == "estimator_health":
+        # #266: the fourth scheduled job shipped reading `settings_store` with no
+        # API and no UI - the same gap #209/#210 closed for the other three.
+        # Defaults mirror `services/monitor` exactly, so an unset store and a
+        # round-tripped one behave identically.
+        out["window_days"] = _num(v.get("window_days", 7), 7, 1, 90)
+        out["cooldown_hours"] = _num(v.get("cooldown_hours", 24), 24, 0.25, 168)
+        # Floored at the estimator module's own guard: below DEGENERATE_MIN_N one
+        # label is a quiet week, not a defect, so the alarm must not be armable there.
+        out["min_n"] = _num(v.get("min_n", _EST_DEGENERATE_MIN_N),
+                            _EST_DEGENERATE_MIN_N, _EST_DEGENERATE_MIN_N, 100000,
+                            cast=int)
     elif key == "quiet_hours":
         for f, dflt in (("start_utc", "22:00"), ("end_utc", "06:00")):
             got = v.get(f, dflt)

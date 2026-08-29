@@ -513,6 +513,7 @@ function PolicyCard({ catalog }) {
   const digest = p.daily_summary || {};
   const dark = p.arm_dark || {};
   const quiet = p.quiet_hours || {};
+  const est = p.estimator_health || {};
   const sev = catalog?.severity || {};
   const floor = quiet.min_severity || "critical";
   const rank = { info: 0, summary: 1, critical: 2 };
@@ -577,6 +578,35 @@ function PolicyCard({ catalog }) {
             <Field label="Skip-rate threshold" hint="0–1 · default 0.80">
               <NumberInput step="0.05" value={dark.threshold ?? ""} placeholder="0.80"
                 onChange={(e) => set("arm_dark", "threshold", e.target.value)} /></Field>
+          </div>
+        </div>
+
+        {/* estimator-health alarm (#255, surfaced by #266) */}
+        <div className="space-y-3 pt-4 border-t border-edge">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-sm">Estimator went flat</div>
+              <div className="text-xs text-muted">
+                A categorical shadow estimator whose label takes one value across
+                a whole window carries no information &mdash; any analysis
+                conditioned on it is silently unavailable. The regime label has
+                hit this state three separate weeks, each caught by a human
+                mid-report.
+              </div>
+            </div>
+            <Toggle checked={est.enabled !== false}
+              onChange={(v) => set("estimator_health", "enabled", v)} />
+          </div>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <Field label="Window (days)" hint="default 7">
+              <NumberInput value={est.window_days ?? ""} placeholder="7"
+                onChange={(e) => set("estimator_health", "window_days", e.target.value)} /></Field>
+            <Field label="Cooldown (hours)" hint="default 24 — one alert per cooldown">
+              <NumberInput value={est.cooldown_hours ?? ""} placeholder="24"
+                onChange={(e) => set("estimator_health", "cooldown_hours", e.target.value)} /></Field>
+            <Field label="Min observations" hint="default 50 — below this, one label is a quiet week">
+              <NumberInput value={est.min_n ?? ""} placeholder="50"
+                onChange={(e) => set("estimator_health", "min_n", e.target.value)} /></Field>
           </div>
         </div>
 

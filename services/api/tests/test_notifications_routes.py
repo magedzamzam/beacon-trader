@@ -68,7 +68,8 @@ NOTIFICATIONS_JSX = Path(__file__).resolve().parents[3] / "frontend/src/pages/No
 def test_the_policy_route_covers_every_settings_only_knob():
     """A key the monitor or dispatch reads but the API cannot write is exactly
     the silent knob this closes."""
-    assert set(N.notif.POLICY_KEYS) == {"daily_summary", "arm_dark", "quiet_hours"}
+    assert set(N.notif.POLICY_KEYS) == {"daily_summary", "arm_dark", "quiet_hours",
+                                        "estimator_health"}
 
 
 def test_an_unset_policy_reads_as_what_it_actually_does():
@@ -108,3 +109,47 @@ def test_the_card_binds_every_knob_the_backend_accepts():
     for field in ("at_utc", "window_hours", "cooldown_hours", "min_signals",
                   "threshold", "start_utc", "end_utc", "min_severity"):
         assert field in jsx, field
+
+
+# --- #266: the estimator-health alarm gets the surface the other three have ----
+def test_estimator_health_is_a_policy_key_the_client_can_round_trip():
+    """The fourth scheduled job (#255) shipped reading `settings_store` with no
+    API and no UI, so the only way to disable it or widen its window was a raw DB
+    write — the exact gap #209/#210 closed for the other three. It is only fixed
+    if the key is in POLICY_KEYS: GET builds from that tuple and PUT whitelists
+    against it, so an omission is silently un-writable rather than an error."""
+    assert "estimator_health" in N.notif.POLICY_KEYS
+    # opt-OUT in the monitor (`if cfg.get("enabled") is False: return`), so an
+    # unset store must render as ON — like the digest, unlike quiet hours.
+    assert N._POLICY_ON("estimator_health") == {"enabled": True}
+
+
+def test_estimator_health_defaults_match_the_monitor_exactly():
+    """A default that disagrees with `services/monitor` is worse than no screen:
+    it tells the operator a number the alarm is not using."""
+    assert N.notif.clean_policy("estimator_health", {"enabled": True}) == {
+        "enabled": True, "window_days": 7, "cooldown_hours": 24, "min_n": 50}
+
+
+def test_estimator_health_clamps_out_of_range_values():
+    """`min_n` is floored at the estimator module's own DEGENERATE_MIN_N: below
+    it, one label is a quiet week and not a defect, so the alarm must not be
+    armable there from a settings screen."""
+    from beacon_core.analysis.estimators import DEGENERATE_MIN_N
+    out = N.notif.clean_policy("estimator_health",
+                               {"enabled": True, "window_days": 999,
+                                "cooldown_hours": 0.001, "min_n": 3,
+                                "rm -rf": "/"})
+    assert out["window_days"] == 90            # hi clamp
+    assert out["cooldown_hours"] == 0.25       # lo clamp
+    assert out["min_n"] == DEGENERATE_MIN_N == 50
+    assert "rm -rf" not in out                 # whitelist, not a merge
+    low = N.notif.clean_policy("estimator_health", {"window_days": 0})
+    assert low["window_days"] == 1
+    junk = N.notif.clean_policy("estimator_health", {"min_n": "banana"})
+    assert junk["min_n"] == DEGENERATE_MIN_N
+
+
+def test_the_page_renders_an_estimator_health_section():
+    jsx = NOTIFICATIONS_JSX.read_text(encoding="utf-8")
+    assert "estimator_health" in jsx and "Estimator went flat" in jsx
